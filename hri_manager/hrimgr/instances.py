@@ -1046,6 +1046,17 @@ class Manager:
 
     async def _update(self, job: Job, managed: children.Managed, version: str | None, ref: tuple[str, str] | None,
                       user: str, bluetooth: bool | None = None) -> dict:
+        if isinstance(managed.entry.get("updating"), dict):
+            # an earlier update's flag, still set (its record failed): settled first, or this update's own flag, and
+            # its rollback, would lose what it names
+            try:
+                note = await asyncio.to_thread(children.settle_update, self.registry, managed.name, managed.entry,
+                                               managed.marker)
+                managed = await asyncio.to_thread(children.load_managed, self.root, managed.name, self.registry)
+            except (RegistryError, children.NotManaged) as err:
+                raise JobFailed(str(err)) from None
+            if note:
+                job.log(note)
         marker = managed.marker
         channel = marker["channel"]
         restamp = False

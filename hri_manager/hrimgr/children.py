@@ -520,25 +520,40 @@ def _update_unfinished(real_root: str, name: str, registry: Registry | None) -> 
     return marker.get("version") != entry.get("version")
 
 
+def settle_update(registry: Registry, name: str, entry: dict, marker: dict) -> str | None:
+    """An ``updating`` flag left after the swap was undone or committed (no previous definition to put back any more):
+    when the definition in place (``marker``) is the one the flag names (its version, commit and stamping, from the
+    registry itself), the registry records it now; when it is the registry's own, the flag goes.  What was done."""
+    target = entry.get("updating")
+    if not isinstance(target, dict):
+        return None
+    fields = target.get("fields") if isinstance(target.get("fields"), dict) else {}
+
+    def key(d: dict) -> tuple:
+        return d.get("version"), d.get("sha"), d.get("stamp_version")
+
+    if fields and key(marker) == key(fields):
+        registry.update(name, updating=None, **fields)
+        return f"{name}: its update to {fields.get('version')} had finished; the registry records it now"
+    if (marker.get("version"), marker.get("stamp_version")) == (entry.get("version"), entry.get("stamp_version")):
+        registry.update(name, updating=None)
+        return f"{name}: its unfinished update had changed nothing; its flag is cleared"
+    return None
+
+
 def _settle_updates(real_root: str, registry: Registry, done: list[str]) -> None:
-    """An ``updating`` flag left without a previous definition to put back: the update was committed, but the manager
-    stopped (or the registry could not be written) before the registry recorded it.  When the definition in place
-    is the one the flag names (its version and commit, from the registry itself), the registry records it now;
-    when it is the registry's own version, the flag goes."""
+    """settle_update for every flag without a previous definition left (see cleanup_stale)."""
     for name, entry in registry.all().items():
-        target = entry.get("updating")
-        if not isinstance(target, dict) or any(e.startswith(f"{OLD_PREFIX}{name}-") for e in os.listdir(real_root)):
+        if not isinstance(entry.get("updating"), dict) or any(
+                e.startswith(f"{OLD_PREFIX}{name}-") for e in os.listdir(real_root)):
             continue
         try:
             marker = read_marker(os.path.join(real_root, names.folder_name(name)), name)
         except NotManaged:
             continue
-        fields = target.get("fields") if isinstance(target.get("fields"), dict) else {}
-        if (marker.get("version"), marker.get("sha")) == (fields.get("version"), fields.get("sha")) and fields:
-            registry.update(name, updating=None, **fields)
-            done.append(f"{name}: its update to {fields.get('version')} had finished; the registry records it now")
-        elif marker.get("version") == entry.get("version"):
-            registry.update(name, updating=None)
+        note = settle_update(registry, name, entry, marker)
+        if note:
+            done.append(note)
 
 
 def cleanup_stale(root: str, registry: Registry | None = None) -> list[str]:

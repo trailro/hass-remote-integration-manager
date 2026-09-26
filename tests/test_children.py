@@ -318,6 +318,15 @@ class WriteTest(unittest.TestCase):
         self.assertEqual((entry["version"], entry["ref"], entry["updated_by"], entry["updating"]), ("0.25.1", "v0.25.1", "alice", None))
         self.assertEqual(self.read(), b"new")
 
+    def test_a_restamp_stopped_before_its_swap_records_nothing(self):
+        """Same version and commit, a newer stamping: the flag names it, the definition in place is still the old one."""
+        children.write_new(self.root, "garage", build_with({"config.yaml": b"old"}, marker("garage", stamp_version=1)), self.reg)
+        self.reg.update("garage", stamp_version=1, updating={"at": "t", "fields": {"version": "0.25.0", "sha": "a" * 40,
+                                                                                   "stamp_version": 2}})
+        children.cleanup_stale(self.root, self.reg)
+        entry = self.reg.get("garage")
+        self.assertEqual((entry["stamp_version"], entry["updating"]), (1, None))
+
     def test_a_commit_stopped_midway_leaves_nothing_to_put_back(self):
         m = children.write_new(self.root, "garage", build_with({"config.yaml": b"old", "a/b": b"x"}, marker("garage")), self.reg)
         r = children.replace(m, build_with({"config.yaml": b"new"}, marker("garage", version="0.25.1")))
