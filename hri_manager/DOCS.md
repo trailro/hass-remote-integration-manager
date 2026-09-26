@@ -46,11 +46,12 @@ working. It needs HRI 0.26.0 or newer (for a git build, a branch or tag whose `e
 `APP_DYNAMIC_PORT = True`), and changes only with a new version, like Bluetooth. See the README's Host network
 section.
 
-**One integration per instance.** Two instances running the *same* integration cannot share an MQTT broker: HRI's
-base topic and client id are `hass_<domain>`, named after the integration and not a setting, so they would take each
-other's connection and retained data. Give each instance a different integration (two config entries of one
-integration go in one instance), or give each its own broker; per-instance base topics are a possible future HRI
-feature.
+**One integration per instance.** From HRI 0.26.0 each instance derives its MQTT identity from its app's slug, so
+two instances running the *same* integration can share a broker: each publishes under a base topic of its own (see
+HRI's `docs/mqtt.md` for the rule), unless it already published under the integration's plain name, which it keeps.
+With an older HRI the base topic and client id are `hass_<domain>`, named after the integration and not a setting:
+one instance of an integration per broker (two config entries of one integration go in one instance). The manager
+sets nothing for this.
 
 Each instance's options (password, `ingress_users`, ...) are set on that app's own **Configuration** tab, as for the
 single hass-remote-integration app. Its port 8087 is off; map one on its **Network** tab if you want it (not with
