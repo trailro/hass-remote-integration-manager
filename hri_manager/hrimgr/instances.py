@@ -6,7 +6,12 @@ create that fails is rolled back (uninstalled if it got that far, its folder rem
 that fails puts the previous definition back.  Both also when the manager itself is stopped midway (the job's task
 cancelled): the rollback then runs shielded from the cancellation, for at most ``ROLLBACK_BOUND`` seconds, and the
 cancellation goes on.  An install the Supervisor finishes after that is listed as "install interrupted"; an instance
-whose create stopped before its options and start (``setup_complete`` in the registry) gets "Finish setup"."""
+whose create stopped before its options and start (``setup_complete`` in the registry) gets "Finish setup".
+
+Automatic repair: a restore without the local apps folder (a full backup leaves it out on current Supervisors) leaves
+the instances installed and detached.  When the manager starts, and on a list at most every ``AUTO_REPAIR_INTERVAL``
+seconds, every instance of the registry that is installed, detached and has no folder gets its definition written again
+by a repair job (``AUTO_USER``), logged and shown on its row.  Nothing outside the registry is ever repaired."""
 
 from __future__ import annotations
 
@@ -15,11 +20,12 @@ import datetime
 import logging
 import os
 import secrets
+import time
 from typing import Any
 
 from . import VERSION, children, copies, names, stamp, tarsafe
 from .github import GitHub, GitHubError, latest_stable
-from .jobs import Job, JobFailed, Jobs, TagMoved
+from .jobs import Busy, Job, JobFailed, Jobs, TagMoved
 from .registry import Registry, RegistryError
 from .supervisor import NotAllowed, SupervisorClient, SupervisorError
 
@@ -27,6 +33,8 @@ _LOGGER = logging.getLogger(__name__)
 HISTORY = 20
 # the Supervisor stops an app 10 s after SIGTERM by default: a rollback when the manager stops gets less than that
 ROLLBACK_BOUND = 8.0
+AUTO_REPAIR_INTERVAL = 300.0
+AUTO_USER = "automatic repair"
 
 
 class InvalidRequest(ValueError):
@@ -39,7 +47,8 @@ REGISTRY_FIELDS = ("name", "slug", "channel", "version", "ref_kind", "ref", "sha
 
 class Manager:
     def __init__(self, local_apps: str, supervisor: SupervisorClient, github: GitHub, jobs: Jobs, registry: Registry, *,
-                 dev: bool = False, poll_interval: float = 2.0, store_timeout: float = 90.0):
+                 dev: bool = False, poll_interval: float = 2.0, store_timeout: float = 90.0,
+                 auto_repair_interval: float | None = AUTO_REPAIR_INTERVAL):
         self.root = local_apps
         self.sv = supervisor
         self.gh = github
@@ -50,6 +59,10 @@ class Manager:
         self.store_timeout = store_timeout
         # the copies of the instances' definitions, next to the registry in /data (copies.py)
         self.copies_root = os.path.join(os.path.dirname(registry.path), copies.DIR_NAME)
+        # None: no automatic repair (the tests of the manual one)
+        self.auto_repair_interval = auto_repair_interval
+        self._auto_checked: float | None = None
+        self.auto_repairs: dict[str, dict] = {}  # name -> {"job": id, "at": iso} of its last automatic repair
 
     # ------------------------------------------------------------------ reading
 
@@ -91,7 +104,7 @@ class Manager:
         except RegistryError as err:
             _LOGGER.error("%s", err)
             registered = {}
-        out, others, seen = [], [], set()
+        out, others, seen, repairable = [], [], set(), []
         for name, marker, problem in folders:
             slug = names.supervisor_slug(name)
             seen.add(slug)
@@ -117,6 +130,7 @@ class Manager:
                                             "folder?): Repair writes it again")
                     entry["actions"] = ["repair"]
                     out.append(entry)
+                    repairable.append(name)
                 else:
                     others.append({"slug": slug, "name": app.get("name"), "kind": "local", "installed": True,
                                    "state": app.get("state"), "version": app.get("version"),
@@ -129,6 +143,12 @@ class Manager:
                 others.append({"slug": slug, "name": app.get("name"), "kind": kind, "installed": True,
                                "state": app.get("state"), "version": app.get("version"),
                                "update_available": bool(app.get("update_available"))})
+        started = self._auto_repair(repairable)
+        for entry in out:
+            if entry["name"] in started:
+                job = self.jobs.get(started[entry["name"]])
+                entry["job"], entry["actions"] = job.summary(), []
+            entry["auto_repair"] = self._auto_repair_note(entry["name"])
         infos = await asyncio.gather(*(self._info(e["slug"]) for e in out if e["installed"]))
         by_slug = {i.get("slug"): i for i in infos if i}
         for entry in out:
@@ -139,6 +159,45 @@ class Manager:
                 entry["watchdog"] = info.get("watchdog")
                 entry["boot"] = info.get("boot")
         return {"instances": out, "others": others, "latest_release": latest["version"] if latest else None}
+
+    def _auto_repair(self, names_: list[str]) -> dict[str, str]:
+        """Start a repair job for each of ``names_`` (instances of the registry, installed, detached, without a
+        folder), at most once every ``auto_repair_interval`` seconds: {name: job id} of those started."""
+        now = time.monotonic()
+        if self.auto_repair_interval is None or (
+                self._auto_checked is not None and now - self._auto_checked < self.auto_repair_interval):
+            return {}
+        self._auto_checked = now
+        started = {}
+        for name in names_:
+            try:
+                job = self.jobs.start(name, "repair", AUTO_USER, lambda job, name=name: self._auto_repair_job(job, name))
+            except Busy:
+                continue
+            _LOGGER.warning("instance %s is installed but detached, its definition gone (a restore without the local "
+                            "apps folder?): writing it again automatically (job %s)", name, job.id)
+            self.auto_repairs[name] = {"job": job.id, "at": children.now_iso()}
+            started[name] = job.id
+        return started
+
+    async def _auto_repair_job(self, job: Job, name: str) -> dict:
+        job.log("started automatically: the instance is installed, detached and its definition folder is gone")
+        return await self._repair(job, name, AUTO_USER)
+
+    def _auto_repair_note(self, name: str) -> dict | None:
+        """What the row shows of the instance's last automatic repair, while the manager remembers its job."""
+        known = self.auto_repairs.get(name)
+        job = self.jobs.get(known["job"]) if known else None
+        if job is None:
+            return None
+        return {"at": known["at"], "job": job.id, "state": job.state, "error": job.error}
+
+    async def auto_repair_check(self) -> None:
+        """The check when the manager starts: the list, which starts the automatic repairs."""
+        try:
+            await self.instances()
+        except (SupervisorError, NotAllowed, RegistryError) as err:
+            _LOGGER.warning("the automatic repair check at start did not run: %s", err)
 
     async def _info(self, slug: str) -> dict | None:
         try:
@@ -162,7 +221,7 @@ class Manager:
             "ref_kind": marker.get("ref_kind") if marker else None,
             "sha": marker.get("sha") if marker else None,
             "newer_release": None, "problem": None, "ingress_url": None, "ingress_panel": False,
-            "job": job.summary() if job else None, "actions": [],
+            "job": job.summary() if job else None, "actions": [], "auto_repair": None,
         }
         if marker is None:
             return entry

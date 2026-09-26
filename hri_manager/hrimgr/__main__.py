@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import sys
@@ -46,8 +47,11 @@ def main() -> int:
         manager = Manager(settings.local_apps, sv, gh, jobs, registry, dev=settings.dev)
         users = CoreUsers(settings.core_ws_url, settings.supervisor_token)
         app = create_app(settings, manager, users)
+        background: list[asyncio.Task] = []
 
         async def close(_app: web.Application) -> None:
+            for task in background:
+                task.cancel()
             for job in jobs.recent():
                 if job.task and not job.task.done():
                     job.task.cancel()
@@ -59,6 +63,9 @@ def main() -> int:
         async def report(_app: web.Application) -> None:
             for name in manager.pending_setup():
                 log.warning("instance %s: its create stopped before its setup finished; the page offers Finish setup", name)
+            # instances left detached by a restore get their definitions written again (in the background: the page
+            # is served meanwhile)
+            background.append(asyncio.get_running_loop().create_task(manager.auto_repair_check()))
 
         app.on_startup.append(report)
         app.on_cleanup.append(close)
