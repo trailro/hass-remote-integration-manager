@@ -437,6 +437,7 @@ class Manager:
                 f"{self._decoy_text(decoyed)}; the Supervisor may have installed {managed.slug} from it, so the "
                 "manager could not check it"))
         await asyncio.to_thread(self.registry.update, managed.name, tampered=None)
+        self._unrecorded_marks.pop(managed.name, None)
         await self._boot_back(job, managed, managed.entry.get("tampered"))
         return {"checked": managed.slug}
 
@@ -1088,6 +1089,7 @@ class Manager:
         entry = self.registry.get(name)
         if entry and entry.get("instance_id") == instance_id:
             self.registry.remove(name)
+            self._unrecorded_marks.pop(name, None)
             self._clear_auto(name)
             try:
                 copies.remove(self.copies_root, name)
@@ -1264,6 +1266,7 @@ class Manager:
             job.log("starting")
             await self.sv.start(managed)
         await asyncio.to_thread(self.registry.update, managed.name, setup_complete=True, tampered=None)
+        self._unrecorded_marks.pop(managed.name, None)  # a mark only memory held goes with the registry's
 
     @staticmethod
     async def _shielded(job: Job, coro, what: str) -> None:
@@ -2146,10 +2149,12 @@ class Manager:
             raise self._tampered(managed, str(err), mark, "") from None
         if missing:
             raise await self._hold(job, managed, missing)
-        if entry.get("tampered") is not None:
+        mark = entry.get("tampered") or self._unrecorded_marks.get(name)
+        if mark is not None:
             await asyncio.to_thread(self.registry.update, name, tampered=None)
+            self._unrecorded_marks.pop(name, None)
             job.log("checked: the mark goes")
-            await self._boot_back(job, managed, entry.get("tampered"))
+            await self._boot_back(job, managed, mark)
         return {"slug": slug, "version": version}
 
     async def _update_detached(self, job: Job, name: str, version: str | None, ref: tuple[str, str] | None,

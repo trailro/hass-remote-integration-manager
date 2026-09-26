@@ -206,6 +206,25 @@ class FlowBase(unittest.IsolatedAsyncioTestCase):
     def called(self, path: str, since: int = 0) -> bool:
         return any(m == "POST" and p == path for m, p, _ in self.env.stub.calls[since:])
 
+    def restarted(self) -> instances.Manager:
+        """The manager started again: a new process, with its /data and the local apps folder, nothing in memory."""
+        from hrimgr.jobs import Jobs
+        env = self.env
+        return instances.Manager(env.local_apps, env.sv, env.gh, Jobs(), env.registry, dev=True, poll_interval=0.02,
+                                 store_timeout=2, auto_repair_interval=None)
+
+    def full_disk_for_marks(self):
+        """A registry that cannot record a mark (a full /data), and records everything else."""
+        env = self.env
+        update = env.registry.update
+
+        def full_disk(name, **fields):
+            if isinstance(fields.get("tampered"), dict):
+                raise instances.RegistryError("the manager's registry cannot be written: No space left on device")
+            return update(name, **fields)
+
+        return mock.patch.object(env.registry, "update", side_effect=full_disk)
+
 
 class FlowCheckTest(FlowBase):
 
@@ -385,11 +404,12 @@ class FlowCheckTest(FlowBase):
             self.assertEqual(status, 400, answer)
             self.assertIn("is marked", answer["error"])
         self.assertIsNone(env.registry.get("garage").get("tampered"))
-        # a new start of the manager (the registry writable again) finds the marker's trace and contains it again
-        env.manager._unrecorded_marks.clear()
-        notes = await env.manager.startup()
+        # a new start of the manager (a new process: nothing in memory; the registry writable again) finds the
+        # marker's trace and contains it again
+        restarted = self.restarted()
+        notes = await restarted.startup()
         self.assertIn("containing it again", " ".join(notes))
-        await env.manager.jobs.wait_all()
+        await restarted.jobs.wait_all()
         self.assertNotIn("local_hri_garage", env.stub.installed)
         self.assertTrue(env.registry.get("garage")["tampered"]["uninstalled"])
 
@@ -420,6 +440,22 @@ class FlowCheckTest(FlowBase):
         await env.manager.startup()  # the next start puts the previous definition back
         self.assertEqual(sorted(os.listdir(env.local_apps)), ["hri_garage"])
         self.assertEqual(self.config()["version"], "0.25.0")
+
+    async def test_a_passing_check_clears_a_mark_the_registry_could_not_record(self):
+        """F2: a hold whose mark only the manager's memory holds (a full /data) is cleared by a Check again that passes,
+        as the registry's is: Start is not refused until the manager restarts."""
+        env = self.env
+        self.assertEqual((await self.create())["state"], "succeeded")
+        with self.full_disk_for_marks(), self.unreported("host_dbus"):
+            job = await env.job(await env.send("POST", "/api/instances/garage/update", {"version": "0.25.1"}))
+        self.assertIn("does not report host_dbus", job["error"])
+        self.assertIsNone(env.registry.get("garage").get("tampered"))  # in memory only
+        status, answer = await env.send("POST", "/api/instances/garage/start")
+        self.assertEqual(status, 400, answer)
+        job = await env.job(await env.send("POST", "/api/instances/garage/finish"))  # Check again, reported again
+        self.assertEqual(job["state"], "succeeded", job)
+        job = await env.job(await env.send("POST", "/api/instances/garage/restart"))
+        self.assertEqual(job["state"], "succeeded", job)
 
     async def test_a_containment_cut_short_by_a_stop_says_so_and_the_next_start_finishes_it(self):
         env = self.env
