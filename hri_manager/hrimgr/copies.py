@@ -114,10 +114,11 @@ def read_definition(instance_folder: str, channel: str) -> dict[str, bytes]:
     return files
 
 
-def save(root: str, name: str, files: dict[str, bytes], marker: dict, bluetooth: bool = False) -> list[str]:
+def save(root: str, name: str, files: dict[str, bytes], marker: dict, bluetooth: bool = False, *,
+         host_network: bool = False) -> list[str]:
     """Keep what ``is_copied`` names of ``files`` (the bytes the manager's build wrote into the instance's folder,
     never read back from that folder, which others can write) as ``root/<name>``, replacing any earlier copy.
-    Returns the files copied.  ``bluetooth``: the registry's choice for the instance."""
+    Returns the files copied.  ``bluetooth``, ``host_network``: the registry's choices for the instance."""
     channel = marker.get("channel")
     files = {rel: data for rel, data in files.items() if is_copied(rel, channel)}
     if "config.yaml" not in files:
@@ -130,7 +131,7 @@ def save(root: str, name: str, files: dict[str, bytes], marker: dict, bluetooth:
         config = yaml.safe_load(files["config.yaml"].decode("utf-8"))
     except (UnicodeDecodeError, yaml.YAMLError, RecursionError) as err:  # nested past Python's recursion limit
         raise CopyError(f"its config.yaml cannot be read: {str(err)[:300]}") from None
-    check(config, name, str(marker.get("version")), channel, bluetooth)
+    check(config, name, str(marker.get("version")), channel, bluetooth, host_network=host_network)
     for rel, data in files.items():
         if rel != "config.yaml":
             check_file(rel, data)
@@ -223,16 +224,25 @@ def check_file(rel: str, data: bytes) -> None:
             raise CopyError(f"its {rel} is not a mapping")
 
 
-def check(config: object, name: str, version: str, channel: str, bluetooth: bool = False) -> dict:
+def check(config: object, name: str, version: str, channel: str, bluetooth: bool = False, *,
+          host_network: bool = False) -> dict:
     """An instance's stamped definition, exactly as this manager writes it: its slug and version, HRI's url, the image
     only for a release, every other key vetted as HRI's own template is (stamp.vet_template), and stamping it again
     changes nothing (no name, panel title, port, backup_exclude entry or key stamping would not have written).
-    ``host_dbus: true`` exactly when ``bluetooth`` (the registry's choice): never otherwise."""
+    ``host_dbus: true`` exactly when ``bluetooth`` (the registry's choice): never otherwise; ``host_network: true`` and
+    ``ingress_port: 0`` exactly when ``host_network``."""
     if not isinstance(config, dict):
         raise CopyError("its config.yaml is not a mapping")
     template = dict(config)
     if bluetooth and template.pop("host_dbus", None) is not True:
         raise CopyError("its config.yaml lacks host_dbus: true, which the instance's Bluetooth needs")
+    if host_network:
+        if template.pop("host_network", None) is not True or type(template.get("ingress_port")) is not int \
+                or template["ingress_port"] != 0:
+            raise CopyError("its config.yaml lacks host_network: true and ingress_port: 0, which the instance's Host "
+                            "network needs")
+        # HRI's own port, which stamping replaced: any the template may have, as stamping puts 0 back
+        template["ingress_port"] = 1
     shown_version = config.get("version")  # a scalar before str(): an aliased list would be spelled out whole
     if (config.get("slug") != names.config_slug(name) or not isinstance(shown_version, (str, int, float))
             or str(shown_version) != version):
@@ -243,7 +253,8 @@ def check(config: object, name: str, version: str, channel: str, bluetooth: bool
         raise CopyError("its config.yaml does not match its channel (image)")
     try:
         stamp.vet_template({**template, "slug": names.HRI_SLUG})
-        restamped = stamp.stamp({**template, "slug": names.HRI_SLUG}, name, version, channel, bluetooth)
+        restamped = stamp.stamp({**template, "slug": names.HRI_SLUG}, name, version, channel, bluetooth,
+                                host_network=host_network)
         same = restamped == config
     # KeyError: stamping needs backup_exclude; RecursionError: a comparison of values nested past Python's limit
     except (stamp.TemplateError, ValueError, TypeError, AttributeError, KeyError, RecursionError) as err:
@@ -295,5 +306,6 @@ def load(root: str, name: str, entry: dict, installed_version: str) -> Copy:
         config = yaml.safe_load(files["config.yaml"].decode("utf-8")) if "config.yaml" in files else None
     except (OSError, UnicodeDecodeError, yaml.YAMLError, RecursionError) as err:
         raise CopyError(f"it cannot be read: {str(err)[:300]}") from None
-    check(config, name, installed_version, channel, entry.get("bluetooth") is True)
+    check(config, name, installed_version, channel, entry.get("bluetooth") is True,
+          host_network=entry.get("host_network") is True)
     return Copy(meta=meta, config=config, files=files)

@@ -19,6 +19,7 @@ import argparse
 import asyncio
 import json
 import pathlib
+import re
 import secrets
 
 import yaml
@@ -128,6 +129,10 @@ class Stub:
         # what the store reports of a definition over what its config.yaml says (a definition changed between the
         # manager's last look and the Supervisor's reading of it), and what an install or update then installs
         self.hri_fixture = FIXTURES  # the app/ template HRI's archives carry (tests/fixtures/hri_v*)
+        # branches and tags (short names) whose tree reads the ingress port the Supervisor gives it (entrypoint.py's
+        # APP_DYNAMIC_PORT), as every release tag from 0.26.0 on does; and the commits served with it
+        self.dynamic_port_refs: set[str] = set()
+        self.dynamic_port_commits: set[str] = set()
         self.store_override: dict[str, dict] = {}
         self.install_override: dict[str, dict] = {}
 
@@ -386,16 +391,23 @@ class Stub:
         """Full refs, and a commit served before by one (the manager asks for a commit only in a Repair, the one it
         recorded); never a short name or a pull request."""
         if ref in self.commits:
-            return make_tarball(f"hass-remote-integration-{ref[:7]}", hri_files("0.25.0", self.hri_fixture), ref)
+            return make_tarball(f"hass-remote-integration-{ref[:7]}",
+                                hri_files("0.25.0", self.hri_fixture, ref in self.dynamic_port_commits), ref)
         sha = self.ref_sha(ref)
         if sha is None:
             return None
         self.commits.add(sha)
+        short = ref.split("/", 2)[-1]
+        release = re.fullmatch(r"refs/tags/v(\d+)\.(\d+)\.(\d+)", ref) if ref[len("refs/tags/v"):] in self.releases else None
+        dynamic = short in self.dynamic_port_refs or bool(release and tuple(map(int, release.groups())) >= (0, 26, 0))
+        if dynamic:
+            self.dynamic_port_commits.add(sha)
         if ref.startswith("refs/tags/v"):
             version = ref[len("refs/tags/v"):]
             # at a release tag HRI's app/config.yaml still names the previous version
-            return make_tarball(f"hass-remote-integration-{version}", hri_files("0.24.0", self.hri_fixture), sha)
-        return make_tarball(f"hass-remote-integration-{ref.rsplit('/', 1)[-1]}", hri_files("0.25.0", self.hri_fixture), sha)
+            return make_tarball(f"hass-remote-integration-{version}", hri_files("0.24.0", self.hri_fixture, dynamic), sha)
+        return make_tarball(f"hass-remote-integration-{ref.rsplit('/', 1)[-1]}",
+                            hri_files("0.25.0", self.hri_fixture, dynamic), sha)
 
     async def codeload(self, request):
         self.codeload_paths.append(request.match_info["ref"])

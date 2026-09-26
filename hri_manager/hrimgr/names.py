@@ -21,6 +21,9 @@ HRI_URL = f"https://github.com/{HRI_REPO}"
 HRI_SLUG = "hass_remote_integration"
 # the first HRI release that runs as an app with ingress and reads its options
 MIN_VERSION = (0, 25, 0)
+# the first HRI release that reads the ingress port the Supervisor gives it (ingress_port: 0), which an instance on the
+# host's network needs (stamp.stamp's host_network)
+DYNAMIC_PORT_VERSION = (0, 26, 0)
 
 # HRI's release tags: v0.25.0, and pre-releases the way Home Assistant writes them (v0.26.0b1, v0.26.0rc1).  ASCII:
 # \d would take any Unicode digit ("٠.٢٥.١"), which int() reads and GitHub has no tag of
@@ -106,6 +109,12 @@ def supported_version(version: str) -> bool:
     """0.25.0 or newer; a pre-release of 0.25.0 is older than 0.25.0."""
     parsed = parse_version(version)
     return parsed is not None and parsed >= (*MIN_VERSION, 1, 0)
+
+
+def reads_dynamic_port(version: str) -> bool:
+    """DYNAMIC_PORT_VERSION or newer; a pre-release of it is older."""
+    parsed = parse_version(version)
+    return parsed is not None and parsed >= (*DYNAMIC_PORT_VERSION, 1, 0)
 
 
 def validate_ref(kind: object, ref: object) -> tuple[str, str]:
