@@ -30,14 +30,14 @@ class SettingsError(Exception):
 
 @dataclass
 class Settings:
-    supervisor_token: str
+    supervisor_token: str = field(repr=False)
     supervisor_url: str = supervisor.DEFAULT_URL
     local_apps: str = "/local_apps"
     data_dir: str = "/data"
     port: int = INGRESS_PORT
     peers: frozenset[str] = frozenset({SUPERVISOR_PEER})
     allowed_users: frozenset[str] = frozenset()
-    github_token: str = ""
+    github_token: str = field(default="", repr=False)
     github_api: str = github.API_URL
     codeload: str = github.CODELOAD_URL
     debug: bool = False
@@ -108,18 +108,45 @@ def from_environment(env: dict[str, str] | None = None) -> Settings:
     return settings
 
 
+LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s: %(message)s"
+
+
+def _redact(text: str, secrets: tuple[str, ...]) -> str:
+    for s in secrets:
+        text = text.replace(s, "***")
+    return text
+
+
 class Redact(logging.Filter):
-    """Keeps the tokens out of every log line, whatever the formatting."""
+    """Keeps the tokens out of a record's message, for any handler; never raises (a record whose message cannot be
+    built is left to the formatter, which redacts its whole output)."""
 
     def __init__(self, secrets: tuple[str, ...]):
         super().__init__()
         self._secrets = tuple(s for s in secrets if len(s) >= 6)
 
     def filter(self, record: logging.LogRecord) -> bool:
-        if self._secrets:
+        if not self._secrets:
+            return True
+        try:
             message = record.getMessage()
             if any(s in message for s in self._secrets):
-                for s in self._secrets:
-                    message = message.replace(s, "***")
-                record.msg, record.args = message, None
+                record.msg, record.args = _redact(message, self._secrets), None
+        except Exception:  # noqa: BLE001 - a log call with bad arguments must not break the caller
+            pass
         return True
+
+
+class RedactingFormatter(logging.Formatter):
+    """Formats a record, then removes the tokens from all of it: the message, the traceback (``exc_text``), the stack."""
+
+    def __init__(self, secrets: tuple[str, ...], fmt: str = LOG_FORMAT):
+        super().__init__(fmt)
+        self._secrets = tuple(s for s in secrets if len(s) >= 6)
+
+    def format(self, record: logging.LogRecord) -> str:
+        try:
+            text = super().format(record)
+        except Exception:  # noqa: BLE001
+            text = f"{record.levelname} {record.name}: a log line that could not be formatted ({record.msg!r:.200})"
+        return _redact(text, self._secrets)

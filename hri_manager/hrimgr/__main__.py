@@ -14,13 +14,13 @@ from .github import GitHub
 from .instances import Manager
 from .jobs import Jobs
 from .registry import FILE_NAME, Registry
-from .settings import Redact, SettingsError, from_environment
+from .settings import LOG_FORMAT, Redact, RedactingFormatter, SettingsError, from_environment
 from .supervisor import SupervisorClient
 from .web import create_app
 
 
 def main() -> int:
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s", stream=sys.stdout)
+    logging.basicConfig(level=logging.INFO, format=LOG_FORMAT, stream=sys.stdout)
     try:
         settings = from_environment()
     except SettingsError as err:
@@ -29,6 +29,7 @@ def main() -> int:
     root = logging.getLogger()
     for handler in root.handlers:
         handler.addFilter(Redact(settings.secrets))
+        handler.setFormatter(RedactingFormatter(settings.secrets))
     if settings.debug:
         root.setLevel(logging.DEBUG)
     log = logging.getLogger("hrimgr")

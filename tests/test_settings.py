@@ -1,12 +1,13 @@
 """Settings from the app's options and environment; development mode cannot be reached from the app."""
 
+import io
 import json
 import logging
 import os
 import unittest
 
 from hrimgr import settings as settings_mod
-from hrimgr.settings import Redact, SettingsError, from_environment
+from hrimgr.settings import Redact, RedactingFormatter, SettingsError, from_environment
 
 from .helpers import tmpdir
 
@@ -58,6 +59,33 @@ class SettingsTest(unittest.TestCase):
         record = logging.LogRecord("x", logging.INFO, __file__, 1, "calling with %s and %s", ("tok3n-supervisor", "ghp_abcdef"), None)
         Redact(("tok3n-supervisor", "ghp_abcdef")).filter(record)
         self.assertEqual(record.getMessage(), "calling with *** and ***")
+
+    def test_tokens_are_not_in_the_settings_repr(self):
+        s = settings_mod.Settings(supervisor_token="tok3n-supervisor", github_token="ghp_abcdef123")
+        self.assertNotIn("tok3n-supervisor", repr(s))
+        self.assertNotIn("ghp_abcdef123", repr(s))
+
+    def test_tracebacks_are_redacted_and_the_filter_never_raises(self):
+        secrets = ("tok3n-supervisor",)
+        buf = io.StringIO()
+        handler = logging.StreamHandler(buf)
+        handler.addFilter(Redact(secrets))
+        handler.setFormatter(RedactingFormatter(secrets))
+        log = logging.getLogger("hri-mgr-test-redact")
+        log.addHandler(handler)
+        log.propagate = False
+        self.addCleanup(log.removeHandler, handler)
+        try:
+            raise RuntimeError("the Supervisor refused tok3n-supervisor")
+        except RuntimeError:
+            log.exception("failed")
+        log.warning("bad %d arguments with tok3n-supervisor", "x")  # a log call whose message cannot be built
+        record = logging.LogRecord("x", logging.INFO, __file__, 1, "%d", ("x",), None)
+        self.assertTrue(Redact(secrets).filter(record))
+        out = buf.getvalue()
+        self.assertIn("RuntimeError", out)
+        self.assertNotIn("tok3n-supervisor", out)
+        self.assertIn("could not be formatted", out)
 
 
 if __name__ == "__main__":
