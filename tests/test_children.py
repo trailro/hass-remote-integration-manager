@@ -2,6 +2,7 @@
 
 import json
 import os
+import stat
 import unittest
 from unittest import mock
 
@@ -59,6 +60,19 @@ class MarkerTest(unittest.TestCase):
         self.assertEqual(oct(os.stat(reg.path).st_mode & 0o777), "0o600")
         reg.remove("garage")
         self.assertIsNone(reg.get("garage"))
+
+    def test_the_registry_s_rename_is_made_durable(self):
+        """fsync of the file, then of its folder after the rename: the rename survives a power loss."""
+        reg = Registry(os.path.join(tmpdir(self), "instances.json"))
+        synced, real_fsync = [], os.fsync
+
+        def fsync(fd):
+            synced.append("folder" if stat.S_ISDIR(os.fstat(fd).st_mode) else "file")
+            real_fsync(fd)
+
+        with mock.patch("os.fsync", side_effect=fsync):
+            reg.put("garage", {"name": "garage"})
+        self.assertEqual(synced, ["file", "folder"])
 
     def test_what_is_not_managed(self):
         cases = {
