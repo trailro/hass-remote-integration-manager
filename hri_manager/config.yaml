@@ -1,0 +1,39 @@
+# HRI Manager: creates, updates and removes instances of hass-remote-integration as local apps.  Reference: DOCS.md
+# and the README.
+name: HRI Manager
+version: "0.1.0"
+slug: hri_manager
+description: Run several hass-remote-integration instances on one Home Assistant OS, one integration each
+url: https://github.com/trailro/hass-remote-integration-manager
+# experimental in 0.1.0: the manager holds the manager role and writes local apps; it earns "stable" after a
+# release cycle on real installs
+stage: experimental
+# the same floor as hass-remote-integration, whose instances this creates
+homeassistant: "2025.10.0"
+arch:
+  - aarch64
+  - amd64
+# No image: the Supervisor builds this folder's Dockerfile on the device (a small Python image, built once per
+# version).  Published images are on the roadmap: they need a registry workflow and move the version the same way
+# HRI's Image workflow does.
+#
+# The manager role is what installing, updating and removing local apps needs.  It also allows much more (any app,
+# backups, the host): the code restricts itself to an allow-list of calls (hrimgr/supervisor.py), and changes only
+# the apps it created, recognised by the marker in their folder
+hassio_api: true
+hassio_role: manager
+# the local apps folder, where each instance's definition is written (hri_<name>/)
+map:
+  - type: local_apps
+    read_only: false
+# the UI is the sidebar panel only: no port is published, and the app serves only requests the Supervisor proxies
+ingress: true
+panel_icon: mdi:server-network
+panel_title: HRI Manager
+options:
+  allowed_users: []
+  debug: false
+schema:
+  allowed_users: ["str?"]
+  github_token: password?
+  debug: bool

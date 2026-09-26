@@ -1,0 +1,10 @@
+configuration:
+  allowed_users:
+    name: Home Assistant users
+    description: Only these Home Assistant users (their user names) may use the manager's panel. Empty means every Home Assistant user who can open it; the panel shows for administrators.
+  github_token:
+    name: GitHub token
+    description: Optional. A token without scopes raises GitHub's rate limit for the release list (60 an hour per address without one). Sent only to api.github.com.
+  debug:
+    name: Debug logging
+    description: More detail in the app's log.
