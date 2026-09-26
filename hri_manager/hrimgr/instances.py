@@ -335,27 +335,31 @@ class Manager:
         }
         if marker is None:
             return entry
+        # the newer of the definition and the installed app: an update the manager stopped waiting for can leave the
+        # app newer than its definition (as _update's downgrade check)
+        current = max((marker.get("version"), app.get("version") if app else None), key=lambda v: names.parse_version(v) or ())
         if (marker.get("channel") == "release" and latest
-                and (names.parse_version(latest["version"]) or ()) > (names.parse_version(marker.get("version")) or ())):
+                and (names.parse_version(latest["version"]) or ()) > (names.parse_version(current) or ())):
             entry["newer_release"] = latest["version"]
-        actions = []
+        actions, problems = [], []
         if known and known.get("tag_moved"):
-            entry["problem"] = str(known["tag_moved"])[:300]
+            problems.append(str(known["tag_moved"])[:300])
         if known and isinstance(known.get("tampered"), dict):
-            entry["problem"] = f"uninstalled by the manager: {str(known['tampered'].get('reason'))[:300]}"
+            problems.append(f"uninstalled by the manager: {str(known['tampered'].get('reason'))[:300]}")
         if app is None:
-            entry["problem"] = "defined, but not installed: Install installs and starts it"
+            problems.append("defined, but not installed: Install installs and starts it")
             actions.append("install")
         else:
             if known is not None and not known.get("setup_complete"):
-                entry["problem"] = ("its setup was interrupted: Finish setup turns on start at boot, the Watchdog and "
-                                    "the sidebar panel, and starts it")
+                problems.append("its setup was interrupted: Finish setup turns on start at boot, the Watchdog and the "
+                                "sidebar panel, and starts it")
                 actions.append("finish")
             state = app.get("state")
             actions += ["restart", "stop"] if state == "started" else ["start"]
             actions.append("update")
         actions.append("delete")
         entry["actions"] = actions
+        entry["problem"] = "; ".join(problems) or None
         return entry
 
     # ------------------------------------------------------------------ validation (before a job starts)

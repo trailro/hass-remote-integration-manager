@@ -189,7 +189,10 @@ class FlowCheckTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sorted(os.listdir(env.local_apps)), ["hri_garage"])
         self.assertIn("docker_api", env.registry.get("garage")["tampered"]["reason"])
         _, data = await env.get("/api/instances")
-        self.assertIn("install", data["instances"][0]["actions"])
+        (inst,) = data["instances"]
+        self.assertIn("install", inst["actions"])
+        self.assertIn("uninstalled by the manager", inst["problem"])
+        self.assertIn("defined, but not installed", inst["problem"])
         env.stub.install_override.clear()
         job = await env.job(await env.send("POST", "/api/instances/garage/install"))
         self.assertEqual(job["state"], "succeeded", job)
