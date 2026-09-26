@@ -123,7 +123,7 @@ TEMPLATE_KEYS: dict[str, Any] = {
     "description": _string,
     "url": lambda v: v == names.HRI_URL,
     "homeassistant": _match(r"[0-9]{4}\.[0-9]{1,2}\.[0-9]{1,3}"),
-    "arch": lambda v: isinstance(v, list) and bool(v) and all(a in ARCHES for a in v),
+    "arch": lambda v: isinstance(v, list) and bool(v) and all(isinstance(a, str) and a in ARCHES for a in v),
     "image": lambda v: v == HRI_IMAGE,
     "timeout": _int_in(10, 300),
     "map": _map,
@@ -143,14 +143,17 @@ TEMPLATE_KEYS: dict[str, Any] = {
 
 
 def vet_template(data: dict) -> None:
-    """Refuse a template with a key this manager does not know, or a value outside the range vetted for it."""
+    """Refuse a template with a key this manager does not know, or a value outside the range vetted for it.  The
+    refusal names the key and the value's type, never the value: YAML aliases make a value of a few hundred bytes
+    that str() spells out in exponential time and memory."""
     for key, value in data.items():
         check = TEMPLATE_KEYS.get(key) if isinstance(key, str) else None
         if check is None:
-            raise TemplateError(f"HRI's app definition has {str(key)[:60]!r}, which this manager version does not "
-                                "accept; update the manager")
+            shown = repr(key[:60]) if isinstance(key, str) else f"a key of type {type(key).__name__}"
+            raise TemplateError(f"HRI's app definition has {shown}, which this manager version does not accept; "
+                                "update the manager")
         if not check(value):
-            raise TemplateError(f"HRI's app definition has {key}: {str(value)[:80]!r}, a value this manager version "
+            raise TemplateError(f"HRI's app definition has {key}: a {type(value).__name__} value this manager version "
                                 "does not accept; update the manager")
 
 

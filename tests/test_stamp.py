@@ -2,11 +2,12 @@
 instance folder: a release (the template and app files) and a git build (the whole tree, with no second config.*)."""
 
 import os
+import time
 import unittest
 
 import yaml
 
-from hrimgr import names, stamp, tarsafe
+from hrimgr import copies, names, stamp, tarsafe
 
 from .fakes.tarballs import hri_files, make_tarball, sha_of
 from .helpers import FIXTURE_CONFIG, tmpdir
@@ -140,6 +141,79 @@ class StampTest(unittest.TestCase):
         self.assertEqual(yaml.safe_load(raw), out)
         self.assertEqual(yaml.safe_load(stamp.dump({"version": "1.0", "x": "yes", "n": "null"}, "t")),
                          {"version": "1.0", "x": "yes", "n": "null"})  # strings stay strings
+
+
+def alias_bomb(levels: int) -> str:
+    """A YAML sequence of a few hundred bytes whose last item spells out as 2**levels items (nested aliases)."""
+    return "[" + ", ".join(["&a0 [x, x]"] + [f"&a{i} [*a{i - 1}, *a{i - 1}]" for i in range(1, levels)]) + "]"
+
+
+class AliasTest(unittest.TestCase):
+    """A refusal never spells a value out: str() of nested aliases takes time and memory doubling per level, and the
+    template (HRI upstream) and the copy in /data (from a folder others can write) are both read with aliases."""
+
+    LEVELS = 25  # about 30 million items spelled out; a refusal must not notice
+
+    def refused_quickly(self, call) -> Exception:
+        start = time.monotonic()
+        with self.assertRaises(Exception) as ctx:
+            call()
+        self.assertLess(time.monotonic() - start, 0.1)
+        return ctx.exception
+
+    def test_a_template_with_a_nested_alias_map_is_refused_at_once(self):
+        doc = yaml.safe_dump({k: v for k, v in template().items() if k != "map"}) + f"map: {alias_bomb(self.LEVELS)}\n"
+        err = self.refused_quickly(lambda: stamp.parse_template(doc.encode()))
+        self.assertIsInstance(err, stamp.TemplateError)
+        self.assertIn("map: a list value", str(err))
+        err = self.refused_quickly(lambda: stamp.vet_template({"map": yaml.safe_load(alias_bomb(self.LEVELS))}))
+        self.assertIsInstance(err, stamp.TemplateError)
+
+    def test_a_copy_with_a_nested_alias_is_refused_at_once(self):
+        config = yaml.safe_load(stamp.dump(stamp.stamp(template(), "garage", "0.25.0", "release"), "t"))
+        for key in ("map", "version", "arch", "options"):
+            bomb = {**config, key: yaml.safe_load(alias_bomb(self.LEVELS))}
+            with self.subTest(key=key):
+                err = self.refused_quickly(lambda: copies.check(bomb, "garage", "0.25.0", "release"))
+                self.assertIsInstance(err, copies.CopyError)
+
+
+class CopySaveTest(unittest.TestCase):
+    """The copy in /data is taken from the instance's folder, which others can write: only a definition this manager
+    writes is kept."""
+
+    def folder(self, config: bytes) -> str:
+        path = os.path.join(tmpdir(self), "hri_garage")
+        os.makedirs(os.path.join(path, "translations"))
+        with open(os.path.join(path, "config.yaml"), "wb") as fh:
+            fh.write(config)
+        with open(os.path.join(path, "translations", "en.yaml"), "wb") as fh:
+            fh.write(b"configuration: {}\n")
+        return path
+
+    def save(self, config: bytes):
+        root = tmpdir(self)
+        marker = {"name": "garage", "instance_id": "a" * 32, "channel": "release", "version": "0.25.0",
+                  "template_source": "https://codeload.github.com/x"}
+        return root, lambda: copies.save(root, "garage", self.folder(config), marker)
+
+    def test_what_the_manager_writes_is_kept(self):
+        root, save = self.save(stamp.dump(stamp.stamp(template(), "garage", "0.25.0", "release"), "t"))
+        self.assertEqual(save(), ["config.yaml", "translations/en.yaml"])
+        self.assertTrue(os.path.isdir(os.path.join(root, "garage")))
+
+    def test_a_changed_definition_is_not_kept(self):
+        stamped = stamp.dump(stamp.stamp(template(), "garage", "0.25.0", "release"), "t")
+        for what, config in (("a privilege", stamped + b"full_access: true\n"),
+                             ("a nested alias", stamped + f"map: {alias_bomb(25)}\n".encode()),  # the last map: counts
+                             ("not YAML", b"slug: [\n")):
+            with self.subTest(what=what):
+                root, save = self.save(config)
+                start = time.monotonic()
+                with self.assertRaises(copies.CopyError):
+                    save()
+                self.assertLess(time.monotonic() - start, 0.1)
+                self.assertEqual(os.listdir(root), [])
 
 
 class BuildTest(unittest.TestCase):
