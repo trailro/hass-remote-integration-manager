@@ -131,6 +131,9 @@ class Manager:
             slug = names.supervisor_slug(name)
             seen.add(slug)
             if marker is None:
+                mark = (registered.get(name) or {}).get("tampered")
+                if isinstance(mark, dict):  # the manager's own instance, whose marker a writer broke
+                    problem = f"{str(mark.get('reason'))[:300]}: {self._mark_text(slug, mark)} ({problem})"
                 others.append({"slug": slug, "name": names.folder_name(name), "kind": "folder", "problem": problem,
                                "installed": slug in installed, "state": installed.get(slug, {}).get("state")})
                 continue
@@ -146,6 +149,11 @@ class Manager:
                 if app.get("url") == names.HRI_URL and app.get("detached") is True and known:
                     entry.update({k: known.get(k) for k in ("channel", "ref_kind", "ref", "sha")})
                     entry["bluetooth"] = known.get("bluetooth") is True
+                    if isinstance(known.get("tampered"), dict):  # never repaired, automatically or not
+                        entry["problem"] = f"{str(known['tampered'].get('reason'))[:300]}: {self._mark_text(slug, known['tampered'])}"
+                        entry["actions"] = ["delete"]
+                        out.append(entry)
+                        continue
                     attention = known.get("needs_attention")
                     if isinstance(attention, dict):
                         rebuild = ("Rebuild writes the current commit of its branch or tag (when that is the installed "
@@ -192,7 +200,7 @@ class Manager:
                     continue
                 others.append({"slug": names.supervisor_slug(name), "name": name, "instance": name, "kind": "orphan",
                                "installed": False, "state": None, "actions": ["forget"],
-                               "problem": (f"uninstalled by the manager: {str(tampered.get('reason'))[:300]}. "
+                               "problem": (f"{str(tampered.get('reason'))[:300]}: {self._mark_text(names.supervisor_slug(name), tampered)}. "
                                            if isinstance(tampered, dict) else "")
                                           + ("neither installed nor defined: only the manager's "
                                            + " and ".join(w for w, on in (("registry entry", name in registered),
@@ -353,8 +361,13 @@ class Manager:
         actions, problems = [], []
         if known and known.get("tag_moved"):
             problems.append(str(known["tag_moved"])[:300])
-        if known and isinstance(known.get("tampered"), dict):
-            problems.append(f"uninstalled by the manager: {str(known['tampered'].get('reason'))[:300]}")
+        mark = known.get("tampered") if known else None
+        if isinstance(mark, dict):
+            # marked: stop (when it runs) and Delete only; nothing that starts, installs or rewrites it
+            problems.append(f"{str(mark.get('reason'))[:300]}: {self._mark_text(slug, mark)}")
+            entry["actions"] = (["stop"] if app and app.get("state") == "started" else []) + ["delete"]
+            entry["problem"] = "; ".join(problems)
+            return entry
         if app is None:
             problems.append("defined, but not installed: Install installs and starts it")
             actions.append("install")
@@ -426,6 +439,8 @@ class Manager:
 
     async def action(self, name: str, action: str, user: str) -> Job:
         managed = await self.managed(name)
+        if action in ("start", "restart"):
+            self._refuse_marked(name, managed.entry)
         return self.jobs.start(name, action, user, lambda job: self._simple(job, managed, action))
 
     async def _detached_entry(self, name: str) -> dict | None:
@@ -448,6 +463,7 @@ class Manager:
         if detached is None:
             managed = await self.managed(name)
             channel = managed.marker["channel"]
+        self._refuse_marked(name, detached if detached is not None else managed.entry)
         version, ref = body.get("version"), None
         bluetooth = self.check_bluetooth(body, None)  # None: as it is
         if channel == "release":
@@ -486,6 +502,7 @@ class Manager:
         if known is None:
             raise InvalidRequest(f"{name} is not in the manager's registry: not created by this manager, so it is not "
                                  "repaired")
+        self._refuse_marked(name, known)
         return self.jobs.start(name, "repair", user, lambda job: self._repair(job, name, user))
 
     @staticmethod
@@ -545,6 +562,7 @@ class Manager:
         """``install`` (a definition without its app) or ``finish`` (installed, but its create stopped before the
         options and the start)."""
         managed = await self.managed(name)
+        self._refuse_marked(name, managed.entry)
         return self.jobs.start(name, action, user, lambda job: self._setup(job, managed, install=action == "install"))
 
     def pending_setup(self) -> list[str]:
@@ -804,14 +822,20 @@ class Manager:
             job.log("the manager is stopping: rolling back")
             await self._shielded(job, self._rollback_create(job, managed, interrupted=True), "the rollback")
             raise
+        except Tampered as err:
+            mark = await self._contain(job, managed, str(err))
+            if mark["uninstalled"]:
+                try:
+                    await asyncio.to_thread(children.remove, managed)
+                    await self.sv.reload_store()
+                except Exception as err2:  # noqa: BLE001 - reported; the mark stands
+                    job.log(f"the definition was not removed: {err2}")
+            raise self._tampered(managed, str(err), mark, "and its definition removed") from None
         except Exception as err:
             job.log(f"{err}: rolling back")
-            tampered = str(err) if isinstance(err, Tampered) else None
             # no clean refusal (a timeout, a lost connection, a server error): the Supervisor may be installing still
             unsure = installing and isinstance(err, SupervisorError) and not (err.status and 400 <= err.status < 500)
-            await self._rollback_create(job, managed, interrupted=unsure, tampered=tampered)
-            if tampered:
-                raise self._tampered(managed, tampered, "and its definition removed") from None
+            await self._rollback_create(job, managed, interrupted=unsure)
             if unsure:
                 raise JobFailed(f"{err}. The Supervisor may still be installing it: if it finishes, the list shows "
                                 f"{slug} as install interrupted, with Repair") from None
@@ -864,33 +888,70 @@ class Manager:
                            f"wrote ({'; '.join(problems)})")
         job.log("the installed definition is the one the manager wrote")
 
-    async def _uninstall_now(self, job: Job, managed: children.Managed) -> None:
-        """Uninstall an app installed from a changed definition, keeping its /config folder."""
-        job.log("uninstalling it at once (its /config folder is kept)")
+    async def _set_mark(self, name: str, mark: dict) -> None:
         try:
-            await self.sv.uninstall(managed, remove_config=False)
-        except Exception as err:  # noqa: BLE001 - reported; the job fails anyway
-            job.log(f"the uninstall failed: {err}")
-            _LOGGER.error("%s was installed from a changed definition and could not be uninstalled: %s. Uninstall it in "
-                          "Settings > Apps", managed.slug, err)
-
-    async def _mark_tampered(self, name: str, reason: str) -> None:
-        try:
-            await asyncio.to_thread(self.registry.update, name, tampered={"reason": reason[:500], "at": children.now_iso()})
+            await asyncio.to_thread(self.registry.update, name, tampered=mark, setup_complete=False)
         except RegistryError as err:
             _LOGGER.error("%s", err)
 
+    async def _contain(self, job: Job, managed: children.Managed, reason: str) -> dict:
+        """An app the Supervisor installed from another definition than the manager's: the instance is marked in the
+        registry first (from then on the manager starts, installs, updates or repairs nothing of it), then the app is
+        stopped and uninstalled, keeping its /config folder.  Both calls go through the allow-list, which needs the
+        instance's marker for them: a writer who breaks the marker blocks them, and the mark says so.  The mark,
+        as recorded at the end."""
+        mark = {"reason": reason[:500], "at": children.now_iso(), "uninstalled": False, "stopped": False, "failure": None}
+        await self._set_mark(managed.name, mark)
+        try:
+            if (await self.sv.app_info(managed.slug)).get("state") == "started":
+                job.log("stopping it at once")
+                await self.sv.stop(managed)
+            mark["stopped"] = True
+            job.log("uninstalling it at once (its /config folder is kept)")
+            await self.sv.uninstall(managed, remove_config=False)
+            mark["uninstalled"] = True
+        except NotAllowed as err:
+            mark["failure"] = (f"the manager's allow-list needs the instance's marker for stop and uninstall too, and it "
+                               f"refused them: {err}")
+        except Exception as err:  # noqa: BLE001 - reported in the mark, the job and the log
+            mark["failure"] = str(err) or err.__class__.__name__
+        if mark["failure"]:
+            job.log(f"NOT {'uninstalled' if mark['stopped'] else 'stopped'}: {mark['failure']}")
+        await self._set_mark(managed.name, mark)
+        return mark
+
     @staticmethod
-    def _tampered(managed: children.Managed, reason: str, what: str) -> Tampered:
-        message = (f"{reason}. It was uninstalled at once (its /config folder is kept) {what}. Someone changed "
+    def _mark_text(slug: str, mark: dict) -> str:
+        """What a mark means for the user: done, or what to do by hand."""
+        if mark.get("uninstalled"):
+            return "it was stopped and uninstalled at once (its /config folder is kept)"
+        folder = names.folder_name(slug[len(names.SLUG_PREFIX):])
+        return (f"it was NOT {'uninstalled' if mark.get('stopped') else 'stopped nor uninstalled'} "
+                f"({str(mark.get('failure'))[:300]}): stop and uninstall {slug} yourself in Settings > Apps now (keep "
+                f"its data if you want it); then Delete it here, or, if the manager no longer recognises {folder}/, "
+                f"delete that folder from the local apps folder and Forget it here")
+
+    def _tampered(self, managed: children.Managed, reason: str, mark: dict, what: str) -> Tampered:
+        done = self._mark_text(managed.slug, mark)
+        message = (f"{reason}. {done[:1].upper()}{done[1:]}"
+                   f"{' ' + what if mark.get('uninstalled') and what else ''}. Someone changed "
                    f"{names.folder_name(managed.name)}/ in the local apps folder while the manager installed it (the "
-                   "addons share, SSH, another app that maps it): find out who before you install it again")
+                   "addons share, SSH, another app that maps it): find out who before you create it again. The manager "
+                   "starts, installs, updates or repairs nothing of it until it is deleted")
         _LOGGER.error("%s", message)
         return Tampered(message)
 
-    async def _rollback_create(self, job: Job, managed: children.Managed, interrupted: bool = False,
-                               tampered: str | None = None) -> None:
-        """``tampered``: the install took a changed definition; the registry keeps the instance, marked, for its row."""
+    @staticmethod
+    def _refuse_marked(name: str, entry: dict | None) -> None:
+        """InvalidRequest while the registry marks the instance (its app was installed from another definition)."""
+        mark = (entry or {}).get("tampered")
+        if isinstance(mark, dict):
+            raise InvalidRequest(f"{name} is marked: the Supervisor installed another definition of it than the "
+                                 "manager's. The manager starts, installs, updates or repairs nothing of it; Delete "
+                                 "it (its /config folder is kept) and create it again once you know who changed its "
+                                 "definition")
+
+    async def _rollback_create(self, job: Job, managed: children.Managed, interrupted: bool = False) -> None:
         try:
             installed = any(a.get("slug") == managed.slug for a in await self.sv.list_apps())
             if installed:
@@ -900,10 +961,7 @@ class Manager:
                 await self.sv.uninstall(managed, remove_config=False)
             job.log("removing the definition")
             await asyncio.to_thread(children.remove, managed)
-            if tampered:
-                await asyncio.to_thread(self.registry.update, managed.name, setup_complete=False,
-                                        tampered={"reason": tampered[:500], "at": children.now_iso()})
-            elif interrupted and not installed:
+            if interrupted and not installed:
                 # the Supervisor may still be installing what it was asked to: if it finishes, the list shows a
                 # detached app, and the registry says why
                 await asyncio.to_thread(self.registry.update, managed.name, interrupted=True, setup_complete=False,
@@ -1028,12 +1086,10 @@ class Manager:
             await self._shielded(job, self._rollback_update(job, replacement), "putting it back")
             raise
         except Tampered as err:
-            job.log(f"{err}: uninstalling it, and putting the previous definition back")
-            await self._uninstall_now(job, managed)
+            job.log(f"{err}: stopping and uninstalling it, and putting the previous definition back")
+            mark = await self._contain(job, managed, str(err))
             await self._rollback_update(job, replacement)
-            await self._mark_tampered(managed.name, str(err))
-            raise self._tampered(managed, str(err), "and its previous definition put back: Install installs that one "
-                                                    "again") from None
+            raise self._tampered(managed, str(err), mark, "and its previous definition put back") from None
         except Exception as err:
             job.log(f"{err}: putting the previous definition back")
             await self._rollback_update(job, replacement)
@@ -1106,9 +1162,8 @@ class Manager:
                 raise JobFailed(f"{managed.slug} is not installed: Install it")
             await self._finish_setup(job, managed)
         except Tampered as err:
-            await self._uninstall_now(job, managed)
-            await self._mark_tampered(managed.name, str(err))
-            raise self._tampered(managed, str(err), "") from None
+            mark = await self._contain(job, managed, str(err))
+            raise self._tampered(managed, str(err), mark, "") from None
         except (SupervisorError, NotAllowed, RegistryError) as err:
             raise JobFailed(str(err)) from None
         info = await self._info(managed.slug) or {}
@@ -1369,11 +1424,11 @@ class Manager:
             await self._shielded(job, self._undo_detached(job, managed, entry), "removing it")
             raise
         except Tampered as err:
-            job.log(f"{err}: uninstalling it, and removing the definition again")
-            await self._uninstall_now(job, managed)
+            job.log(f"{err}: stopping and uninstalling it, and removing the definition again")
+            mark = await self._contain(job, managed, str(err))
             await self._undo_detached(job, managed, entry)
-            await self._mark_tampered(name, str(err))
-            raise self._tampered(managed, str(err), "and its definition removed again") from None
+            await self._set_mark(name, mark)  # the entry put back has no mark
+            raise self._tampered(managed, str(err), mark, "and its definition removed again") from None
         except Exception as err:
             job.log(f"{err}: removing the definition again (the instance stays as it was)")
             await self._undo_detached(job, managed, entry)

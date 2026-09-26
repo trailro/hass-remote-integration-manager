@@ -361,8 +361,12 @@ narrows itself, in code, and the tests pin it:
     PID, IPC, UTS and D-Bus, privileges, devices, `uart`/`usb`/`gpio`/`video`/`audio`, kernel modules, AppArmor,
     ingress, ports, version, name, URL and whether it has an image.
 
-  A difference before the install or update refuses it; a difference after it stops and uninstalls the app at once
-  (its `/config` folder kept), marks the instance and says so in the job, the log and the instance's row. What is
+  A difference before the install or update refuses it. A difference after it first marks the instance in the
+  registry, then stops and uninstalls the app at once (its `/config` folder kept), and says so in the job, the log and
+  the instance's row. Stop and uninstall go through the same allow-list, which needs the instance's marker: if the
+  writer broke the marker, they are refused, and the job and the row say plainly that the app was NOT stopped or
+  uninstalled, with what to do by hand (Settings > Apps). A marked instance is never started, installed, updated or
+  repaired by the manager; Stop and Delete stay, and Delete (or Forget) clears the mark. What is
   left: a store reload by someone else between the manager's last check and the Supervisor's start of the install
   (both within the same moment), of a folder changed in between; the check after the install still catches every
   key the Supervisor reports. Root on the host can change anything and is outside this model.

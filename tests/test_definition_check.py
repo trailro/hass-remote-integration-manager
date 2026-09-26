@@ -205,7 +205,7 @@ class FlowCheckTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("SYS_ADMIN", entry["tampered"]["reason"])
         _, data = await env.get("/api/instances")
         (orphan,) = [o for o in data["others"] if o.get("instance") == "garage"]
-        self.assertIn("uninstalled by the manager", orphan["problem"])
+        self.assertIn("it was stopped and uninstalled at once", orphan["problem"])
         self.assertEqual(orphan["actions"], ["forget"])
 
     async def test_an_update_to_another_definition_is_uninstalled_and_the_previous_one_put_back(self):
@@ -222,13 +222,74 @@ class FlowCheckTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("docker_api", env.registry.get("garage")["tampered"]["reason"])
         _, data = await env.get("/api/instances")
         (inst,) = data["instances"]
-        self.assertIn("install", inst["actions"])
-        self.assertIn("uninstalled by the manager", inst["problem"])
-        self.assertIn("defined, but not installed", inst["problem"])
+        self.assertEqual(inst["actions"], ["delete"])  # marked: nothing that installs it again
+        self.assertIn("it was stopped and uninstalled at once", inst["problem"])
         env.stub.install_override.clear()
-        job = await env.job(await env.send("POST", "/api/instances/garage/install"))
+        status, body = await env.send("POST", "/api/instances/garage/install")
+        self.assertEqual(status, 400)
+        self.assertIn("is marked", body["error"])
+        job = await env.job(await env.send("DELETE", "/api/instances/garage", {"remove_data": False, "confirm": "garage"}))
         self.assertEqual(job["state"], "succeeded", job)
-        self.assertNotIn("tampered", {k for k, v in env.registry.get("garage").items() if v is not None})
+        self.assertIsNone(env.registry.get("garage"))  # the mark goes with Delete; the name can be created again
+        self.assertEqual((await self.create())["state"], "succeeded")
+
+    def break_marker_after_the_install_check(self):
+        """A writer breaks the marker right after the manager read the installed app: the allow-list then refuses
+        the stop and the uninstall, which need it."""
+        env = self.env
+        read = env.sv.app_definition
+
+        async def then_break(slug):
+            view = await read(slug)
+            path = os.path.join(self.folder(), children.MARKER)
+            with open(path, encoding="utf-8") as fh:
+                data = json.load(fh)
+            with open(path, "w", encoding="utf-8") as fh:
+                json.dump({**data, "instance_id": "f" * 32}, fh)
+            return view
+
+        return mock.patch.object(env.sv, "app_definition", side_effect=then_break)
+
+    async def test_a_create_whose_uninstall_is_blocked_says_so_and_stays_marked(self):
+        env = self.env
+        env.stub.install_override["local_hri_garage"] = {"hassio_role": "admin"}
+        with self.break_marker_after_the_install_check():
+            job = await self.create()
+        self.assertEqual(job["state"], "failed", job)
+        self.assertIn("NOT", job["error"])
+        self.assertNotIn("uninstalled at once", job["error"])
+        self.assertIn("stop and uninstall local_hri_garage yourself in Settings > Apps now", job["error"])
+        self.assertIn("local_hri_garage", env.stub.installed)  # the Supervisor still has it
+        mark = env.registry.get("garage")["tampered"]
+        self.assertEqual((mark["uninstalled"], "allow-list" in mark["failure"]), (False, True))
+        _, data = await env.get("/api/instances")
+        (row,) = [o for o in data["others"] if o["slug"] == "local_hri_garage" and o["kind"] == "folder"]
+        self.assertIn("it was NOT", row["problem"])
+        self.assertIn("Forget it here", row["problem"])
+
+    async def test_an_update_whose_stop_is_blocked_says_so_and_refuses_everything_else(self):
+        env = self.env
+        self.assertEqual((await self.create())["state"], "succeeded")
+        env.stub.install_override["local_hri_garage"] = {"full_access": True}
+        with self.break_marker_after_the_install_check():
+            job = await env.job(await env.send("POST", "/api/instances/garage/update", {"version": "0.25.1"}))
+        self.assertEqual(job["state"], "failed", job)
+        self.assertIn("It was NOT stopped nor uninstalled", job["error"])
+        self.assertEqual(env.stub.installed["local_hri_garage"]["state"], "started")
+        self.assertFalse(env.registry.get("garage")["tampered"]["stopped"])
+        # the definition put back has the manager's marker again: the actions show, and all but stop and delete refuse
+        self.assertEqual(self.config()["version"], "0.25.0")
+        _, data = await env.get("/api/instances")
+        (inst,) = data["instances"]
+        self.assertEqual(inst["actions"], ["stop", "delete"])
+        for path, body in (("start", {}), ("restart", {}), ("update", {"version": "0.25.1"}), ("finish", {}),
+                           ("install", {}), ("repair", {})):
+            with self.subTest(action=path):
+                status, answer = await env.send("POST", f"/api/instances/garage/{path}", body)
+                self.assertEqual(status, 400, answer)
+                self.assertIn("is marked", answer["error"])
+        job = await env.job(await env.send("POST", "/api/instances/garage/stop"))
+        self.assertEqual(job["state"], "succeeded", job)
 
     async def test_a_definition_changed_before_the_store_reads_it_is_refused(self):
         env = self.env
