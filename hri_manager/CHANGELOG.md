@@ -29,7 +29,8 @@ Fixes from a first run on a real Home Assistant OS 18.3 (Supervisor 2026.09.2). 
   log and the row give the reason and the actions (Update or Rebuild, Delete, Repair), with no retry note.
 - **Repair keeps an instance's history.** The rewritten marker said `created_by: "automatic repair"` and had lost its
   history and `updated_by`. The registry now keeps them, and a repair writes them back with a `repaired (automatic)`
-  or `repaired (manual)` entry added. An instance created by 0.1.0 gets its history in the registry at its first
+  or `repaired (manual)` entry added; an Update or Rebuild of an instance that needs attention keeps them too, and
+  adds itself as any update does. An instance created by 0.1.0 gets its history in the registry at its first
   update by this version; a repair before that starts a new one.
 - A local build of HRI (`local_hass_remote_integration`) is labelled as such, not as the published app.
 - Docs: turn on **Show in sidebar** after installing the manager (the Supervisor leaves it off); one integration per
