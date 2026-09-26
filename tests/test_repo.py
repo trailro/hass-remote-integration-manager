@@ -110,6 +110,17 @@ class AppConfigTest(unittest.TestCase):
         ci = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
         self.assertEqual(len(re.findall(r"pip install --quiet --require-hashes -r hri_manager/requirements\.txt", ci)), 2)
 
+    def test_the_supervisor_check_is_pinned(self):
+        ci = yaml.safe_load((ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8"))
+        self.assertRegex(ci["env"]["SUPERVISOR_SHA"], r"^[0-9a-f]{40}$")
+        steps = ci["jobs"]["app"]["steps"]
+        checkout = next(s for s in steps if s.get("with", {}).get("repository") == "home-assistant/supervisor")
+        self.assertEqual(checkout["with"]["ref"], "${{ env.SUPERVISOR_SHA }}")
+        check = next(s["run"] for s in steps if "app_supervisor_check.py" in s.get("run", ""))
+        lock = (APP_DIR / "requirements.txt").read_text(encoding="utf-8")
+        pinned = re.search(r"(?m)^pyyaml==(\S+)", lock, re.I).group(1)
+        self.assertIn(f"PyYAML=={pinned}", check)  # the manager's own pin
+
     def test_the_dockerfile_base_is_pinned(self):
         self.assertRegex((APP_DIR / "Dockerfile").read_text(encoding="utf-8"), r"(?m)^FROM [\w./:-]+@sha256:[0-9a-f]{64}$")
 
