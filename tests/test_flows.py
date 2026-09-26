@@ -616,6 +616,31 @@ class FlowTest(unittest.IsolatedAsyncioTestCase):
         await self.assert_needs_attention("lab", "no record of the commit of the installed")
         self.assertEqual(env.stub.codeload_paths, [])
 
+    async def test_repair_downloads_a_commit_only_from_hri_s_own_history(self):
+        """codeload serves a fork's commits under HRI's name.  A commit from /data (restored or crafted) with the
+        installed version's digits is used only when HRI's repository has it on the registry's branch or tag."""
+        env = self.env
+        await self.create("lab", channel="git", ref_kind="branch", ref="main")
+        good = env.stub.refs["main"]
+        fork = good[:12] + "f" * 28  # the same version, 0.0.0-<first 12 hex>: a fork's commit made to look like it
+        env.stub.commits.add(fork)
+        env.registry.update("lab", sha=fork)
+        path = os.path.join(self.copy_dir("lab"), "copy.json")
+        with open(path, encoding="utf-8") as fh:
+            meta = json.load(fh)
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump({**meta, "sha": fork}, fh)
+        await self._detach("lab")
+        await self.assert_needs_attention("lab", "not a commit of")
+        self.assertNotIn(fork, env.stub.codeload_paths)
+        # the branch deleted: the commit cannot be checked either
+        env.registry.update("lab", sha=good)
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump({**meta, "sha": good}, fh)
+        del env.stub.refs["main"]
+        await self.assert_needs_attention("lab", "not a commit of")
+        self.assertEqual(env.stub.codeload_paths, [])
+
     async def test_repair_writes_only_the_installed_channel(self):
         env = self.env
         await self.create()

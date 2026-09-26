@@ -6,7 +6,8 @@ tag of HRI itself (names.validate_ref), checked to exist in HRI's repository wit
 downloaded, and fetched with its full ``refs/heads/`` or ``refs/tags/`` path: codeload also serves pull requests and
 forks' commits under HRI's name, which a short name could reach.  One exception, for Repair only: the commit a git
 instance was built from, which the manager recorded itself (from HRI's branch or tag, in its own /data) and never
-takes from a request; the archive must name that very commit.  The release list is cached in /data for an hour,
+takes from a request.  It is downloaded only after GitHub's compare says it is on HRI's own branch or tag (codeload
+serves a fork's commits under HRI's name too), and the archive must name that very commit.  The release list is cached in /data for an hour,
 and the instances list reads only the cache, so GitHub being unreachable never stops the page."""
 
 from __future__ import annotations
@@ -35,6 +36,11 @@ MAX_RELEASES_JSON = 4 * 1024 * 1024
 
 class GitHubError(Exception):
     pass
+
+
+class NotHRICommit(GitHubError):
+    """A commit HRI's repository does not have on the branch or tag it is asked against (a fork's, one that never was,
+    or the branch or tag is gone): never downloaded."""
 
 
 class GitHub:
@@ -172,11 +178,27 @@ class GitHub:
         except aiohttp.ClientError as err:
             raise GitHubError(f"GitHub unreachable: {err.__class__.__name__}") from None
 
-    async def tarball_of_commit(self, sha: str) -> tuple[tarsafe.Archive, str]:
-        """The source of a commit the manager recorded when it built an instance from HRI's branch or tag (Repair of
-        a git instance at its installed commit), checked to be that commit."""
+    async def commit_on_ref(self, sha: str, kind: str, ref: str) -> None:
+        """NotHRICommit unless ``sha`` is ``ref`` (a branch or tag of HRI) or an ancestor of it, by HRI's own repository:
+        compare/<ref>...<sha> answers "behind" (sha is behind the ref) or "identical"."""
+        names.validate_ref(kind, ref)
         if not isinstance(sha, str) or not names.SHA_RE.fullmatch(sha):
-            raise GitHubError("not a commit the manager recorded")
+            raise NotHRICommit("not a commit")
+        full = names.full_ref(kind, ref)
+        try:
+            data = await self._api_json(f"compare/{quote(full, safe='/._-')}...{sha}", MAX_RELEASES_JSON, "comparison")
+        except GitHubError as err:
+            if "not found" in str(err):
+                raise NotHRICommit(f"{names.HRI_REPO} has no {kind} {ref}, or no commit {sha[:12]}") from None
+            raise
+        status = data.get("status") if isinstance(data, dict) else None
+        if status not in ("behind", "identical"):
+            raise NotHRICommit(f"commit {sha[:12]} is not on {names.HRI_REPO}'s {kind} {ref} ({status})")
+
+    async def tarball_of_commit(self, sha: str, kind: str, ref: str) -> tuple[tarsafe.Archive, str]:
+        """The source of a commit the manager recorded when it built an instance from HRI's branch or tag (Repair of
+        a git instance at its installed commit): checked to be on that branch or tag first, then to be that commit."""
+        await self.commit_on_ref(sha, kind, ref)
         url = f"{self._codeload}/{names.HRI_REPO}/tar.gz/{sha}"
         try:
             data = await self._get(url, {}, tarsafe.MAX_COMPRESSED, 300)

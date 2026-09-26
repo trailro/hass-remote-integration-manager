@@ -94,6 +94,7 @@ class Stub:
         self.moved: dict[str, str] = {}  # a release tag force-pushed to another commit: tag -> its new commit
         self.codeload_paths: list[str] = []
         self.commits: set[str] = set()  # every commit codeload served by a ref: GitHub serves it by its sha too
+        self.history: dict[str, set[str]] = {}  # full ref -> every commit it named: the ref's ancestors, as far as known
         self.users: object = [dict(u) for u in USERS]  # what config/auth/list answers (tests put other shapes here)
         self.core_down = False
         self.store_frozen = False  # a reload that notices nothing, as the Supervisor after a file dated in the future
@@ -313,6 +314,12 @@ class Stub:
 
     def ref_sha(self, full: str) -> str | None:
         """The commit of refs/heads/<branch> or refs/tags/<tag>, as HRI's repository has them."""
+        sha = self._ref_sha(full)
+        if sha:
+            self.history.setdefault(full, set()).add(sha)
+        return sha
+
+    def _ref_sha(self, full: str) -> str | None:
         if full.startswith("refs/heads/"):
             return self.refs.get(full[len("refs/heads/"):])
         if full.startswith("refs/tags/v") and full[len("refs/tags/v"):] in self.releases:
@@ -342,6 +349,21 @@ class Stub:
         if data is None:
             return web.Response(status=404, text="404: Not Found")
         return web.Response(body=data, content_type="application/x-gzip")
+
+    async def gh_compare(self, request):
+        """compare/<base>...<head>: the status of head against base, as GitHub answers it ("behind": head is an
+        ancestor of base).  A commit only codeload knows (a fork's, say) is "diverged"; an unknown one, 404."""
+        base, _, head = request.match_info["spec"].partition("...")
+        base_sha = self.ref_sha(base)
+        if base_sha is None or not head:
+            return web.json_response({"message": "Not Found"}, status=404)
+        if head == base_sha:
+            return web.json_response({"status": "identical", "ahead_by": 0, "behind_by": 0})
+        if head in self.history.get(base, set()):
+            return web.json_response({"status": "behind", "ahead_by": 0, "behind_by": 1})
+        if head in self.commits:
+            return web.json_response({"status": "diverged", "ahead_by": 1, "behind_by": 1})
+        return web.json_response({"message": "Not Found"}, status=404)
 
     async def gh_ref(self, request):
         full = "refs/" + request.match_info["ref"]
@@ -382,6 +404,7 @@ class Stub:
         app.router.add_get("/gh/repos/trailro/hass-remote-integration/releases", self.gh_releases)
         app.router.add_get("/gh/repos/trailro/hass-remote-integration/releases/tags/{tag}", self.gh_release)
         app.router.add_get("/gh/repos/trailro/hass-remote-integration/git/ref/{ref:.+}", self.gh_ref)
+        app.router.add_get("/gh/repos/trailro/hass-remote-integration/compare/{spec:.+}", self.gh_compare)
         app.router.add_get("/cl/trailro/hass-remote-integration/tar.gz/{ref:.+}", self.codeload)
         app.router.add_get("/_stub/state", self.stub_state)
         app.router.add_post("/_stub/control", self.stub_control)
