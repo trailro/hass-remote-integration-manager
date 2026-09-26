@@ -102,6 +102,10 @@ class StampTest(unittest.TestCase):
                 stamp.parse_template(yaml.safe_dump(t).encode())
             self.assertIn("update the manager", str(ctx.exception))
 
+    def test_option_types_take_ascii_digits_only(self):
+        self.assertTrue(stamp._schema({"x": "int(0,9)"}))
+        self.assertFalse(stamp._schema({"x": "int(٠,٩)"}))
+
     def test_hri_s_template_is_accepted(self):
         """HRI's template at v0.25.0; at the time of writing HRI's main has the same keys (only version differs)."""
         t = template()

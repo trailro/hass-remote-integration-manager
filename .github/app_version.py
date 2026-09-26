@@ -16,7 +16,7 @@ import os
 import re
 import sys
 
-STABLE_TAG = re.compile(r"v(\d+)\.(\d+)\.(\d+)")
+STABLE_TAG = re.compile(r"v(\d+)\.(\d+)\.(\d+)", re.ASCII)
 VERSION_LINE = re.compile(r'^version: "?([^"\n]*)"?$', re.M)
 IMAGE_LINE = re.compile(r"^image: .*$", re.M)
 
@@ -24,7 +24,7 @@ IMAGE_LINE = re.compile(r"^image: .*$", re.M)
 def key(version: str) -> tuple:
     """(X, Y, Z) of a stable version; ValueError for anything else (never a key that sorts below every version, which
     would let any tag move the version)."""
-    m = re.fullmatch(r"(\d+)\.(\d+)\.(\d+)", version)
+    m = re.fullmatch(r"(\d+)\.(\d+)\.(\d+)", version, re.ASCII)
     if not m:
         raise ValueError(f"{version!r} is not a stable version X.Y.Z")
     return tuple(int(x) for x in m.groups())

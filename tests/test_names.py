@@ -71,6 +71,13 @@ class VersionTest(unittest.TestCase):
         self.assertEqual(names.full_ref("branch", "main"), "refs/heads/main")
         self.assertEqual(names.full_ref("tag", "v0.25.0"), "refs/tags/v0.25.0")
 
+    def test_only_ascii_digits(self):
+        """\\d takes any Unicode digit, and int() reads them: '٠.٢٥.١' would pass as 0.25.1 and fail only at GitHub."""
+        for text in ("٠.٢٥.١", "0.٢٥.1", "0.25.1b١"):
+            with self.subTest(text=text):
+                self.assertIsNone(names.parse_version(text))
+                self.assertIsNone(names.version_from_tag("v" + text))
+
     def test_git_version(self):
         self.assertEqual(names.git_version("0123456789abcdef" * 2 + "01234567"), "0.0.0-0123456789ab")
         self.assertTrue(names.GIT_VERSION_RE.fullmatch("0.0.0-0123456789ab"))

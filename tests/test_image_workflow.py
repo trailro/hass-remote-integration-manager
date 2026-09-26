@@ -5,6 +5,7 @@ pushed and anyone can pull it.  The store must never offer a version whose image
 AppVersionStepTest runs the workflow's own script (not a copy) on a scratch repository with a remote, and a `gh` that
 answers with a list of releases, as hass-remote-integration's tests/test_ha_app.py does for its app."""
 
+import importlib.util
 import json
 import os
 import pathlib
@@ -99,6 +100,17 @@ class ImageJobTest(unittest.TestCase):
         authed = [line for line in write["run"].splitlines() if "GH_TOKEN" in line or "extraheader" in line]
         self.assertEqual(len(authed), 3, authed)  # the header built once, then the pull and the push
         self.assertNotRegex(write["run"], r"https://[^ ]*\$GH_TOKEN|x-access-token:\$")
+
+
+class AppVersionScriptTest(unittest.TestCase):
+    def test_versions_are_ascii_digits(self):
+        spec = importlib.util.spec_from_file_location("app_version", ROOT / ".github" / "app_version.py")
+        app_version = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(app_version)
+        self.assertEqual(app_version.key("0.10.2"), (0, 10, 2))
+        with self.assertRaises(ValueError):
+            app_version.key("٠.١٠.٢")
+        self.assertEqual(app_version.newest_stable([{"tagName": "v٩.٠.٠"}, {"tagName": "v0.1.1"}]), "v0.1.1")
 
 
 class AppVersionStepTest(unittest.TestCase):
