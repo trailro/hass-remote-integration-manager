@@ -72,7 +72,7 @@ def folder(root: str, name: str) -> str:
     return os.path.join(root, name)
 
 
-def _read(path: str, cap: int = MAX_FILE) -> bytes:
+def read_file(path: str, cap: int = MAX_FILE) -> bytes:
     fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
     try:
         st = os.fstat(fd)
@@ -101,7 +101,7 @@ def save(root: str, name: str, instance_folder: str, marker: dict) -> list[str]:
     files = {}
     for rel in _walk(instance_folder):
         if is_copied(rel, channel):
-            files[rel] = _read(os.path.join(instance_folder, *rel.split("/")))
+            files[rel] = read_file(os.path.join(instance_folder, *rel.split("/")))
     if "config.yaml" not in files:
         raise CopyError(f"{names.folder_name(name)} has no config.yaml")
     if sum(len(d) for d in files.values()) > MAX_TOTAL:
@@ -196,7 +196,7 @@ def load(root: str, name: str, entry: dict, installed_version: str) -> Copy:
     if not os.path.isdir(base) or os.path.islink(base):
         raise CopyError("the manager has no copy of it")
     try:
-        meta = json.loads(_read(os.path.join(base, META)).decode("utf-8"))
+        meta = json.loads(read_file(os.path.join(base, META)).decode("utf-8"))
     except (OSError, UnicodeDecodeError, ValueError) as err:
         raise CopyError(f"its {META} cannot be read: {err}") from None
     if not isinstance(meta, dict) or not isinstance(meta.get("instance_id"), str) or not INSTANCE_ID_RE.fullmatch(meta["instance_id"]):
@@ -223,7 +223,7 @@ def load(root: str, name: str, entry: dict, installed_version: str) -> Copy:
                 continue
             if not is_copied(rel, channel):
                 raise CopyError(f"it holds {rel!r}, which a copy does not")
-            files[rel] = _read(os.path.join(base, *rel.split("/")))
+            files[rel] = read_file(os.path.join(base, *rel.split("/")))
             if sum(len(d) for d in files.values()) > MAX_TOTAL:
                 raise CopyError("it is larger than a copy may be")
             if rel != "config.yaml":

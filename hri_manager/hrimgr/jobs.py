@@ -28,6 +28,10 @@ class TagMoved(JobFailed):
     """A release tag that no longer names the commit an instance was installed from."""
 
 
+class Tampered(JobFailed):
+    """The Supervisor installed another definition than the one the manager wrote: the app is uninstalled at once."""
+
+
 class NeedsAttention(JobFailed):
     """Repair cannot get the exact source of the installed version: nothing was written, and the instance waits for
     the user (Update or Rebuild, Delete, or Repair again once the cause is gone); automatic repair leaves it alone."""

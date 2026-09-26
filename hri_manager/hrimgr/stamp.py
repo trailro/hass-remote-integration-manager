@@ -25,6 +25,7 @@ from __future__ import annotations
 import fnmatch
 import os
 import re
+import reprlib
 from typing import Any
 
 import yaml
@@ -151,6 +152,56 @@ def vet_template(data: dict) -> None:
         if not check(value):
             raise TemplateError(f"HRI's app definition has {key}: {str(value)[:80]!r}, a value this manager version "
                                 "does not accept; update the manager")
+
+
+# What the Supervisor reports of a definition, by the names of its API, to check that the definition it installs is
+# the one the manager stamped (anyone who can write the local apps folder can change a definition after the manager
+# wrote it).  GET /store/addons/<slug> (Supervisor api/store.py, _generate_app_information with extended=True)
+# reports STORE_VIEW of the store's parsed definition, the one an install or update takes; it does not report
+# host_ipc, host_uts, host_dbus, privileged, devices, uart, usb, gpio, video, audio, kernel_modules, devicetree,
+# udev, ports, map or image (only "build", whether there is an image).  GET /addons/<slug>/info (api/apps.py
+# info_data) reports INSTALLED_VIEW of the installed app; it does not report map or image either.  Those two, and
+# every other key, are covered only by children.check_tree: the folder's files are hashed when written and checked
+# again before each store reload and right before the install or update.
+STORE_VIEW = ("slug", "name", "url", "version", "build", "ingress", "hassio_role", "hassio_api", "homeassistant_api",
+              "auth_api", "full_access", "docker_api", "host_network", "host_pid", "apparmor")
+INSTALLED_VIEW = STORE_VIEW + ("host_ipc", "host_uts", "host_dbus", "privileged", "devices", "uart", "usb", "gpio",
+                               "video", "audio", "kernel_modules", "devicetree", "udev", "network")
+_SHOW = reprlib.Repr(maxlevel=2, maxlist=4, maxdict=4, maxstring=60, maxother=60)
+
+
+def expected_view(config: dict, slug: str) -> dict:
+    """What the Supervisor must report (STORE_VIEW, INSTALLED_VIEW) for ``config``, a definition the manager stamped:
+    its own values, and the Supervisor's default (apps/validate.py) for every key vet_template refuses in a template.
+    ``network``: the ports' names only (the user may map a port on the Network tab); ``apparmor``: "default", the
+    Supervisor's profile (an apparmor.txt in the folder would make it "profile")."""
+    return {
+        "slug": slug, "name": config.get("name"), "url": config.get("url"), "version": str(config.get("version")),
+        "build": "image" not in config, "ingress": config.get("ingress") is True,
+        "hassio_role": "default", "hassio_api": False, "homeassistant_api": False, "auth_api": False,
+        "full_access": False, "docker_api": False, "host_network": False, "host_pid": False, "apparmor": "default",
+        "host_ipc": False, "host_uts": False, "host_dbus": config.get("host_dbus") is True, "privileged": [],
+        "devices": [], "uart": config.get("uart") is True, "usb": False, "gpio": False, "video": False,
+        "audio": False, "kernel_modules": False, "devicetree": False, "udev": False,
+        "network": sorted(config.get("ports") or {}),
+    }
+
+
+def view_differences(view: dict, expected: dict, fields: tuple[str, ...]) -> list[str]:
+    """The fields of ``view`` (what the Supervisor reported) that are not ``expected``, each as "key: got, not want";
+    a field the Supervisor did not report is a difference too."""
+    out = []
+    for key in fields:
+        want = expected[key]
+        if key not in view:
+            out.append(f"{key} not reported")
+            continue
+        got = view[key]
+        if key == "network" and isinstance(got, dict):
+            got = sorted(got)
+        if type(got) is not type(want) or got != want:
+            out.append(f"{key}: {_SHOW.repr(got)}, not {_SHOW.repr(want)}")
+    return out
 
 
 def parse_template(raw: bytes) -> dict:

@@ -82,6 +82,16 @@ INFO_FIELDS = ("slug", "name", "version", "version_latest", "update_available", 
 LIST_FIELDS = ("slug", "name", "version", "version_latest", "update_available", "state", "repository", "url",
                "detached", "available", "build")
 
+# what the definition checks read (stamp.STORE_VIEW, stamp.INSTALLED_VIEW): privilege- and identity-bearing fields,
+# never the options.  The store's "version" is the INSTALLED app's; the definition's is version_latest
+STORE_DEFINITION_FIELDS = ("slug", "name", "url", "version_latest", "build", "ingress", "hassio_role", "hassio_api",
+                           "homeassistant_api", "auth_api", "full_access", "docker_api", "host_network", "host_pid",
+                           "apparmor")
+APP_DEFINITION_FIELDS = ("slug", "name", "url", "version", "build", "ingress", "hassio_role", "hassio_api",
+                         "homeassistant_api", "auth_api", "full_access", "docker_api", "host_network", "host_pid",
+                         "apparmor", "host_ipc", "host_uts", "host_dbus", "privileged", "devices", "uart", "usb",
+                         "gpio", "video", "audio", "kernel_modules", "devicetree", "udev", "network")
+
 
 # the Supervisor's texts for an app's invalid options quote the options (". Got {...}"): an instance's password
 OPTIONS_ERROR_KEYS = frozenset({"app_configuration_invalid_error", "addon_configuration_invalid_error"})
@@ -234,6 +244,18 @@ class SupervisorClient:
                 return None
             raise
         return pick(data, ("slug", "name", "version_latest", "installed", "available", "update_available", "build", "url"))
+
+    async def store_definition(self, slug: str) -> dict:
+        """The store's parsed definition of a local app, as far as the store reports it (STORE_DEFINITION_FIELDS),
+        with the definition's version as ``version``: what an install or update of it takes."""
+        view = pick(await self.call("GET", f"/store/addons/{slug}"), STORE_DEFINITION_FIELDS)
+        if "version_latest" in view:
+            view["version"] = view.pop("version_latest")
+        return view
+
+    async def app_definition(self, slug: str) -> dict:
+        """The installed app's definition, as far as its info reports it (APP_DEFINITION_FIELDS: no options)."""
+        return pick(await self.call("GET", f"/addons/{slug}/info"), APP_DEFINITION_FIELDS)
 
     async def reload_store(self) -> None:
         await self.call("POST", "/store/reload")

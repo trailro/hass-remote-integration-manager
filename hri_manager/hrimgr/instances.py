@@ -17,15 +17,18 @@ from __future__ import annotations
 
 import asyncio
 import datetime
+import hashlib
 import logging
 import os
 import secrets
 import time
 from typing import Any
 
+import yaml
+
 from . import VERSION, children, copies, names, stamp, tarsafe
 from .github import GitHub, GitHubError, NotHRICommit, latest_stable
-from .jobs import Busy, Job, JobFailed, Jobs, NeedsAttention, TagMoved
+from .jobs import Busy, Job, JobFailed, Jobs, NeedsAttention, TagMoved, Tampered
 from .registry import Registry, RegistryError
 from .supervisor import NotAllowed, SupervisorClient, SupervisorError
 
@@ -166,9 +169,12 @@ class Manager:
         present = {names.name_from_slug(s) for s in installed} | {n for n, _, _ in folders}
         for name in sorted((set(registered) | kept) - present):
             if names.NAME_RE.fullmatch(name) and name not in names.RESERVED and not self.jobs.running_for(name):
+                tampered = (registered.get(name) or {}).get("tampered")
                 others.append({"slug": names.supervisor_slug(name), "name": name, "instance": name, "kind": "orphan",
                                "installed": False, "state": None, "actions": ["forget"],
-                               "problem": ("neither installed nor defined: only the manager's "
+                               "problem": (f"uninstalled by the manager: {str(tampered.get('reason'))[:300]}. "
+                                           if isinstance(tampered, dict) else "")
+                                          + ("neither installed nor defined: only the manager's "
                                            + " and ".join(w for w, on in (("registry entry", name in registered),
                                                                           ("copy of its definition", name in kept)) if on)
                                            + " are left. Forget drops them")})
@@ -321,6 +327,8 @@ class Manager:
         actions = []
         if known and known.get("tag_moved"):
             entry["problem"] = str(known["tag_moved"])[:300]
+        if known and isinstance(known.get("tampered"), dict):
+            entry["problem"] = f"uninstalled by the manager: {str(known['tampered'].get('reason'))[:300]}"
         if app is None:
             entry["problem"] = "defined, but not installed: Install installs and starts it"
             actions.append("install")
@@ -482,7 +490,22 @@ class Manager:
 
     # ------------------------------------------------------------------ job bodies
 
-    async def _wait_store(self, job: Job, slug: str, version: str) -> None:
+    async def _check_tree(self, slug: str, manifest: dict | None) -> None:
+        """JobFailed when the definition folder is no longer what the manager wrote (``manifest``, None: not checked)."""
+        if manifest is None:
+            return
+        try:
+            await asyncio.to_thread(children.check_tree, self.root, names.name_from_slug(slug), manifest)
+        except children.DefinitionChanged as err:
+            message = (f"{err}: refused, nothing installed or updated. Anyone who can write the local apps folder (the "
+                       "addons share, SSH, another app that maps it) can change a definition; find out who did")
+            _LOGGER.error("%s", message)
+            raise JobFailed(message) from None
+
+    async def _wait_store(self, job: Job, slug: str, version: str, manifest: dict | None = None) -> None:
+        """Reload the store until it has ``slug`` at ``version``.  ``manifest``: what the manager wrote, checked
+        again right before each reload (the store reads the folder then)."""
+        await self._check_tree(slug, manifest)
         job.log("reloading the Supervisor's store")
         await self.sv.reload_store()
         waited = 0.0
@@ -502,6 +525,7 @@ class Manager:
                                 "(touch it) and try again")
                 raise JobFailed(message)
             if not reloaded_again and waited >= self.store_timeout / 2:
+                await self._check_tree(slug, manifest)
                 await self.sv.reload_store()
                 reloaded_again = True
             await asyncio.sleep(self.poll_interval)
@@ -620,23 +644,27 @@ class Manager:
             return None
 
     def _builder(self, job: Job, archive, channel: str, name: str, version: str, sha: str | None, marker: dict, source: str,
-                 copy: copies.Copy | None = None):
+                 copy: copies.Copy | None = None, built: dict | None = None):
         """``copy``: Repair from the manager's copy, of a release (its files as they are: no archive) or of a git
-        instance (its stamped config over the archive of its commit)."""
+        instance (its stamped config over the archive of its commit).  ``built``: gets the stamped config written, as
+        "config" (what the Supervisor is then checked to report)."""
         def build(tmp: str) -> dict:
             if copy is not None and channel == "release":
                 # the config dumped by the manager from the checked mapping, never the copy's bytes
-                children.write_file(tmp, "config.yaml", stamp.dump(copy.config, source))
+                config = copy.config
+                children.write_file(tmp, "config.yaml", stamp.dump(config, source))
                 for rel, data in sorted(copy.files.items()):
                     if rel != "config.yaml":
                         children.write_file(tmp, rel, data)
             elif channel == "release":
-                stamp.build_release(archive, tmp, name, version, source)
+                config = stamp.build_release(archive, tmp, name, version, source)
             else:
-                _, notes = stamp.build_git(archive, tmp, name, version, sha, source,
-                                           config=copy.config if copy is not None else None)
+                config, notes = stamp.build_git(archive, tmp, name, version, sha, source,
+                                                config=copy.config if copy is not None else None)
                 for note in notes:
                     job.log(note)
+            if built is not None:
+                built["config"] = config
             found = stamp.find_configs(tmp)
             if found != ["config.yaml"]:
                 raise JobFailed(f"the definition would hold more than one app: {found}")
@@ -668,19 +696,24 @@ class Manager:
             job.log(f"commit {sha[:12]}: version {version} (testing build)")
         marker = self._marker(name, channel, version, ("tag", f"v{version}") if channel == "release" else ref, sha, source, user)
         job.log(f"writing {names.folder_name(name)}")
+        built: dict = {}
         try:
             await asyncio.to_thread(self.registry.put, name, self._registry_entry(marker))
             managed = await asyncio.to_thread(children.write_new, self.root, name,
-                                              self._builder(job, archive, channel, name, version, sha, marker, source),
+                                              self._builder(job, archive, channel, name, version, sha, marker, source,
+                                                            built=built),
                                               self.registry)
         except (stamp.TemplateError, children.UnsafePath, children.NotManaged, RegistryError, OSError) as err:
             await asyncio.to_thread(self._forget, name, marker["instance_id"])
             raise JobFailed(f"the definition was not written: {err}") from None
         await self._save_copy(job, managed)
+        expected = stamp.expected_view(built["config"], slug)
         try:
-            await self._wait_store(job, slug, version)
+            await self._wait_store(job, slug, version, managed.manifest)
+            await self._verify_store(job, managed, expected, managed.manifest)
             job.log("installing (a git build takes several minutes)" if channel == "git" else "installing (pulling the image)")
             await self.sv.install(managed)
+            await self._verify_installed(job, managed, expected)
             await self._finish_setup(job, managed)
         except asyncio.CancelledError:
             job.log("the manager is stopping: rolling back")
@@ -688,7 +721,10 @@ class Manager:
             raise
         except Exception as err:
             job.log(f"{err}: rolling back")
-            await self._rollback_create(job, managed)
+            tampered = str(err) if isinstance(err, Tampered) else None
+            await self._rollback_create(job, managed, tampered=tampered)
+            if tampered:
+                raise self._tampered(managed, tampered, "and its definition removed") from None
             if isinstance(err, (SupervisorError, NotAllowed)):
                 raise JobFailed(str(err)) from None
             raise
@@ -701,7 +737,7 @@ class Manager:
         await self.sv.set_options(managed, boot="auto", watchdog=True, ingress_panel=True)
         job.log("starting")
         await self.sv.start(managed)
-        await asyncio.to_thread(self.registry.update, managed.name, setup_complete=True)
+        await asyncio.to_thread(self.registry.update, managed.name, setup_complete=True, tampered=None)
 
     @staticmethod
     async def _shielded(job: Job, coro, what: str) -> None:
@@ -714,7 +750,57 @@ class Manager:
         except asyncio.CancelledError:
             job.log(f"{what} was interrupted")
 
-    async def _rollback_create(self, job: Job, managed: children.Managed, interrupted: bool = False) -> None:
+    async def _verify_store(self, job: Job, managed: children.Managed, expected: dict, manifest: dict | None) -> None:
+        """Right before an install or update: the store's parsed definition, the one the Supervisor installs, reports
+        what the manager stamped (``expected``: stamp.expected_view), and the folder is still what it wrote.
+        JobFailed otherwise: nothing is installed or updated."""
+        problems = stamp.view_differences(await self.sv.store_definition(managed.slug), expected, stamp.STORE_VIEW)
+        if problems:
+            message = (f"the Supervisor's store holds another definition of {managed.slug} than the one the manager "
+                       f"wrote ({'; '.join(problems)}): refused, nothing installed or updated. Someone changed "
+                       f"{names.folder_name(managed.name)}/ in the local apps folder after the manager wrote it (the "
+                       "addons share, SSH, another app that maps it); find out who did")
+            _LOGGER.error("%s", message)
+            raise JobFailed(message)
+        await self._check_tree(managed.slug, manifest)
+        job.log("the store's definition is the one the manager wrote")
+
+    async def _verify_installed(self, job: Job, managed: children.Managed, expected: dict) -> None:
+        """Right after an install or update: the installed app reports what the manager stamped.  Tampered
+        otherwise; the caller uninstalls it at once."""
+        problems = stamp.view_differences(await self.sv.app_definition(managed.slug), expected, stamp.INSTALLED_VIEW)
+        if problems:
+            raise Tampered(f"the Supervisor installed another definition of {managed.slug} than the one the manager "
+                           f"wrote ({'; '.join(problems)})")
+        job.log("the installed definition is the one the manager wrote")
+
+    async def _uninstall_now(self, job: Job, managed: children.Managed) -> None:
+        """Uninstall an app installed from a changed definition, keeping its /config folder."""
+        job.log("uninstalling it at once (its /config folder is kept)")
+        try:
+            await self.sv.uninstall(managed, remove_config=False)
+        except Exception as err:  # noqa: BLE001 - reported; the job fails anyway
+            job.log(f"the uninstall failed: {err}")
+            _LOGGER.error("%s was installed from a changed definition and could not be uninstalled: %s. Uninstall it in "
+                          "Settings > Apps", managed.slug, err)
+
+    async def _mark_tampered(self, name: str, reason: str) -> None:
+        try:
+            await asyncio.to_thread(self.registry.update, name, tampered={"reason": reason[:500], "at": children.now_iso()})
+        except RegistryError as err:
+            _LOGGER.error("%s", err)
+
+    @staticmethod
+    def _tampered(managed: children.Managed, reason: str, what: str) -> Tampered:
+        message = (f"{reason}. It was uninstalled at once (its /config folder is kept) {what}. Someone changed "
+                   f"{names.folder_name(managed.name)}/ in the local apps folder while the manager installed it (the "
+                   "addons share, SSH, another app that maps it): find out who before you install it again")
+        _LOGGER.error("%s", message)
+        return Tampered(message)
+
+    async def _rollback_create(self, job: Job, managed: children.Managed, interrupted: bool = False,
+                               tampered: str | None = None) -> None:
+        """``tampered``: the install took a changed definition; the registry keeps the instance, marked, for its row."""
         try:
             installed = any(a.get("slug") == managed.slug for a in await self.sv.list_apps())
             if installed:
@@ -724,7 +810,10 @@ class Manager:
                 await self.sv.uninstall(managed, remove_config=False)
             job.log("removing the definition")
             await asyncio.to_thread(children.remove, managed)
-            if interrupted and not installed:
+            if tampered:
+                await asyncio.to_thread(self.registry.update, managed.name, setup_complete=False,
+                                        tampered={"reason": tampered[:500], "at": children.now_iso()})
+            elif interrupted and not installed:
                 # the Supervisor may still be installing what it was asked to: if it finishes, the list shows a
                 # detached app, and the registry says why
                 await asyncio.to_thread(self.registry.update, managed.name, interrupted=True, setup_complete=False)
@@ -803,17 +892,22 @@ class Manager:
             job.log(f"commit {sha[:12]}: version {version}")
         new_marker = self._marker(managed.name, channel, version, new_ref, sha, source, user, previous=marker)
         job.log(f"rewriting {names.folder_name(managed.name)} (the previous definition is kept until the update succeeds)")
+        built: dict = {}
         try:
             replacement = await asyncio.to_thread(
-                children.replace, managed, self._builder(job, archive, channel, managed.name, version, sha, new_marker, source))
+                children.replace, managed, self._builder(job, archive, channel, managed.name, version, sha, new_marker, source,
+                                                         built=built))
         except (stamp.TemplateError, children.UnsafePath, children.NotManaged, OSError) as err:
             raise JobFailed(f"the definition was not written: {err}") from None
+        expected = stamp.expected_view(built["config"], managed.slug)
         try:
             managed = children.load_managed(self.root, managed.name, self.registry)
-            await self._wait_store(job, managed.slug, version)
+            await self._wait_store(job, managed.slug, version, replacement.manifest)
             if info.get("version") != version:
+                await self._verify_store(job, managed, expected, replacement.manifest)
                 job.log(f"updating {info.get('version')} -> {version}" + (" (building)" if channel == "git" else ""))
                 await self.sv.update(managed)
+                await self._verify_installed(job, managed, expected)
             after = await self.sv.app_info(managed.slug)
             if after.get("version") != version:
                 raise JobFailed(f"the Supervisor reports {after.get('version')} after the update, not {version}")
@@ -821,6 +915,13 @@ class Manager:
             job.log("the manager is stopping: putting the previous definition back")
             await self._shielded(job, self._rollback_update(job, replacement), "putting it back")
             raise
+        except Tampered as err:
+            job.log(f"{err}: uninstalling it, and putting the previous definition back")
+            await self._uninstall_now(job, managed)
+            await self._rollback_update(job, replacement)
+            await self._mark_tampered(managed.name, str(err))
+            raise self._tampered(managed, str(err), "and its previous definition put back: Install installs that one "
+                                                    "again") from None
         except Exception as err:
             job.log(f"{err}: putting the previous definition back")
             await self._rollback_update(job, replacement)
@@ -828,7 +929,7 @@ class Manager:
                 raise JobFailed(str(err)) from None
             raise
         await asyncio.to_thread(replacement.commit)
-        await asyncio.to_thread(self.registry.update, managed.name, tag_moved=None, history=self._history(new_marker["history"]),
+        await asyncio.to_thread(self.registry.update, managed.name, tag_moved=None, tampered=None, history=self._history(new_marker["history"]),
                                 **{k: new_marker[k] for k in ("version", "ref_kind", "ref", "sha", "updated_at", "stamp_version",
                                                               "created_by", "updated_by")})
         await self._save_copy(job, managed)
@@ -845,18 +946,42 @@ class Manager:
         except Exception as err:  # noqa: BLE001
             job.log(f"could not put it back: {err}")
 
+    def _definition_on_disk(self, managed: children.Managed) -> tuple[dict, dict]:
+        """For Install of a definition this job did not write: what its folder holds now (children.digest_tree), and
+        what the Supervisor must report for its config.yaml, which must be a definition this manager writes
+        (copies.check).  JobFailed otherwise."""
+        folder = children.child_path(self.root, managed.name)
+        manifest = children.digest_tree(folder)
+        try:
+            raw = copies.read_file(os.path.join(folder, "config.yaml"))
+            if manifest.get("config.yaml") != "sha256:" + hashlib.sha256(raw).hexdigest():
+                raise copies.CopyError("its config.yaml changed while it was read")
+            config = copies.check(yaml.safe_load(raw.decode("utf-8")), managed.name, str(managed.marker.get("version")),
+                                  managed.entry.get("channel"))
+        except (copies.CopyError, OSError, UnicodeDecodeError, yaml.YAMLError) as err:
+            raise JobFailed(f"{names.folder_name(managed.name)} is not a definition this manager writes ({err}): not "
+                            "installed; Delete removes it") from None
+        return stamp.expected_view(config, managed.slug), manifest
+
     async def _setup(self, job: Job, managed: children.Managed, install: bool) -> dict:
         try:
             installed = any(a.get("slug") == managed.slug for a in await self.sv.list_apps())
             if install:
                 if installed:
                     raise JobFailed(f"{managed.slug} is installed already")
-                await self._wait_store(job, managed.slug, managed.marker["version"])
+                expected, manifest = await asyncio.to_thread(self._definition_on_disk, managed)
+                await self._wait_store(job, managed.slug, managed.marker["version"], manifest)
+                await self._verify_store(job, managed, expected, manifest)
                 job.log("installing")
                 await self.sv.install(managed)
+                await self._verify_installed(job, managed, expected)
             elif not installed:
                 raise JobFailed(f"{managed.slug} is not installed: Install it")
             await self._finish_setup(job, managed)
+        except Tampered as err:
+            await self._uninstall_now(job, managed)
+            await self._mark_tampered(managed.name, str(err))
+            raise self._tampered(managed, str(err), "") from None
         except (SupervisorError, NotAllowed, RegistryError) as err:
             raise JobFailed(str(err)) from None
         info = await self._info(managed.slug) or {}
@@ -1079,19 +1204,23 @@ class Manager:
                               instance_id=entry.get("instance_id"))
         marker["created_at"] = entry.get("created_at") or marker["created_at"]
         job.log(f"writing {names.folder_name(name)} for {version} (installed: {installed}), then updating")
+        built: dict = {}
         try:
             await asyncio.to_thread(self.registry.put, name,
                                     self._registry_entry(marker, setup_complete=entry.get("setup_complete", True)))
             managed = await asyncio.to_thread(
                 children.write_new, self.root, name,
-                self._builder(job, archive, channel, name, version, sha, marker, source), self.registry)
+                self._builder(job, archive, channel, name, version, sha, marker, source, built=built), self.registry)
         except (stamp.TemplateError, children.UnsafePath, children.NotManaged, RegistryError, OSError, JobFailed) as err:
             await asyncio.to_thread(self._restore_entry, name, entry, marker["instance_id"])
             raise JobFailed(f"the definition was not written: {err}") from None
+        expected = stamp.expected_view(built["config"], slug)
         try:
-            await self._wait_store(job, slug, version)
+            await self._wait_store(job, slug, version, managed.manifest)
+            await self._verify_store(job, managed, expected, managed.manifest)
             job.log(f"updating {installed} -> {version}" + (" (building)" if channel == "git" else ""))
             await self.sv.update(managed)
+            await self._verify_installed(job, managed, expected)
             after = await self.sv.app_info(slug)
             if after.get("version") != version:
                 raise JobFailed(f"the Supervisor reports {after.get('version')} after the update, not {version}")
@@ -1099,6 +1228,12 @@ class Manager:
             job.log("the manager is stopping: removing the definition again")
             await self._shielded(job, self._undo_detached(job, managed, entry), "removing it")
             raise
+        except Tampered as err:
+            job.log(f"{err}: uninstalling it, and removing the definition again")
+            await self._uninstall_now(job, managed)
+            await self._undo_detached(job, managed, entry)
+            await self._mark_tampered(name, str(err))
+            raise self._tampered(managed, str(err), "and its definition removed again") from None
         except Exception as err:
             job.log(f"{err}: removing the definition again (the instance stays as it was)")
             await self._undo_detached(job, managed, entry)

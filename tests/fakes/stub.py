@@ -68,6 +68,27 @@ USERS = [core_user(ALICE_ID, "alice", groups=("system-admin",)), core_user(BOB_I
          core_user(OLGA_ID, "olga", owner=True, groups=()), core_user(DAVE_ID, "dave", active=False, groups=("system-admin",))]
 
 
+def definition_view(data: dict) -> dict:
+    """The privilege-bearing fields a Supervisor reports of a definition (store info and app info), from its
+    config.yaml with the Supervisor's defaults (apps/validate.py): what the manager checks around an install."""
+    return {"hassio_role": data.get("hassio_role", "default"), "hassio_api": bool(data.get("hassio_api", False)),
+            "homeassistant_api": bool(data.get("homeassistant_api", False)), "auth_api": bool(data.get("auth_api", False)),
+            "full_access": bool(data.get("full_access", False)), "docker_api": bool(data.get("docker_api", False)),
+            "host_network": bool(data.get("host_network", False)), "host_pid": bool(data.get("host_pid", False)),
+            "apparmor": "disable" if data.get("apparmor") is False else "default",
+            "host_ipc": bool(data.get("host_ipc", False)), "host_uts": bool(data.get("host_uts", False)),
+            "host_dbus": bool(data.get("host_dbus", False)), "privileged": list(data.get("privileged") or []),
+            "devices": list(data.get("devices") or []), "uart": bool(data.get("uart", False)),
+            "usb": bool(data.get("usb", False)), "gpio": bool(data.get("gpio", False)), "video": bool(data.get("video", False)),
+            "audio": bool(data.get("audio", False)), "kernel_modules": bool(data.get("kernel_modules", False)),
+            "devicetree": bool(data.get("devicetree", False)), "udev": bool(data.get("udev", False)),
+            "ingress": bool(data.get("ingress", False)), "network": dict(data.get("ports") or {})}
+
+
+STORE_DEFINITION = ("hassio_role", "hassio_api", "homeassistant_api", "auth_api", "full_access", "docker_api",
+                    "host_network", "host_pid", "apparmor", "ingress")
+
+
 def ok(data=None) -> web.Response:
     return web.json_response({"result": "ok", "data": data if data is not None else {}})
 
@@ -100,6 +121,10 @@ class Stub:
         self.store_frozen = False  # a reload that notices nothing, as the Supervisor after a file dated in the future
         self.ws_messages: list[object] = []  # every message the manager sent to Core
         self.ws_connections = 0
+        # what the store reports of a definition over what its config.yaml says (a definition changed between the
+        # manager's last look and the Supervisor's reading of it), and what an install or update then installs
+        self.store_override: dict[str, dict] = {}
+        self.install_override: dict[str, dict] = {}
 
     # ---------------------------------------------------------------- Supervisor
 
@@ -119,6 +144,7 @@ class Stub:
             readme = path.parent / "README.md"
             found[slug] = {"slug": slug, "name": data.get("name"), "version": str(data["version"]), "url": data.get("url"),
                            "image": data.get("image"), "options": data.get("options") or {}, "folder": str(path.parent),
+                           "definition": definition_view(data),
                            # the Supervisor's long_description: the README.md next to the config, if any
                            "readme": readme.read_text(encoding="utf-8") if readme.is_file() else None}
         return found
@@ -168,7 +194,7 @@ class Stub:
         app = self.installed[slug]
         view = self._app_view(slug)
         detached = view["detached"]
-        return ok({**APP_INFO, **{k: view[k] for k in ("slug", "name", "version", "version_latest", "update_available",
+        return ok({**APP_INFO, **app.get("definition", {}), **{k: view[k] for k in ("slug", "name", "version", "version_latest", "update_available",
                                                          "state", "url", "repository", "build", "detached", "available")},
                    "hostname": slug.replace("_", "-"), "dns": [f"{slug.replace('_', '-')}.local.hass.io"],
                    "options": app.get("options", {}), "boot": app.get("boot", "auto"), "watchdog": app.get("watchdog", False),
@@ -215,7 +241,9 @@ class Stub:
                        extra_fields={"app": slug})
         app = self.installed.get(slug)
         # version: the installed app's (None when not installed); version_latest: the definition's
-        return ok({**STORE_APP, "slug": slug, "name": store["name"], "repository": "local", "url": store["url"],
+        definition = {**store["definition"], **self.store_override.get(slug, {})}
+        return ok({**STORE_APP, **{k: definition[k] for k in STORE_DEFINITION}, "slug": slug, "name": store["name"],
+                   "repository": "local", "url": store["url"],
                    "installed": app is not None, "version": app["version"] if app else None,
                    "version_latest": store["version"], "available": True, "detached": False, "long_description": store["readme"],
                    "update_available": bool(app and app["version"] != store["version"]), "build": store["image"] is None})
@@ -240,7 +268,8 @@ class Stub:
             self.installed[slug] = {"slug": slug, "name": store["name"], "version": store["version"], "state": "stopped",
                                     "boot": "manual", "watchdog": False, "ingress_panel": False, "url": store["url"],
                                     "repository": "local", "build": store["image"] is None, "options": options,
-                                    "ingress_url": f"/api/hassio_ingress/{secrets.token_urlsafe(16)}/"}
+                                    "ingress_url": f"/api/hassio_ingress/{secrets.token_urlsafe(16)}/",
+                                    "definition": {**store["definition"], **self.install_override.get(slug, {})}}
             self.kept_data.discard(slug)
         else:
             app = self.installed.get(slug)
@@ -250,6 +279,7 @@ class Stub:
                 return err("No update available")
             app["version"] = store["version"]
             app["name"] = store["name"]
+            app["definition"] = {**store["definition"], **self.install_override.get(slug, {})}
         return ok()
 
     async def self_info(self, request):
