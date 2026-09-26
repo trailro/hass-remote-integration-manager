@@ -194,7 +194,9 @@ class SupervisorClient:
 
     async def call(self, method: str, path: str, *, body: dict | None = None, managed: children.Managed | None = None) -> Any:
         """The choke point: every request to the Supervisor is made here, after ``authorize``."""
-        rule = authorize(method, path, body, managed)
+        # a changing call re-reads the marker and the registry (up to 4 MB) under the registry's lock: off the event loop
+        rule = (await asyncio.to_thread(authorize, method, path, body, managed) if managed is not None
+                else authorize(method, path, body, managed))
         session = self._get_session()
         kwargs: dict[str, Any] = {
             "headers": {"Authorization": f"Bearer {self._token}"},

@@ -5,6 +5,7 @@ an app's info holds beyond the listed fields (its options: an instance's passwor
 import asyncio
 import json
 import os
+import threading
 import unittest
 from unittest import mock
 
@@ -247,6 +248,19 @@ class AllowListTest(unittest.TestCase):
         for _, _, kw in session.requests:
             self.assertEqual(kw["headers"], {"Authorization": "Bearer t"})
             self.assertFalse(kw["allow_redirects"])
+
+    def test_the_marker_and_registry_are_read_off_the_event_loop(self):
+        client = SupervisorClient("http://supervisor", "t", session=RecordingSession())
+        load = children.load_managed
+        threads = []
+
+        def recording(*args, **kw):
+            threads.append(threading.current_thread() is threading.main_thread())
+            return load(*args, **kw)
+
+        with mock.patch.object(children, "load_managed", side_effect=recording):
+            asyncio.run(client.start(self.garage))
+        self.assertEqual(threads, [False])
 
     def test_every_request_goes_through_authorize(self):
         """No method of the client talks to the session by itself."""
