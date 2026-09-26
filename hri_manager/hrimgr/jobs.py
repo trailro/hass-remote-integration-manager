@@ -20,6 +20,10 @@ class Busy(Exception):
     pass
 
 
+class ShuttingDown(Busy):
+    """The manager is stopping: no job starts any more (a request already past the guard gets 503)."""
+
+
 class JobFailed(Exception):
     """A failure whose message is for the user as it is."""
 
@@ -88,6 +92,12 @@ class Jobs:
     def __init__(self):
         self._jobs: dict[str, Job] = {}
         self._running: dict[str, Job] = {}
+        self._closing = False
+
+    def close(self) -> None:
+        """No job starts from now on (the stop began): one started after the running ones were cancelled would run
+        on, uncancelled, while its sessions are closed under it."""
+        self._closing = True
 
     def running_for(self, instance: str) -> Job | None:
         return self._running.get(instance)
@@ -99,6 +109,8 @@ class Jobs:
         return sorted(self._jobs.values(), key=lambda j: j.started, reverse=True)
 
     def start(self, instance: str, action: str, user: str, work: Callable[[Job], Awaitable[dict | None]]) -> Job:
+        if self._closing:
+            raise ShuttingDown("HRI Manager is stopping: try again once it has started again")
         if instance in self._running:
             other = self._running[instance]
             raise Busy(f"{instance} is busy: {other.action} started by {other.user or 'someone'} is still running")
