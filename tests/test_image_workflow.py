@@ -85,9 +85,8 @@ class ImageJobTest(unittest.TestCase):
             step = next(s for s in job["steps"] if s.get("name") == name)
             self.assertEqual(step.get("if"), f"steps.{decide['id']}.outputs.move == 'true'", name)
         pull = _step(job, "Anyone can pull the image, for both architectures")
-        self.assertIn('DOCKER_CONFIG="$(mktemp -d)"', pull)  # no credentials: as a Supervisor pulls
-        self.assertIn("linux/arm64", pull)
-        self.assertIn("linux/amd64", pull)
+        # anonymously, both architectures: tests/test_published_image.py tests that script
+        self.assertIn('.github/check_published_image.py --ref "$IMAGE:${TAG#v}"', pull)
 
 
 class AppVersionStepTest(unittest.TestCase):
