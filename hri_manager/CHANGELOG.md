@@ -25,6 +25,8 @@ Fixes from a first run on a real Home Assistant OS 18.3 (Supervisor 2026.09.2). 
   recorded needs attention, and Repair refuses it; a Rebuild onto a branch or tag whose current commit is the
   installed one was refused too ("Repair writes its definition"). It now writes that commit's definition (the
   installed version: nothing to update) and records that branch or tag and commit, after Repair's checks.
+- An automatic repair that finds an instance **needs attention** no longer promises a next try that never comes: the
+  log and the row give the reason and the actions (Update or Rebuild, Delete, Repair), with no retry note.
 - A local build of HRI (`local_hass_remote_integration`) is labelled as such, not as the published app.
 - Docs: turn on **Show in sidebar** after installing the manager (the Supervisor leaves it off); one integration per
   instance, and two instances of the same integration cannot share an MQTT broker.

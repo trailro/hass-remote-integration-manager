@@ -176,7 +176,8 @@ class Manager:
             if entry["name"] in started:
                 job = self.jobs.get(started[entry["name"]])
                 entry["job"], entry["actions"] = job.summary(), []
-            entry["auto_repair"] = self._auto_repair_note(entry["name"])
+            # needs attention: its problem says why and what to do; automatic repair has nothing more to say
+            entry["auto_repair"] = None if entry.get("needs_attention") else self._auto_repair_note(entry["name"])
         infos = await asyncio.gather(*(self._info(e["slug"]) for e in out if e["installed"]))
         by_slug = {i.get("slug"): i for i in infos if i}
         for entry in out:
@@ -219,6 +220,12 @@ class Manager:
         job.log("started automatically: the instance is installed, detached and its definition folder is gone")
         try:
             result = await self._repair(job, name, AUTO_USER)
+        except NeedsAttention as err:
+            # left to the user from now on (the list does not repair it again): no back-off, no next try
+            self.auto_backoff.pop(name, None)
+            _LOGGER.warning("the automatic repair of %s needs attention: %s. Nothing was written, and it is not tried "
+                            "again automatically: Update or Rebuild, Delete, or Repair on its row", name, err)
+            raise
         except Exception as err:
             previous = self.auto_backoff.get(name, {})
             failures = previous.get("failures", 0) + 1
