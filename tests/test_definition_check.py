@@ -6,6 +6,7 @@ the installed app's after it, uninstalling it at once when they differ."""
 
 import json
 import os
+import shutil
 import time
 import unittest
 from unittest import mock
@@ -290,6 +291,49 @@ class FlowCheckTest(unittest.IsolatedAsyncioTestCase):
                 self.assertIn("is marked", answer["error"])
         job = await env.job(await env.send("POST", "/api/instances/garage/stop"))
         self.assertEqual(job["state"], "succeeded", job)
+
+    def installed_as(self, **fields):
+        """What the Supervisor holds of the installed app, changed behind the manager's back."""
+        self.env.stub.installed["local_hri_garage"]["definition"].update(fields)
+
+    async def test_finish_setup_checks_the_installed_app_first(self):
+        env = self.env
+        self.assertEqual((await self.create())["state"], "succeeded")
+        env.registry.update("garage", setup_complete=False)
+        env.stub.installed["local_hri_garage"]["state"] = "stopped"
+        self.installed_as(hassio_role="admin")
+        since = len(env.stub.calls)
+        job = await env.job(await env.send("POST", "/api/instances/garage/finish"))
+        self.assertEqual(job["state"], "failed", job)
+        self.assertIn("hassio_role: 'admin', not 'default'", job["error"])
+        self.assertFalse(self.called("/addons/local_hri_garage/start", since))
+        self.assertFalse(self.called("/addons/local_hri_garage/options", since))
+        self.assertNotIn("local_hri_garage", env.stub.installed)
+
+    async def test_an_update_the_supervisor_already_made_is_checked_before_it_is_recorded(self):
+        env = self.env
+        self.assertEqual((await self.create())["state"], "succeeded")
+        # the Supervisor finished an update the manager had stopped waiting for, from a changed definition
+        env.stub.installed["local_hri_garage"]["version"] = "0.25.1"
+        self.installed_as(docker_api=True)
+        job = await env.job(await env.send("POST", "/api/instances/garage/update", {"version": "0.25.1"}))
+        self.assertEqual(job["state"], "failed", job)
+        self.assertIn("docker_api: True, not False", job["error"])
+        self.assertFalse(self.called("/store/addons/local_hri_garage/update"))
+        self.assertNotIn("local_hri_garage", env.stub.installed)
+        self.assertEqual(env.registry.get("garage")["version"], "0.25.0")  # never recorded
+
+    async def test_repair_checks_the_installed_app_before_it_takes_it_over(self):
+        env = self.env
+        self.assertEqual((await self.create())["state"], "succeeded")
+        shutil.rmtree(self.folder())
+        await env.sv.reload_store()
+        self.installed_as(full_access=True)
+        job = await env.job(await env.send("POST", "/api/instances/garage/repair"))
+        self.assertEqual(job["state"], "failed", job)
+        self.assertIn("full_access: True, not False", job["error"])
+        self.assertNotIn("local_hri_garage", env.stub.installed)
+        self.assertTrue(env.registry.get("garage")["tampered"]["uninstalled"])
 
     def unreported(self, key):
         """A Supervisor whose app info no longer carries ``key`` (its API changed)."""
