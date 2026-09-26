@@ -26,7 +26,6 @@ manager version that vets it.  The YAML is written with ``yaml.safe_dump``."""
 
 from __future__ import annotations
 
-import errno
 import fnmatch
 import json
 import os
@@ -414,11 +413,13 @@ def decoys(root: str) -> list[Decoy]:
     such file that declares a slug in the manager's space (in_manager_space) is a decoy, except an instance folder's
     own definition, ``<slug>/config.yaml`` at the root of the folder named as its slug.  So is a ``config.*`` the
     manager cannot read (not a regular file: a FIFO could serve the Supervisor a definition; larger than
-    MAX_APP_CONFIG; unreadable), while one that does not parse is not (the Supervisor cannot read it either).
+    MAX_APP_CONFIG; unreadable), and any ``config.*`` that is a link, whatever it points to: the Supervisor resolves it
+    from its own mount of the folder, where an absolute link may reach a file the manager cannot see.  One that does
+    not parse is not a decoy (the Supervisor cannot read it either).
 
     Walked by folder descriptors, never through a link to a folder (as the Supervisor's glob), skipping dot folders and
-    ``rootfs``; a config file that is a link is read through it, as the Supervisor reads it.  Parsed values are never
-    spelled out (YAML aliases).  ScanError when the folder cannot be searched to its end."""
+    ``rootfs``; an entry gone since it was listed is skipped.  Parsed values are never spelled out (YAML aliases).
+    ScanError when the folder cannot be searched to its end."""
     out: list[Decoy] = []
     try:
         real_root = os.path.realpath(root)
@@ -428,32 +429,39 @@ def decoys(root: str) -> list[Decoy]:
             if stat.S_ISDIR(st.st_mode) or not is_app_config(rel):
                 continue
             shown = tarsafe.show(rel)
-            try:
-                fd = children.open_regular(name, parent, follow=True)
-            except (FileNotFoundError, NotADirectoryError):
-                continue  # a link to nothing: the Supervisor cannot read it either
-            except children.UnsafePath:
-                out.append(Decoy(rel, None, f"{shown} is not a regular file, so the manager cannot check which app it "
-                                            "defines"))
+            if stat.S_ISLNK(st.st_mode):
+                # the Supervisor resolves it from its own mount of the folder (/data/apps/local), not the manager's:
+                # what it points to there may be a file the manager cannot see.  Never followed, whatever its target
+                out.append(Decoy(rel, None, f"{shown} in the local apps folder is a link, which the Supervisor may read "
+                                            "as an app the manager cannot check: remove it, or put the file itself there"))
                 continue
-            except OSError as err:
-                if err.errno == errno.ELOOP:
-                    continue
-                out.append(Decoy(rel, None, f"{shown} cannot be read ({err.strerror}), so the manager cannot check which "
-                                            "app it defines"))
+            try:
+                fd = children.open_regular(name, parent)
+            except FileNotFoundError:
+                continue  # gone since it was listed, as for the Supervisor's glob
+            except children.UnsafePath:
+                out.append(Decoy(rel, None, f"{shown} in the local apps folder is not a regular file (a FIFO?), so the "
+                                            "manager cannot check which app it defines: remove it"))
+                continue
+            except OSError as err:  # ELOOP: swapped for a link since it was listed
+                out.append(Decoy(rel, None, f"{shown} in the local apps folder cannot be read ({err.strerror}), so the "
+                                            "manager cannot check which app it defines: remove it, or fix its "
+                                            "permissions"))
                 continue
             with os.fdopen(fd, "rb") as fh:
                 raw = fh.read(MAX_APP_CONFIG + 1)
             if len(raw) > MAX_APP_CONFIG:
-                out.append(Decoy(rel, None, f"{shown} is larger than the manager reads, so it cannot check which app it "
-                                            "defines"))
+                out.append(Decoy(rel, None, f"{shown} in the local apps folder is larger than the manager reads "
+                                            f"({MAX_APP_CONFIG // 1024} KiB), so it cannot check which app it defines: "
+                                            "move or remove it"))
                 continue
             try:
                 data = json.loads(raw) if rel.endswith(".json") else yaml.load(raw.decode("utf-8"), Loader=_LOADER)
             except (ValueError, UnicodeDecodeError, yaml.YAMLError):
                 continue
             except RecursionError:
-                out.append(Decoy(rel, None, f"{shown} is nested too deeply for the manager to read"))
+                out.append(Decoy(rel, None, f"{shown} in the local apps folder is nested too deeply for the manager "
+                                            "to read: move or remove it"))
                 continue
             slug = data.get("slug") if isinstance(data, dict) else None
             if not isinstance(slug, str) or not in_manager_space(slug) or rel.split("/") == [slug, "config.yaml"]:
