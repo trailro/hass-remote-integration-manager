@@ -119,6 +119,10 @@ class Stub:
         self.users: object = [dict(u) for u in USERS]  # what config/auth/list answers (tests put other shapes here)
         self.core_down = False
         self.store_frozen = False  # a reload that notices nothing, as the Supervisor after a file dated in the future
+        # a reload that reads the folder again only when its newest modification time changed, as the Supervisor's
+        # local repository does (store/repository.py update(), utils get_latest_mtime)
+        self.mtime_cached = False
+        self._cached_mtime: float | None = None
         self.ws_messages: list[object] = []  # every message the manager sent to Core
         self.ws_connections = 0
         # what the store reports of a definition over what its config.yaml says (a definition changed between the
@@ -229,9 +233,26 @@ class Stub:
                 self.kept_data.add(slug)
         return ok()
 
+    def latest_mtime(self) -> float:
+        """The Supervisor's get_latest_mtime: the folder's own and every entry's below it (stat, through links),
+        skipping what vanished or loops."""
+        latest = self.local_apps.stat().st_mtime
+        for path in self.local_apps.rglob("*"):
+            try:
+                latest = max(latest, path.stat().st_mtime)
+            except (FileNotFoundError, RuntimeError, OSError):
+                continue
+        return latest
+
     async def store_reload(self, request):
-        if not self.store_frozen:
-            self.store = self._scan()
+        if self.store_frozen:
+            return ok()
+        if self.mtime_cached:
+            latest = self.latest_mtime()
+            if latest == self._cached_mtime:
+                return ok()
+            self._cached_mtime = latest
+        self.store = self._scan()
         return ok()
 
     async def store_app(self, request):
@@ -268,7 +289,8 @@ class Stub:
             options["password"] = "child-secret-password"  # what an instance's options may hold: never shown
             self.installed[slug] = {"slug": slug, "name": store["name"], "version": store["version"], "state": "stopped",
                                     "boot": "manual", "watchdog": False, "ingress_panel": False, "url": store["url"],
-                                    "repository": "local", "build": store["image"] is None, "options": options,
+                                    "repository": "local", "build": store["image"] is None, "image": store["image"],
+                                    "options": options,
                                     "ingress_url": f"/api/hassio_ingress/{secrets.token_urlsafe(16)}/",
                                     "definition": {**store["definition"], **self.install_override.get(slug, {})}}
             self.kept_data.discard(slug)

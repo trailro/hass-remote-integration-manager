@@ -992,6 +992,29 @@ class DecoyFlowTest(FlowBase):
         self.assertNotIn(("POST", "/store/reload", {}), env.stub.calls[since:])
         self.assertNotIn("local_hri_garage", env.stub.installed)
 
+    async def test_a_decoy_the_store_still_holds_after_it_was_removed_is_not_installed(self):
+        """F3: the Supervisor reads the local apps folder again only when its newest modification time changes.  A
+        writer plants a decoy, waits for a reload, removes it and puts the newest time back (touch -r): the store keeps
+        the decoy's definition while every look at the folder finds nothing.  Before the reload that precedes an
+        install, the manager makes the folder's own time the newest, so the store reads it again."""
+        env = self.env
+        env.stub.mtime_cached = True
+        self.assertEqual((await self.create())["state"], "succeeded")
+        del env.stub.installed["local_hri_garage"]  # a definition without its app: Install
+        self.decoy()
+        await env.sv.reload_store()  # someone else's reload, or the Supervisor's own every 3 hours
+        self.assertEqual(env.stub.store["local_hri_garage"]["image"], "example.com/evil/img")
+        newest = max(os.stat(os.path.join(d, e)).st_mtime_ns
+                     for d, dirs, files in os.walk(env.local_apps) for e in dirs + files)
+        newest = max(newest, os.stat(env.local_apps).st_mtime_ns)
+        shutil.rmtree(os.path.join(env.local_apps, "x"))
+        os.utime(env.local_apps, ns=(newest, newest))  # touch -r: the newest time as it was
+        await env.sv.reload_store()
+        self.assertEqual(env.stub.store["local_hri_garage"]["image"], "example.com/evil/img")  # not read again
+        job = await env.job(await env.send("POST", "/api/instances/garage/install"))
+        self.assertEqual(job["state"], "succeeded", job)
+        self.assertEqual(env.stub.installed["local_hri_garage"]["image"], stamp.HRI_IMAGE)
+
     async def test_update_is_refused_while_a_decoy_of_the_new_version_appears(self):
         env = self.env
         self.assertEqual((await self.create())["state"], "succeeded")

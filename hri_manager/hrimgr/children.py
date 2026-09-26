@@ -25,6 +25,7 @@ import re
 import secrets
 import shutil
 import stat
+import time
 from dataclasses import dataclass, field
 from typing import Callable
 
@@ -590,15 +591,14 @@ def check_tree(root: str, name: str, manifest: dict[str, str]) -> None:
         raise DefinitionChanged(f"{names.folder_name(name)} was changed after the manager wrote it ({shown})")
 
 
-def newest_future(root: str, slack: float = 5.0) -> tuple[str, float] | None:
-    """The newest file or folder of the local apps folder when it is dated in the future: (relative path, mtime).  The
-    Supervisor notices a change there only when the newest date changes (utils get_latest_mtime), so such a file hides
-    every later change to any local app."""
+def newest(root: str) -> tuple[str, float] | None:
+    """The newest entry of the local apps folder, the folder itself (``.``) included, by its modification time through
+    links, as the Supervisor's get_latest_mtime takes it: (relative path, mtime); None when the folder is missing."""
     try:
         real_root = _root(root)
-    except UnsafePath:
+        found: tuple[str, float] = (".", os.stat(real_root).st_mtime)
+    except (UnsafePath, OSError):
         return None
-    newest: tuple[str, float] | None = None
     for folder, dirnames, filenames in os.walk(real_root):
         for entry in dirnames + filenames:
             path = os.path.join(folder, entry)
@@ -606,9 +606,33 @@ def newest_future(root: str, slack: float = 5.0) -> tuple[str, float] | None:
                 mtime = os.stat(path).st_mtime
             except OSError:
                 continue
-            if newest is None or mtime > newest[1]:
-                newest = (os.path.relpath(path, real_root), mtime)
-    return newest if newest and newest[1] > _dt.datetime.now().timestamp() + slack else None
+            if mtime > found[1]:
+                found = (os.path.relpath(path, real_root), mtime)
+    return found
+
+
+def newest_future(root: str, slack: float = 5.0) -> tuple[str, float] | None:
+    """The newest file or folder of the local apps folder when it is dated in the future: (relative path, mtime).  The
+    Supervisor notices a change there only when the newest date changes (utils get_latest_mtime), so such a file hides
+    every later change to any local app."""
+    found = newest(root)
+    return found if found and found[1] > _dt.datetime.now().timestamp() + slack else None
+
+
+def force_reread(root: str) -> None:
+    """Make the Supervisor's store read the local apps folder again at its next reload.  Its local repository reads
+    it only when the newest modification time of the folder and everything below it changes (store/repository.py
+    LocalRepository.update, utils get_latest_mtime; store.reload then runs data.update): a writer who removes a decoy
+    and puts the newest time back (touch -r) leaves the store holding the decoy's definition.  The folder's own time
+    is set just past the newest (never in the future beyond newest_future's slack: the caller refuses a folder that
+    has such an entry), so the newest time changes and the next reload reads the folder.
+
+    A writer of the folder (root, in practice) can still race this, changing the folder between this and the
+    Supervisor's reading of it: the documented limit of what the manager can check (README, Security model)."""
+    real_root = _root(root)
+    found = newest(real_root)
+    target_ns = max(time.time_ns(), int(((found[1] if found else 0.0) + 0.001) * 1e9))
+    os.utime(real_root, ns=(os.stat(real_root).st_atime_ns, target_ns))
 
 
 _OLD_RE = re.compile(re.escape(OLD_PREFIX) + r"(" + names.NAME_RE.pattern + r")-[0-9a-f]{8}")
