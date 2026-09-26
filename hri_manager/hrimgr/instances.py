@@ -43,7 +43,8 @@ class InvalidRequest(ValueError):
 
 
 REGISTRY_FIELDS = ("name", "slug", "channel", "version", "ref_kind", "ref", "sha", "instance_id", "created_at", "updated_at",
-                   "stamp_version")
+                   "stamp_version", "created_by", "updated_by", "history")
+HISTORY_KEYS = ("channel", "version", "ref_kind", "ref", "sha", "updated_at", "event", "by")
 
 
 class Manager:
@@ -570,7 +571,16 @@ class Manager:
 
     @staticmethod
     def _registry_entry(marker: dict, **extra) -> dict:
-        return {**{k: marker.get(k) for k in REGISTRY_FIELDS}, "setup_complete": False, **extra}
+        return {**{k: marker.get(k) for k in REGISTRY_FIELDS}, "history": Manager._history(marker.get("history")),
+                "setup_complete": False, **extra}
+
+    @staticmethod
+    def _history(value: object) -> list[dict]:
+        """A marker's history as the registry keeps it (the marker was read from the local apps folder): its last
+        HISTORY entries, each of the known keys only, with short text values."""
+        items = value if isinstance(value, list) else []
+        return [{k: v for k, v in item.items() if k in HISTORY_KEYS and (v is None or (isinstance(v, str) and len(v) <= 200))}
+                for item in items[-HISTORY:] if isinstance(item, dict)]
 
     def _clear_auto(self, name: str, keep_job: str | None = None) -> None:
         """Forget what automatic repair remembers of ``name`` (its failures, and its last job unless it is
@@ -818,8 +828,9 @@ class Manager:
                 raise JobFailed(str(err)) from None
             raise
         await asyncio.to_thread(replacement.commit)
-        await asyncio.to_thread(self.registry.update, managed.name, tag_moved=None,
-                                **{k: new_marker[k] for k in ("version", "ref_kind", "ref", "sha", "updated_at", "stamp_version")})
+        await asyncio.to_thread(self.registry.update, managed.name, tag_moved=None, history=self._history(new_marker["history"]),
+                                **{k: new_marker[k] for k in ("version", "ref_kind", "ref", "sha", "updated_at", "stamp_version",
+                                                              "created_by", "updated_by")})
         await self._save_copy(job, managed)
         if restamp:
             job.log(f"the definition is stamped by this manager now (stamping {marker.get('stamp_version')} -> "
@@ -993,13 +1004,23 @@ class Manager:
         return await self._write_repaired(job, name, entry, channel, version, ref, sha, source, archive, copy, user)
 
     async def _write_repaired(self, job: Job, name: str, entry: dict, channel: str, version: str, ref: tuple[str, str],
-                              sha: str | None, source: str, archive, copy: copies.Copy | None, user: str) -> dict:
+                              sha: str | None, source: str, archive, copy: copies.Copy | None, user: str,
+                              event: str = "repaired") -> dict:
         slug = names.supervisor_slug(name)
         marker = self._marker(name, channel, version, ref, sha, source, user, instance_id=entry.get("instance_id"))
         if copy is not None and isinstance(copy.meta.get("stamp_version"), int):
             marker["stamp_version"] = copy.meta["stamp_version"]  # the copy's config, as that manager stamped it
         marker["repaired_at"] = marker["updated_at"]
         marker["created_at"] = entry.get("created_at") or marker["created_at"]
+        # the marker's history, from the registry (the folder is gone), and this write added to it
+        marker["created_by"] = entry.get("created_by") or marker["created_by"]
+        if entry.get("updated_by"):
+            marker["updated_by"] = entry["updated_by"]
+        history = self._history(entry.get("history"))
+        history.append({**{k: entry.get(k) for k in ("channel", "version", "ref_kind", "ref", "sha", "updated_at")},
+                        "event": f"{event} ({'automatic' if user == AUTO_USER else 'manual'}) at {marker['repaired_at']}",
+                        "by": user})
+        marker["history"] = self._history(history)
         setup_complete = entry.get("setup_complete", True)
         job.log(f"writing {names.folder_name(name)} again for {version}, the installed version")
         try:
@@ -1104,7 +1125,8 @@ class Manager:
             raise JobFailed(f"{err}: not a commit of HRI's {ref[0]} {ref[1]}") from None
         except GitHubError as err:
             raise JobFailed(str(err)) from None
-        return await self._write_repaired(job, name, entry, "git", version, ref, sha, source, archive, None, user)
+        return await self._write_repaired(job, name, entry, "git", version, ref, sha, source, archive, None, user,
+                                          event="rebuilt at the installed commit")
 
     async def _undo_detached(self, job: Job, managed: children.Managed, entry: dict) -> None:
         try:
