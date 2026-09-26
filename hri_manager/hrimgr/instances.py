@@ -1073,7 +1073,10 @@ class Manager:
                     raise JobFailed(f"the {new_ref[0]} {new_ref[1]} is at the installed commit: Repair writes its definition")
                 return await self._adopt_installed_commit(job, name, entry, info, new_ref, archive, source, user)
         sha = archive.sha
-        marker = self._marker(name, channel, version, new_ref, sha, source, user, instance_id=entry.get("instance_id"))
+        # the registry's entry as the previous marker (the folder is gone): who created it, its history, this update
+        marker = self._marker(name, channel, version, new_ref, sha, source, user,
+                              previous={**entry, "history": self._history(entry.get("history"))},
+                              instance_id=entry.get("instance_id"))
         marker["created_at"] = entry.get("created_at") or marker["created_at"]
         job.log(f"writing {names.folder_name(name)} for {version} (installed: {installed}), then updating")
         try:

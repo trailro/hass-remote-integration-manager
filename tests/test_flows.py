@@ -756,6 +756,26 @@ class FlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(os.listdir(env.local_apps), [])
         self.assertFalse(os.path.exists(self.copy_dir("garage")))
 
+    async def test_an_update_of_an_instance_that_needs_attention_keeps_its_history(self):
+        """Update (or Rebuild) of an instance whose definition is gone: the new marker carries who created it and its
+        history (from the registry: the folder is gone), with the update added as for any update."""
+        env = self.env
+        await self.create()
+        env.registry.update("garage", created_by="carol")
+        before = env.registry.get("garage")
+        await self._detach("garage")
+        shutil.rmtree(self.copy_dir("garage"))
+        env.stub.releases.remove("0.25.0")
+        await self.assert_needs_attention("garage", "not a published release")
+        job = await env.job(await env.send("POST", "/api/instances/garage/update", {"version": "0.25.1"}))
+        self.assertEqual(job["state"], "succeeded", job)
+        m = self.marker("garage")
+        self.assertEqual((m["version"], m["created_at"], m["created_by"], m["updated_by"]),
+                         ("0.25.1", before["created_at"], "carol", "alice"))
+        self.assertEqual(m["history"], [{k: before[k] for k in ("channel", "version", "ref_kind", "ref", "sha", "updated_at")}])
+        entry = env.registry.get("garage")
+        self.assertEqual((entry["created_by"], entry["updated_by"], entry["history"]), ("carol", "alice", m["history"]))
+
     async def test_a_template_source_never_writes_a_line_of_its_own(self):
         """copy.json's (or a marker's) template_source becomes the config's header comment: a newline in it would add
         keys the Supervisor reads."""

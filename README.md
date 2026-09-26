@@ -217,7 +217,8 @@ has moved it to `apps/local` (an upstream issue of the Supervisor, not of this a
     tag the instance was built from (codeload serves forks' commits under HRI's name too), and refuses it otherwise.
 
   A repair keeps the instance's history (who created it, its updates) from the registry, and adds itself to it
-  (`repaired (automatic)` or `repaired (manual)`). For an instance created by 0.1.0 the registry has that history
+  (`repaired (automatic)` or `repaired (manual)`); so does an Update or Rebuild of an instance that needs attention,
+  recorded as any update. For an instance created by 0.1.0 the registry has that history
   from its first update by 0.1.1 on; a repair before that starts a new one.
 
   Repair uses a copy only when it is the copy of that instance (the registry's instance id and channel) at the
