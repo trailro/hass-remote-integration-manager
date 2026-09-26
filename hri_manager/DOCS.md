@@ -5,7 +5,9 @@ Runs several instances of
 integration each. Every instance is a separate local app, `local_hri_<name>`, with its own sidebar panel, options,
 data and backups.
 
-Open **HRI Manager** in the sidebar (Home Assistant administrators only):
+After installing, turn on **Show in sidebar** on this app's **Info** tab: the Supervisor leaves it off for a new
+app, so the sidebar has no **HRI Manager** entry until you do (**Open web UI** works meanwhile). Then open
+**HRI Manager** in the sidebar (Home Assistant administrators only):
 
 - **New instance**: a name (lowercase letters, digits and `_`, at most 20) and an HRI release (0.25.0 or newer).
   The manager writes HRI's own app definition for it, installs it, turns on start at boot, the Watchdog and the

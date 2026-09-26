@@ -28,8 +28,10 @@ release you choose. On a plain Docker install you do not need this: run one HRI 
 1. **Settings > Apps > App Store**, menu **⋮ > Repositories**, add
    `https://github.com/trailro/hass-remote-integration-manager`.
 2. Install **HRI Manager**. The Supervisor builds it on your machine (a small Python image); this takes a minute.
-3. Start it and open **HRI Manager** in the sidebar. It is for Home Assistant administrators only (see
-   [Security model](#security-model)).
+3. On its **Info** tab, turn on **Show in sidebar** (the Supervisor leaves it off for a newly installed app, so
+   there is no sidebar entry until you do), then **Start** it.
+4. Open **HRI Manager** in the sidebar (or **Open web UI** on its Info tab). It is for Home Assistant
+   administrators only (see [Security model](#security-model)).
 
 ## Creating an instance
 
