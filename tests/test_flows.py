@@ -691,6 +691,35 @@ class FlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(os.listdir(env.local_apps), [])
         self.assertFalse(os.path.exists(self.copy_dir("garage")))
 
+    async def test_a_template_source_never_writes_a_line_of_its_own(self):
+        """copy.json's (or a marker's) template_source becomes the config's header comment: a newline in it would add
+        keys the Supervisor reads."""
+        env = self.env
+        await self.create()
+        evil = "https://codeload.github.com/x\nprivileged:\n  - SYS_ADMIN\n#"
+        path = os.path.join(self.copy_dir("garage"), "copy.json")
+        with open(path, encoding="utf-8") as fh:
+            meta = json.load(fh)
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump({**meta, "template_source": evil}, fh)
+        await self._detach("garage")
+        job = await env.job(await env.send("POST", "/api/instances/garage/repair"))
+        self.assertEqual(job["state"], "succeeded", job)
+        self.assertTrue(any("copy of the definition is not used" in l["msg"] for l in job["lines"]), job["lines"])
+        self.assertNotIn("privileged", self.config("garage"))
+        # a marker with such a source is not the manager's, and is not copied at the start
+        shutil.rmtree(self.copy_dir("garage"))
+        self._write_marker({**self.marker("garage"), "template_source": evil})
+        await env.manager.auto_repair_loop()
+        self.assertFalse(os.path.exists(self.copy_dir("garage")))
+        status, data = await env.send("POST", "/api/instances/garage/restart")
+        self.assertEqual(status, 400, data)
+        for bad in ("x" * 501, "https://example.com/a b", "a\rb"):
+            with self.subTest(source=bad):
+                self._write_marker({**self.marker("garage"), "template_source": bad})
+                status, _ = await env.send("POST", "/api/instances/garage/restart")
+                self.assertEqual(status, 400)
+
     def _hand_made_app(self, folder="my_garage", slug="hri_garage"):
         """A local app someone wrote by hand in another folder, with an instance's slug and HRI's url, installed."""
         path = os.path.join(self.env.local_apps, folder)

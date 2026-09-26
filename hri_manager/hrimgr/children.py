@@ -79,6 +79,8 @@ def validate_marker(data: object, name: str) -> dict:
         raise NotManaged(f"the marker's channel {data.get('channel')!r} is unknown")
     if not isinstance(data.get("instance_id"), str) or not INSTANCE_ID_RE.fullmatch(data["instance_id"]):
         raise NotManaged("the marker has no instance id")
+    if not isinstance(data.get("template_source"), str) or not names.SOURCE_RE.fullmatch(data["template_source"]):
+        raise NotManaged("the marker's source is not a source URL")
     return data
 
 

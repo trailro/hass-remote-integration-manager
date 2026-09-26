@@ -191,6 +191,9 @@ def load(root: str, name: str, entry: dict, installed_version: str) -> Copy:
         raise CopyError(f"its {META} cannot be read: {err}") from None
     if not isinstance(meta, dict) or not isinstance(meta.get("instance_id"), str) or not INSTANCE_ID_RE.fullmatch(meta["instance_id"]):
         raise CopyError(f"its {META} has an unexpected shape")
+    source = meta.get("template_source")
+    if not isinstance(source, str) or not names.SOURCE_RE.fullmatch(source):
+        raise CopyError(f"its {META} names no source URL")
     if meta.get("instance_id") != entry.get("instance_id") or meta.get("name") != name:
         raise CopyError("it is the copy of another instance of that name")
     channel = meta.get("channel")

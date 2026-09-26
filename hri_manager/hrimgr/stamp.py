@@ -203,6 +203,9 @@ def stamp(template: dict, name: str, version: str, channel: str) -> dict:
 
 
 def dump(config: dict, source: str) -> bytes:
+    # the source is a comment line: a line break in it would write keys of its own
+    if not isinstance(source, str) or "\n" in source or "\r" in source:
+        raise TemplateError("the definition's source is not one line")
     head = (f"# Written by HRI Manager from {source}.\n"
             "# Do not edit: the manager rewrites this folder on every update.\n")
     return (head + yaml.safe_dump(config, sort_keys=False, allow_unicode=True, default_flow_style=False, width=1000)).encode("utf-8")
