@@ -45,8 +45,9 @@ class Env:
         self.sv = SupervisorClient(self.settings.supervisor_url, "test-token")
         self.gh = GitHub(os.path.join(self.data, "releases.json"), "", self.settings.github_api, self.settings.codeload)
         self.registry = Registry(os.path.join(self.data, FILE_NAME))
+        # no automatic repair here: the tests of the manual one would race it (tests/test_auto_repair.py turns it on)
         self.manager = Manager(self.local_apps, self.sv, self.gh, Jobs(), self.registry, dev=True, poll_interval=0.02,
-                               store_timeout=2)
+                               store_timeout=2, auto_repair_interval=None)
         self.users = CoreUsers(self.settings.core_ws_url, "test-token")
         self.client = TestClient(TestServer(create_app(self.settings, self.manager, self.users)), headers=USER)
         await self.client.start_server()

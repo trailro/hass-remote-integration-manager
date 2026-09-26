@@ -74,6 +74,14 @@ function channelCell(i) {
   if (i.channel === 'release') return '<span class="tag">release</span>';
   return '<span class="tag bad">unknown</span>';
 }
+function autoNote(i) {
+  // the instance's last automatic repair (a restore left it detached): running, done, or failed and retried
+  const a = i.auto_repair;
+  if (!a) return '';
+  if (a.state === 'running') return '<span class="problem">installed but detached (a restore without the local apps folder?): its definition is being written again automatically</span>';
+  if (a.state === 'succeeded') return `<span class="sub">definition written again automatically at ${esc(a.at)}</span>`;
+  return `<span class="problem">automatic repair failed: ${esc(a.error)}. It is tried again every few minutes; Repair tries now.</span>`;
+}
 const LABELS = {start: 'Start', stop: 'Stop', restart: 'Restart', update: 'Update', delete: 'Delete', repair: 'Repair', install: 'Install', finish: 'Finish setup'};
 function actionsCell(i) {
   const busy = i.job && i.job.state === 'running';
@@ -92,7 +100,7 @@ async function loadInstances() {
   if (!r.ok) { flash('Instances: ' + r.error, 'err'); return; }
   instances = r.instances || [];
   const body = $('#inst tbody');
-  body.innerHTML = instances.map(i => `<tr><td><b>${esc(i.name)}</b><span class="sub">${esc(i.slug)}</span>${i.problem ? `<span class="problem">${esc(i.problem)}</span>` : ''}</td>`
+  body.innerHTML = instances.map(i => `<tr><td><b>${esc(i.name)}</b><span class="sub">${esc(i.slug)}</span>${i.problem ? `<span class="problem">${esc(i.problem)}</span>` : ''}${autoNote(i)}</td>`
     + `<td>${stateCell(i)}</td><td>${versionCell(i)}</td><td>${channelCell(i)}</td><td class="act">${actionsCell(i)}</td></tr>`).join('');
   $('#empty').hidden = instances.length > 0;
   const others = r.others || [];
