@@ -344,6 +344,55 @@ class FlowCheckTest(FlowBase):
         job = await env.job(await env.send("POST", "/api/instances/garage/stop"))
         self.assertEqual(job["state"], "succeeded", job)
 
+    async def test_an_app_containment_cannot_uninstall_does_not_start_at_the_next_boot(self):
+        """R2-5: the Supervisor starts every app with boot auto when it starts; an app left installed by a containment
+        gets boot manual, through the same marker gate."""
+        env = self.env
+        env.stub.install_override["local_hri_garage"] = {"hassio_role": "admin"}
+        env.stub.fail[("POST", "/addons/local_hri_garage/uninstall")] = "the uninstall failed"
+        job = await self.create()
+        self.assertEqual(job["state"], "failed", job)
+        self.assertIn("NOT uninstalled", job["error"])
+        self.assertIn("start at boot was turned off", job["error"])
+        app = env.stub.installed["local_hri_garage"]
+        self.assertEqual((app["state"], app["boot"]), ("stopped", "manual"))
+        self.assertIn(("POST", "/addons/local_hri_garage/options", {"boot": "manual"}), env.stub.calls)
+        self.assertTrue(env.registry.get("garage")["tampered"]["boot_manual"])
+
+    async def test_a_containment_whose_mark_cannot_be_recorded_still_stops_and_leaves_a_trace(self):
+        """R2-8: the registry cannot be written (a full /data): the app is stopped and uninstalled all the same; what
+        could not be uninstalled is refused by this manager from then on, and the marker says so for its next start,
+        which contains it again."""
+        env = self.env
+        env.stub.install_override["local_hri_garage"] = {"hassio_role": "admin"}
+        env.stub.fail[("POST", "/addons/local_hri_garage/uninstall")] = "the uninstall failed"
+        update = env.registry.update
+
+        def full_disk(name, **fields):
+            if "tampered" in fields:
+                raise instances.RegistryError("the manager's registry cannot be written: No space left on device")
+            return update(name, **fields)
+
+        with mock.patch.object(env.registry, "update", side_effect=full_disk):
+            job = await self.create()
+            self.assertEqual(job["state"], "failed", job)
+            self.assertIn("the mark could not be recorded", " ".join(l["msg"] for l in job["lines"]))
+            app = env.stub.installed["local_hri_garage"]
+            self.assertEqual((app["state"], app["boot"]), ("stopped", "manual"))
+            with open(os.path.join(self.folder(), children.MARKER), encoding="utf-8") as fh:
+                self.assertEqual(json.load(fh)["contained"]["uninstalled"], False)
+            status, answer = await env.send("POST", "/api/instances/garage/start")
+            self.assertEqual(status, 400, answer)
+            self.assertIn("is marked", answer["error"])
+        self.assertIsNone(env.registry.get("garage").get("tampered"))
+        # a new start of the manager (the registry writable again) finds the marker's trace and contains it again
+        env.manager._unrecorded_marks.clear()
+        notes = await env.manager.startup()
+        self.assertIn("containing it again", " ".join(notes))
+        await env.manager.jobs.wait_all()
+        self.assertNotIn("local_hri_garage", env.stub.installed)
+        self.assertTrue(env.registry.get("garage")["tampered"]["uninstalled"])
+
     async def test_a_containment_cut_short_by_a_stop_says_so_and_the_next_start_finishes_it(self):
         env = self.env
         env.stub.install_override["local_hri_garage"] = {"hassio_role": "admin"}

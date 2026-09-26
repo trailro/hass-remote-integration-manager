@@ -10,7 +10,8 @@ network I/O:
 - a rule that changes an app needs the ``children.Managed`` of that very slug, whose marker is read from disk again
   right before the call: an app the manager did not create is never changed, even when its slug looks like one;
 - a request body may only carry the keys (and values) its rule lists: the options call can set ``boot``,
-  ``watchdog`` and ``ingress_panel`` and nothing else, so an instance's own options are never written; and it must
+  ``watchdog`` and ``ingress_panel`` and nothing else (``boot`` only ``auto``, or ``manual`` for an app it contains
+  and could not uninstall), so an instance's own options are never written; and it must
   carry the keys its rule requires: an uninstall says whether the instance's /config folder goes
   (``remove_config``), never leaving it to the Supervisor's default.
 
@@ -71,8 +72,10 @@ RULES: tuple[Rule, ...] = (
     _rule("POST", rf"/store/addons/{_SLUG}/install", changes_app=True, timeout=3600),
     _rule("POST", rf"/store/addons/{_SLUG}/update", changes_app=True, body=(("backup", _BOOL),), timeout=3600),
     _rule("GET", rf"/addons/{_SLUG}/info"),
+    # boot manual: for an app the manager contains and could not uninstall, which the Supervisor would otherwise start
+    # again at the next host boot (it starts every app with boot auto); still only an instance's, by its marker
     _rule("POST", rf"/addons/{_SLUG}/options", changes_app=True,
-          body=(("boot", ("auto",)), ("watchdog", _BOOL), ("ingress_panel", _BOOL))),
+          body=(("boot", ("auto", "manual")), ("watchdog", _BOOL), ("ingress_panel", _BOOL))),
     _rule("POST", rf"/addons/{_SLUG}/start", changes_app=True, timeout=300),
     _rule("POST", rf"/addons/{_SLUG}/stop", changes_app=True, timeout=300),
     _rule("POST", rf"/addons/{_SLUG}/restart", changes_app=True, timeout=600),

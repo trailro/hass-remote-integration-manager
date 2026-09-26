@@ -96,6 +96,9 @@ class Manager:
         # name -> {"failures", "delay", "next" (monotonic), "error", "at"}: an instance whose automatic repair failed
         # waits AUTO_REPAIR_INTERVAL * 2**(failures-1) seconds, at most AUTO_REPAIR_MAX_DELAY, before the next
         self.auto_backoff: dict[str, dict] = {}
+        # name -> mark the registry could not record (a full /data): refused all the same while the manager runs, and
+        # kept in the instance's marker for its next start (_contain)
+        self._unrecorded_marks: dict[str, dict] = {}
 
     # ------------------------------------------------------------------ reading
 
@@ -139,6 +142,9 @@ class Manager:
         except RegistryError as err:
             _LOGGER.error("%s", err)
             registered = {}
+        for name, mark in self._unrecorded_marks.items():
+            if name in registered and not isinstance(registered[name].get("tampered"), dict):
+                registered[name] = {**registered[name], "tampered": mark}
         out, others, seen, repairable = [], [], set(), []
         for decoy in found:
             # the slug the Supervisor gives it: local_ (its local repository) and the one it declares
@@ -405,6 +411,13 @@ class Manager:
         follow, notes = [], []
         for name, entry in sorted(registered.items()):
             mark = entry.get("tampered")
+            if not isinstance(mark, dict) and name in installed:
+                # a containment whose mark the registry could not record kept it in the instance's marker
+                try:
+                    traced = children.load_managed(self.root, name, self.registry).marker.get("contained")
+                except children.NotManaged:
+                    traced = None
+                mark = traced if isinstance(traced, dict) else None
             pending = isinstance(mark, dict) and mark.get("pending") is True
             if not isinstance(mark, dict) or (mark.get("unverified") and not pending) or name not in installed:
                 continue
@@ -1209,11 +1222,26 @@ class Manager:
         _LOGGER.error("%s", message)
         return Unverified(message)
 
-    async def _set_mark(self, name: str, mark: dict) -> None:
+    async def _set_mark(self, name: str, mark: dict) -> bool:
+        """The registry records ``mark``; when it cannot, the manager keeps it in memory (refused all the same:
+        _refuse_marked) and says so.  Whether the registry recorded it."""
         try:
             await asyncio.to_thread(self.registry.update, name, tampered=mark, setup_complete=False)
         except RegistryError as err:
-            _LOGGER.error("%s", err)
+            self._unrecorded_marks[name] = dict(mark)
+            _LOGGER.error("%s: its mark is kept in memory only: %s", name, err)
+            return False
+        self._unrecorded_marks.pop(name, None)
+        return True
+
+    def _trace_mark(self, managed: children.Managed, mark: dict) -> None:
+        """A mark the registry could not record, kept in the instance's marker (``contained``) for the manager's next
+        start, which contains the app again (_marked_installed).  Best effort: logged when it cannot be written."""
+        try:
+            folder = children.child_path(self.root, managed.name)
+            children.replace_file(folder, children.MARKER, children.marker_bytes({**managed.marker, "contained": mark}))
+        except (OSError, children.UnsafePath) as err:
+            _LOGGER.error("%s: its mark could not be kept in its marker either: %s", managed.name, err)
 
     async def _contain(self, job: Job, managed: children.Managed, reason: str) -> dict:
         """An app the Supervisor installed from another definition than the manager's: the instance is marked in the
@@ -1223,7 +1251,8 @@ class Manager:
         as recorded at the end."""
         mark = {"reason": reason[:500], "at": children.now_iso(), "uninstalled": False, "stopped": False,
                 "failure": INTERRUPTED}
-        await self._set_mark(managed.name, mark)
+        if not await self._set_mark(managed.name, mark):
+            job.log("the mark could not be recorded in the manager's registry: stopping it first all the same")
 
         async def steps() -> None:
             try:
@@ -1240,6 +1269,15 @@ class Manager:
                                    f"and it refused them: {err}")
             except Exception as err:  # noqa: BLE001 - reported in the mark, the job and the log
                 mark["failure"] = str(err) or err.__class__.__name__
+            if not mark["uninstalled"]:
+                # still installed: the Supervisor starts every app with boot auto when it starts
+                try:
+                    await self.sv.set_options(managed, boot="manual")
+                    mark["boot_manual"] = True
+                    job.log("start at boot turned off")
+                except Exception as err:  # noqa: BLE001 - reported in the mark
+                    mark["boot_manual"] = False
+                    job.log(f"start at boot NOT turned off: {err}")
 
         task = asyncio.ensure_future(steps())
         try:
@@ -1253,12 +1291,16 @@ class Manager:
                 pass
             try:
                 self.registry.update(managed.name, tampered=dict(mark), setup_complete=False)
+                self._unrecorded_marks.pop(managed.name, None)
             except RegistryError as err:
+                self._unrecorded_marks[managed.name] = dict(mark)
+                self._trace_mark(managed, dict(mark))
                 _LOGGER.error("%s", err)
             raise
         if mark["failure"]:
             job.log(f"NOT {'uninstalled' if mark['stopped'] else 'stopped'}: {mark['failure']}")
-        await self._set_mark(managed.name, mark)
+        if not await self._set_mark(managed.name, mark) and not mark["uninstalled"]:
+            await asyncio.to_thread(self._trace_mark, managed, dict(mark))
         return mark
 
     @staticmethod
@@ -1271,8 +1313,10 @@ class Manager:
         if mark.get("uninstalled"):
             return "it was stopped and uninstalled at once (its /config folder is kept)"
         folder = names.folder_name(slug[len(names.SLUG_PREFIX):])
+        boot = {True: "; start at boot was turned off", False: "; start at boot could NOT be turned off"}.get(
+            mark.get("boot_manual"), "")
         return (f"it was NOT {'uninstalled' if mark.get('stopped') else 'stopped nor uninstalled'} "
-                f"({str(mark.get('failure') or INTERRUPTED)[:300]}): stop and uninstall {slug} yourself in Settings > Apps now (keep "
+                f"({str(mark.get('failure') or INTERRUPTED)[:300]}{boot}): stop and uninstall {slug} yourself in Settings > Apps now (keep "
                 f"its data if you want it); then Delete it here, or, if the manager no longer recognises {folder}/, "
                 f"delete that folder from the local apps folder and Forget it here")
 
@@ -1296,12 +1340,11 @@ class Manager:
             raise JobFailed(str(err)) from None
         return entry
 
-    @staticmethod
-    def _refuse_marked(name: str, entry: dict | None, check: bool = False) -> None:
+    def _refuse_marked(self, name: str, entry: dict | None, check: bool = False) -> None:
         """InvalidRequest while the registry marks the instance (its app was installed from another definition).
         ``check``: Finish setup or Repair, which check the installed app again: allowed for a mark of an app the manager
         could not check ("unverified"), which they clear when the check passes."""
-        mark = (entry or {}).get("tampered")
+        mark = (entry or {}).get("tampered") or self._unrecorded_marks.get(name)
         if isinstance(mark, dict) and check and mark.get("unverified"):
             return
         if isinstance(mark, dict) and mark.get("unverified"):
