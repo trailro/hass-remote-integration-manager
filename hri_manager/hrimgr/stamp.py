@@ -18,7 +18,7 @@ and the icons) from the HRI release or git ref and changes only what makes the c
   host's network namespace, for an integration that finds its devices by mDNS, SSDP or broadcast, and a port the
   Supervisor picks for the app (apps/app.py ``_check_ingress_port``: one of 62000-65500, kept per slug by
   ingress.py ``get_dynamic_port``), so that instances on the host's network never share one.  HRI reads that port
-  from the Supervisor from 0.26.0 on (``DYNAMIC_PORT_RE`` in its entrypoint.py).  ``host_network`` is not a key of
+  from the Supervisor from 0.26.0 on (its entrypoint.py sets ``APP_DYNAMIC_PORT = True``).  ``host_network`` is not a key of
   ``TEMPLATE_KEYS`` either, and the template's ``ingress_port`` must be a port (1-65535), never 0.
 
 Everything else (options, schema, ingress, map, homeassistant, image, arch, timeout, uart, backup_pre/backup_post...)
@@ -38,6 +38,7 @@ tests/test_stamp_contract.py checks both."""
 
 from __future__ import annotations
 
+import ast
 import fnmatch
 import json
 import os
@@ -72,9 +73,11 @@ TRANSLATION_RE = re.compile(r"translations/[a-z]{2}(?:-[A-Za-z0-9]{1,8})?\.(?:ya
 # to a build without build.yaml (deprecated), so a git build gets its commit as the argument's default instead
 HRI_BUILD_ARG = re.compile(rb"^ARG HRI_BUILD=local$", re.M)
 # HRI's entrypoint.py from the first version that reads the ingress port the Supervisor gives it (names.
-# DYNAMIC_PORT_VERSION): a git build gets Host network only when its tree has this line.  Read, never run
+# DYNAMIC_PORT_VERSION) sets this constant to True at its top level: an instance gets Host network only when the tree
+# it is written from does.  Parsed (ast), never run; a larger file is not read
 DYNAMIC_PORT_FILE = "entrypoint.py"
-DYNAMIC_PORT_RE = re.compile(rb"^APP_DYNAMIC_PORT = True[ \t]*(?:#[^\n]*)?\r?$", re.M)
+DYNAMIC_PORT_NAME = "APP_DYNAMIC_PORT"
+MAX_DYNAMIC_PORT_FILE = 1024 * 1024
 # the ports the Supervisor picks a dynamic ingress port from (const.py INGRESS_DYNAMIC_PORT_MIN / _MAX): an app with
 # ingress_port 0 must not declare one of them (apps/validate.py refuses the definition)
 DYNAMIC_PORTS = (62000, 65500)
@@ -345,8 +348,27 @@ def app_extras(archive: tarsafe.Archive) -> dict[str, bytes]:
 
 
 def reads_dynamic_port(archive: tarsafe.Archive) -> bool:
-    """Whether the tree's HRI reads the ingress port the Supervisor gives it (DYNAMIC_PORT_RE in its entrypoint.py)."""
-    return DYNAMIC_PORT_FILE in archive.files and DYNAMIC_PORT_RE.search(archive.read(DYNAMIC_PORT_FILE)) is not None
+    """Whether the tree's HRI reads the ingress port the Supervisor gives it: its root entrypoint.py, parsed and never
+    run, assigns ``APP_DYNAMIC_PORT`` the constant True at its top level (the last such assignment decides).  A file
+    that is missing, larger than MAX_DYNAMIC_PORT_FILE, not UTF-8 or not Python says no."""
+    info = archive.files.get(DYNAMIC_PORT_FILE)
+    if info is None or info.size > MAX_DYNAMIC_PORT_FILE:
+        return False
+    try:
+        tree = ast.parse(archive.read(DYNAMIC_PORT_FILE).decode("utf-8"), DYNAMIC_PORT_FILE)
+    except (UnicodeDecodeError, SyntaxError, ValueError, RecursionError, MemoryError):
+        return False
+    value = None
+    for node in tree.body:
+        if isinstance(node, ast.Assign):
+            targets = node.targets
+        elif isinstance(node, ast.AnnAssign) and node.value is not None:
+            targets = [node.target]
+        else:
+            continue
+        if any(isinstance(t, ast.Name) and t.id == DYNAMIC_PORT_NAME for t in targets):
+            value = node.value
+    return isinstance(value, ast.Constant) and value.value is True
 
 
 def build_release(archive: tarsafe.Archive, dest: str, name: str, version: str, source: str,
