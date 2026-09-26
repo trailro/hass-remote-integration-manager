@@ -187,9 +187,17 @@ has moved it to `apps/local` (an upstream issue of the Supervisor, not of this a
   Repair uses a copy only when it is the copy of that instance (the registry's instance id and channel) at the
   installed version, and its config is one the manager writes (at its start the manager copies every definition it
   has no copy of, such as those of instances created by 0.1.0). Otherwise, or without a copy, Repair downloads from
-  GitHub: a release from its tag; a git
-  instance from its branch or tag, which must still exist (when the branch has moved on, the definition is written
-  for its current commit and **Rebuild** installs it).
+  GitHub: a release from its tag; a git instance, the commit the manager recorded for it.
+
+  **Repair writes only the installed version, on the installed channel.** The channel is read from the installed
+  app itself (an image of an HRI release, or a build of a `0.0.0-<commit>` version) and must be the registry's; a git
+  instance's recorded commit must be the installed version. A definition of any other version would be offered by
+  the Supervisor as an update, and installed on its own with auto-update on. When that exact source cannot be had
+  (the release was withdrawn, the commit cannot be downloaded, the registry disagrees with the app), nothing is
+  written: the instance is marked **needs attention**, with the reason, and automatic repair leaves it alone. You
+  choose: **Update** (a release: a newer release) or **Rebuild** (git: the current commit of its branch or tag),
+  which writes that definition and installs it in one step (and removes it again if the update fails); **Delete**; or
+  **Repair** again once the cause is gone. GitHub being unreachable is not such a case: automatic repair tries again.
 
 Repair is offered only for an app the Supervisor reports as detached **and** that the manager's registry holds (an
 instance this manager created), and runs only if, after a store reload, the store still has no definition of its

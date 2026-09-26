@@ -466,14 +466,30 @@ class FlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(env.stub.store["local_hri_lab"]["version"], version)  # nothing to rebuild
         with open(os.path.join(self.folder("lab"), "Dockerfile"), encoding="utf-8") as fh:
             self.assertIn(f"ARG HRI_BUILD={sha}", fh.read())
-        # the commit cannot be downloaded: the branch, as before
+        # the commit cannot be downloaded: nothing is written (never the branch's head: a definition of another version
+        # would be offered as an update, and installed on its own with auto_update); the user chooses
         shutil.rmtree(self.folder("lab"))
         await env.sv.reload_store()
         env.stub.commits.discard(sha)
+        env.stub.codeload_paths.clear()
         job = await env.job(await env.send("POST", "/api/instances/lab/repair"))
+        self.assertEqual(job["state"], "failed", job)
+        self.assertIn("cannot be downloaded", job["error"])
+        self.assertFalse(os.path.lexists(self.folder("lab")))
+        self.assertNotIn("local_hri_lab", env.stub.store)
+        self.assertNotIn("refs/heads/main", env.stub.codeload_paths)
+        _, data = await env.get("/api/instances")
+        row = data["instances"][0]
+        self.assertTrue(row["needs_attention"])
+        self.assertEqual(row["actions"], ["update", "delete", "repair"])
+        self.assertIn("Rebuild", row["problem"])
+        self.assertEqual(row["channel"], "git")
+        # Rebuild, asked for: the branch's head, written and installed in one job
+        job = await env.job(await env.send("POST", "/api/instances/lab/update", {}))
         self.assertEqual(job["state"], "succeeded", job)
+        self.assertEqual(env.stub.installed["local_hri_lab"]["version"], f"0.0.0-{sha_of('main-moved-on')[:12]}")
         self.assertEqual(self.marker("lab")["sha"], sha_of("main-moved-on"))
-        self.assertEqual(env.stub.codeload_paths[-1], "refs/heads/main")
+        self.assertNotIn("needs_attention", env.registry.get("lab"))
 
     async def test_a_copy_that_does_not_fit_is_not_used(self):
         """Another instance's copy, another version's, or a config the manager would not write: GitHub instead."""
@@ -570,6 +586,85 @@ class FlowTest(unittest.IsolatedAsyncioTestCase):
             text = fh.read()
         self.assertNotIn("someone else", text)
         self.assertTrue(text.startswith("# Written by HRI Manager from "))
+
+    async def _detach(self, name):
+        shutil.rmtree(self.folder(name))
+        await self.env.sv.reload_store()
+        self.env.stub.codeload_paths.clear()
+
+    async def assert_needs_attention(self, name, words):
+        env = self.env
+        job = await env.job(await env.send("POST", f"/api/instances/{name}/repair"))
+        self.assertEqual(job["state"], "failed", job)
+        self.assertIn(words, job["error"])
+        self.assertFalse(os.path.lexists(self.folder(name)))
+        self.assertNotIn(f"local_hri_{name}", env.stub.store)  # nothing the Supervisor could offer as an update
+        self.assertIn(words, env.registry.get(name)["needs_attention"]["reason"])
+        _, data = await env.get("/api/instances")
+        row = next(i for i in data["instances"] if i["name"] == name)
+        self.assertEqual(row["actions"], ["update", "delete", "repair"])
+        self.assertIn("needs attention", row["problem"])
+
+    async def test_repair_writes_only_the_installed_version(self):
+        """The commit the manager recorded is not the installed version: nothing is written."""
+        env = self.env
+        await self.create("lab", channel="git", ref_kind="branch", ref="main")
+        other = sha_of("another commit")
+        env.registry.update("lab", sha=other)
+        await self._detach("lab")
+        shutil.rmtree(self.copy_dir("lab"))
+        await self.assert_needs_attention("lab", "no record of the commit of the installed")
+        self.assertEqual(env.stub.codeload_paths, [])
+
+    async def test_repair_writes_only_the_installed_channel(self):
+        env = self.env
+        await self.create()
+        await self.create("lab", channel="git", ref_kind="branch", ref="main")
+        # the registry says release, the installed app is a build of a git version
+        env.stub.installed["local_hri_garage"].update(build=True, version="0.0.0-0123456789ab")
+        await self._detach("garage")
+        await self.assert_needs_attention("garage", "is a git build")
+        # the registry says git, the installed app is a release image
+        env.stub.installed["local_hri_lab"].update(build=False, version="0.25.1")
+        await self._detach("lab")
+        await self.assert_needs_attention("lab", "is a release")
+        # neither
+        env.stub.installed["local_hri_lab"].update(build=True, version="0.25.1")
+        await self.assert_needs_attention("lab", "neither an HRI release nor a git build")
+        self.assertEqual(env.stub.codeload_paths, [])
+
+    async def test_an_unpublished_release_needs_attention_then_update_or_delete(self):
+        env = self.env
+        await self.create()
+        await self._detach("garage")
+        shutil.rmtree(self.copy_dir("garage"))
+        env.stub.releases.remove("0.25.0")
+        await self.assert_needs_attention("garage", "not a published release")
+        for version in ("0.25.0", "0.24.0"):  # the installed version is Repair's; never lower
+            job = await env.job(await env.send("POST", "/api/instances/garage/update", {"version": version}))
+            self.assertEqual(job["state"], "failed", job)
+            self.assertFalse(os.path.lexists(self.folder("garage")))
+        env.stub.fail[("POST", "/store/addons/local_hri_garage/update")] = "Can't pull"
+        job = await env.job(await env.send("POST", "/api/instances/garage/update", {"version": "0.25.1"}))
+        self.assertEqual(job["state"], "failed", job)
+        self.assertFalse(os.path.lexists(self.folder("garage")))  # removed again: back as it was
+        self.assertIn("needs_attention", env.registry.get("garage"))
+        job = await env.job(await env.send("POST", "/api/instances/garage/update", {"version": "0.25.1"}))
+        self.assertEqual(job["state"], "succeeded", job)
+        self.assertEqual((env.stub.installed["local_hri_garage"]["version"], self.marker("garage")["version"]), ("0.25.1", "0.25.1"))
+        # Delete of an instance that needs attention: uninstalled, forgotten, nothing left behind
+        await self._detach("garage")
+        env.stub.releases.remove("0.25.1")
+        shutil.rmtree(self.copy_dir("garage"))
+        await self.assert_needs_attention("garage", "not a published release")
+        status, _ = await env.send("DELETE", "/api/instances/garage", {"remove_data": False})
+        self.assertEqual(status, 400)  # the typed name, as always
+        job = await env.job(await env.send("DELETE", "/api/instances/garage", {"remove_data": False, "confirm": "garage"}))
+        self.assertEqual(job["state"], "succeeded", job)
+        self.assertNotIn("local_hri_garage", env.stub.installed)
+        self.assertIsNone(env.registry.get("garage"))
+        self.assertEqual(os.listdir(env.local_apps), [])
+        self.assertFalse(os.path.exists(self.copy_dir("garage")))
 
     def _hand_made_app(self, folder="my_garage", slug="hri_garage"):
         """A local app someone wrote by hand in another folder, with an instance's slug and HRI's url, installed."""

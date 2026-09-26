@@ -25,7 +25,7 @@ from typing import Any
 
 from . import VERSION, children, copies, names, stamp, tarsafe
 from .github import GitHub, GitHubError, latest_stable
-from .jobs import Busy, Job, JobFailed, Jobs, TagMoved
+from .jobs import Busy, Job, JobFailed, Jobs, NeedsAttention, TagMoved
 from .registry import Registry, RegistryError
 from .supervisor import NotAllowed, SupervisorClient, SupervisorError
 
@@ -122,6 +122,17 @@ class Manager:
                 # not detached, and Repair would write a second definition of its slug); and the manager's registry
                 # holds it: a detached app the manager did not create is not its to repair (Repair would adopt it)
                 if app.get("url") == names.HRI_URL and app.get("detached") is True and known:
+                    entry.update({k: known.get(k) for k in ("channel", "ref_kind", "ref", "sha")})
+                    attention = known.get("needs_attention")
+                    if isinstance(attention, dict):
+                        rebuild = "Rebuild writes the current commit of its branch or tag" if known.get("channel") == "git" \
+                            else "Update writes a newer release"
+                        entry["problem"] = (f"needs attention: {str(attention.get('reason'))[:300]}. Nothing was written. "
+                                            f"{rebuild} and installs it; Delete uninstalls it; Repair tries again")
+                        entry["needs_attention"] = True
+                        entry["actions"] = ["update", "delete", "repair"]
+                        out.append(entry)
+                        continue
                     if known.get("interrupted") or not known.get("setup_complete"):
                         entry["problem"] = ("install interrupted: the manager stopped while the Supervisor was installing "
                                             "it. Repair writes its definition again; then Finish setup, or Delete")
@@ -310,20 +321,38 @@ class Manager:
         managed = self.managed(name)
         return self.jobs.start(name, action, user, lambda job: self._simple(job, managed, action))
 
+    def _detached_entry(self, name: str) -> dict | None:
+        """The registry's entry of ``name`` when its folder is gone (a detached instance), else None."""
+        name = self.check_name(name)
+        if os.path.lexists(os.path.join(self.root, names.folder_name(name))):
+            return None
+        try:
+            return self.registry.get(name)
+        except RegistryError as err:
+            raise InvalidRequest(str(err)) from None
+
     def update(self, name: str, body: dict, user: str) -> Job:
-        managed = self.managed(name)
+        detached = self._detached_entry(name)
+        channel = detached.get("channel") if detached else None
+        if detached is None:
+            managed = self.managed(name)
+            channel = managed.marker["channel"]
         version, ref = body.get("version"), None
-        if managed.marker["channel"] == "release":
+        if channel == "release":
             if version is not None and (not isinstance(version, str) or not names.parse_version(version)):
                 raise InvalidRequest("Choose an HRI release.")
         else:
             version = None
             if body.get("ref") is not None:
                 ref = self.check_ref(body.get("ref_kind"), body.get("ref"))
+        if detached is not None:
+            # an instance Repair could not rewrite at its installed version: a newer one, written and installed at once
+            return self.jobs.start(name, "update", user, lambda job: self._update_detached(job, name, version, ref, user))
         return self.jobs.start(name, "update", user, lambda job: self._update(job, managed, version, ref, user))
 
     def delete(self, name: str, body: dict, user: str) -> Job:
-        managed = self.managed(name)
+        detached = self._detached_entry(name)
+        managed = self.managed(name) if detached is None else None
         remove_data = body.get("remove_data", False)
         if not isinstance(remove_data, bool):
             raise InvalidRequest("remove_data is true or false.")
@@ -331,6 +360,8 @@ class Manager:
         # its data folder, and a new instance of the same name would get that folder without them
         if body.get("confirm") != name:
             raise InvalidRequest(f"Deleting an instance needs its name typed: {name}.")
+        if managed is None:
+            return self.jobs.start(name, "delete", user, lambda job: self._delete_detached(job, name, remove_data, user))
         return self.jobs.start(name, "delete", user, lambda job: self._delete(job, managed, remove_data))
 
     def repair(self, name: str, user: str) -> Job:
@@ -743,11 +774,9 @@ class Manager:
             raise JobFailed(str(err)) from None
         return {"removed": managed.slug, "data_removed": remove_data}
 
-    async def _repair(self, job: Job, name: str, user: str) -> dict:
-        """Write the definition of an installed instance again.  Only for an instance the registry holds: never an app
-        the manager did not create.  From the manager's copy of the definition when it has one of that instance at the
-        installed version (copies.py: a release offline, a git instance with the source of its installed commit),
-        else from GitHub, by the registry's channel, branch or tag."""
+    async def _detached(self, job: Job, name: str) -> tuple[dict, dict]:
+        """The registry's entry and the Supervisor's info of an instance whose definition is gone: in the registry,
+        no folder, installed, detached after a store reload, no store entry, HRI's url.  JobFailed otherwise."""
         slug = names.supervisor_slug(name)
         try:
             entry = await asyncio.to_thread(self.registry.get, name)
@@ -773,56 +802,106 @@ class Manager:
             raise JobFailed(str(err)) from None
         if info.get("url") != names.HRI_URL:
             raise JobFailed(f"{slug} is not hass-remote-integration (its url is {info.get('url')!r}): left alone")
+        return entry, info
+
+    @staticmethod
+    def installed_channel(info: dict) -> str | None:
+        """The channel of the installed app, from the app itself: a local build of a 0.0.0-<12 hex> version is a git
+        build, an image of an HRI release a release; anything else, None."""
         version = str(info.get("version") or "")
-        if entry.get("channel") == "git":
+        if info.get("build") is True and names.GIT_VERSION_RE.fullmatch(version):
+            return "git"
+        if info.get("build") is False and names.parse_version(version) and names.supported_version(version):
+            return "release"
+        return None
+
+    async def _repair(self, job: Job, name: str, user: str) -> dict:
+        """Write the definition of an installed instance again, of its INSTALLED version on its INSTALLED channel and
+        nothing else: a definition of another version would be offered as an update (and installed by the Supervisor
+        on its own with auto_update on).  Only for an instance the registry holds.  When the exact source cannot be
+        had, nothing is written: NeedsAttention, recorded in the registry and shown with the user's options."""
+        try:
+            return await self._repair_installed(job, name, user)
+        except NeedsAttention as err:
             try:
-                channel, ref = "git", names.validate_ref(entry.get("ref_kind"), entry.get("ref"))
+                await asyncio.to_thread(self.registry.update, name,
+                                        needs_attention={"reason": str(err), "at": children.now_iso()})
+            except RegistryError as err2:
+                _LOGGER.error("%s", err2)
+            raise
+
+    async def _repair_installed(self, job: Job, name: str, user: str) -> dict:
+        slug = names.supervisor_slug(name)
+        entry, info = await self._detached(job, name)
+        version = str(info.get("version") or "")
+        channel = self.installed_channel(info)
+        if channel is None:
+            raise NeedsAttention(f"the installed {slug} ({version or 'no version'}, "
+                                 f"{'built on the device' if info.get('build') else 'an image'}) is neither an HRI "
+                                 "release nor a git build of this manager")
+        if channel != entry.get("channel"):
+            raise NeedsAttention(f"the installed {slug} is a {'git build' if channel == 'git' else 'release'} "
+                                 f"({version}), the manager's registry says {entry.get('channel')}: which source it "
+                                 "was built from is not known")
+        if channel == "git":
+            try:
+                ref = names.validate_ref(entry.get("ref_kind"), entry.get("ref"))
             except ValueError as err:
-                raise JobFailed(f"the manager's registry has no usable branch or tag for {name}: {err}") from None
-        elif names.parse_version(version) and names.supported_version(version):
-            channel, ref = "release", ("tag", f"v{version}")
-        elif names.GIT_VERSION_RE.fullmatch(version):
-            raise JobFailed(f"{slug} is a git build ({version}) the manager's registry does not know: it cannot tell "
-                            "which branch or tag to write again")
+                raise NeedsAttention(f"the manager's registry has no usable branch or tag for {name}: {err}") from None
         else:
-            raise JobFailed(f"cannot tell which HRI {version!r} is")
+            ref = ("tag", f"v{version}")
         # the manager's own copy of the definition first: a release needs nothing from GitHub, a git instance only the
-        # source of its installed commit.  GitHub as before when there is no usable copy
+        # source of its installed commit
         copy = await self._usable_copy(job, name, entry, version)
         archive = None
-        if copy is not None and channel == "release":
+        if channel == "release" and copy is not None:
             sha, source = copy.sha, str(copy.meta.get("template_source") or "the manager's copy")
             job.log(f"from the manager's copy of its definition (release {version}): nothing downloaded")
-        elif copy is not None:
+        elif channel == "release":
             try:
-                job.log(f"downloading hass-remote-integration at commit {copy.sha[:12]}, the installed one")
-                archive, source = await self.gh.tarball_of_commit(copy.sha)
-                sha = copy.sha
-            except Exception as err:  # noqa: BLE001 - GitHubError, tarsafe.UnsafeArchive: the branch instead
-                job.log(f"{err}: from the {ref[0]} {ref[1]} instead")
-                copy = None
-        if copy is None:
-            if channel == "release":
-                await self._check_release(version)
-            recorded = (entry.get("sha") if channel == "release" and entry.get("channel") == "release"
-                        and entry.get("version") == version else None)
+                release = await self.gh.release(f"v{version}")
+            except GitHubError as err:
+                raise JobFailed(f"the release v{version}: {err}") from None
+            if release is None:
+                raise NeedsAttention(f"HRI {version}, the installed version, is not a published release (any more)")
+            recorded = entry.get("sha") if entry.get("version") == version else None
             try:
-                archive, source = await self._fetch(job, channel, version if channel == "release" else None, ref, recorded=recorded)
+                archive, source = await self._fetch(job, "release", version, None, recorded=recorded)
             except TagMoved as err:
                 await self._flag_moved(name, err)
-                raise
+                raise NeedsAttention(str(err)) from None
             sha = archive.sha
-            if channel == "git" and names.git_version(sha) != version:
-                job.log(f"the {ref[0]} {ref[1]} is now at {sha[:12]}, not the installed {version}: the definition is written "
-                        "for the new commit, and Rebuild installs it")
-                version = names.git_version(sha)
+        else:
+            # the commit the manager recorded for this instance, and only when it IS the installed version: never the
+            # branch's head, never another commit
+            recorded = [s for s in ((copy.sha if copy else None), entry.get("sha")) if isinstance(s, str)]
+            sha = next((s for s in recorded if names.SHA_RE.fullmatch(s) and names.git_version(s) == version), None)
+            if sha is None:
+                raise NeedsAttention(f"the manager has no record of the commit of the installed {version} "
+                                     f"(recorded: {', '.join(s[:12] for s in recorded) or 'none'})")
+            if copy is not None and copy.sha != sha:
+                copy = None  # the copy's config is of another commit
+            job.log(f"downloading hass-remote-integration at commit {sha[:12]}, the installed one")
+            try:
+                archive, source = await self.gh.tarball_of_commit(sha)
+            except GitHubError as err:
+                if "not found" in str(err):
+                    raise NeedsAttention(f"commit {sha[:12]}, the installed one, cannot be downloaded: {err}") from None
+                raise JobFailed(str(err)) from None
+            except Exception as err:  # noqa: BLE001 - tarsafe.UnsafeArchive
+                raise NeedsAttention(f"the archive of commit {sha[:12]} was refused: {err}") from None
+        return await self._write_repaired(job, name, entry, channel, version, ref, sha, source, archive, copy, user)
+
+    async def _write_repaired(self, job: Job, name: str, entry: dict, channel: str, version: str, ref: tuple[str, str],
+                              sha: str | None, source: str, archive, copy: copies.Copy | None, user: str) -> dict:
+        slug = names.supervisor_slug(name)
         marker = self._marker(name, channel, version, ref, sha, source, user, instance_id=entry.get("instance_id"))
         if copy is not None and isinstance(copy.meta.get("stamp_version"), int):
             marker["stamp_version"] = copy.meta["stamp_version"]  # the copy's config, as that manager stamped it
         marker["repaired_at"] = marker["updated_at"]
         marker["created_at"] = entry.get("created_at") or marker["created_at"]
         setup_complete = entry.get("setup_complete", True)
-        job.log(f"writing {names.folder_name(name)} again for {version} (from the manager's registry)")
+        job.log(f"writing {names.folder_name(name)} again for {version}, the installed version")
         try:
             await asyncio.to_thread(self.registry.put, name, self._registry_entry(marker, setup_complete=setup_complete))
             managed = await asyncio.to_thread(
@@ -835,6 +914,100 @@ class Manager:
         await self._save_copy(job, managed)
         await self._wait_store(job, slug, version)
         return {"slug": slug, "version": version}
+
+    async def _update_detached(self, job: Job, name: str, version: str | None, ref: tuple[str, str] | None,
+                               user: str) -> dict:
+        """Update (release) or Rebuild (git) of an instance whose definition is gone and could not be written again at
+        its installed version: the definition of a NEWER version, written and installed in one job the user asked
+        for.  If the update does not succeed the definition is removed again (the instance stays detached)."""
+        slug = names.supervisor_slug(name)
+        entry, info = await self._detached(job, name)
+        installed = str(info.get("version") or "")
+        channel = entry.get("channel")
+        if channel == "release":
+            if version is None:
+                try:
+                    latest = latest_stable(await self.gh.releases())
+                except GitHubError as err:
+                    raise JobFailed(f"the release list: {err}") from None
+                if not latest:
+                    raise JobFailed("no stable HRI release found")
+                version = latest["version"]
+            if (names.parse_version(version) or ()) <= (names.parse_version(installed) or ()):
+                raise JobFailed(f"{version} is not newer than the installed {installed}: the manager does not downgrade, "
+                                "and the installed version is Repair's")
+            await self._check_release(version)
+            new_ref = ("tag", f"v{version}")
+            archive, source = await self._fetch(job, "release", version, new_ref)
+        else:
+            try:
+                new_ref = ref or names.validate_ref(entry.get("ref_kind"), entry.get("ref"))
+            except ValueError as err:
+                raise JobFailed(f"the manager's registry has no usable branch or tag for {name}: {err}; name one") from None
+            archive, source = await self._fetch(job, "git", None, new_ref)
+            version = names.git_version(archive.sha)
+            if version == installed:
+                raise JobFailed(f"the {new_ref[0]} {new_ref[1]} is at the installed commit: Repair writes its definition")
+        sha = archive.sha
+        marker = self._marker(name, channel, version, new_ref, sha, source, user, instance_id=entry.get("instance_id"))
+        marker["created_at"] = entry.get("created_at") or marker["created_at"]
+        job.log(f"writing {names.folder_name(name)} for {version} (installed: {installed}), then updating")
+        try:
+            await asyncio.to_thread(self.registry.put, name,
+                                    self._registry_entry(marker, setup_complete=entry.get("setup_complete", True)))
+            managed = await asyncio.to_thread(
+                children.write_new, self.root, name,
+                self._builder(job, archive, channel, name, version, sha, marker, source), self.registry)
+        except (stamp.TemplateError, children.UnsafePath, children.NotManaged, RegistryError, OSError, JobFailed) as err:
+            await asyncio.to_thread(self._restore_entry, name, entry, marker["instance_id"])
+            raise JobFailed(f"the definition was not written: {err}") from None
+        try:
+            await self._wait_store(job, slug, version)
+            job.log(f"updating {installed} -> {version}" + (" (building)" if channel == "git" else ""))
+            await self.sv.update(managed)
+            after = await self.sv.app_info(slug)
+            if after.get("version") != version:
+                raise JobFailed(f"the Supervisor reports {after.get('version')} after the update, not {version}")
+        except asyncio.CancelledError:
+            job.log("the manager is stopping: removing the definition again")
+            await self._shielded(job, self._undo_detached(job, managed, entry), "removing it")
+            raise
+        except Exception as err:
+            job.log(f"{err}: removing the definition again (the instance stays as it was)")
+            await self._undo_detached(job, managed, entry)
+            if isinstance(err, (SupervisorError, NotAllowed)):
+                raise JobFailed(str(err)) from None
+            raise
+        await self._save_copy(job, managed)
+        return {"version": version, "state": after.get("state")}
+
+    async def _undo_detached(self, job: Job, managed: children.Managed, entry: dict) -> None:
+        try:
+            await asyncio.to_thread(children.remove, managed)
+            await asyncio.to_thread(self.registry.put, managed.name, entry)
+            await self.sv.reload_store()
+        except Exception as err:  # noqa: BLE001
+            job.log(f"could not undo: {err}")
+
+    async def _delete_detached(self, job: Job, name: str, remove_data: bool, user: str) -> dict:
+        """Delete of an instance whose definition is gone: a folder with the manager's marker only (no config.*: the
+        store sees no app in it) gives the capability every changing call needs, then the ordinary delete."""
+        entry, info = await self._detached(job, name)
+        marker = self._marker(name, entry.get("channel"), str(info.get("version") or ""),
+                              (entry.get("ref_kind") or "tag", entry.get("ref") or ""), entry.get("sha"), "delete", user,
+                              instance_id=entry.get("instance_id"))
+        try:
+            managed = await asyncio.to_thread(children.write_new, self.root, name, lambda tmp: marker, self.registry)
+        except (children.UnsafePath, children.NotManaged, OSError) as err:
+            raise JobFailed(f"{name} cannot be deleted: {err}") from None
+        try:
+            return await self._delete(job, managed, remove_data)
+        except BaseException:
+            try:
+                await asyncio.to_thread(children.remove, managed)
+            except Exception as err:  # noqa: BLE001
+                job.log(f"the marker folder was not removed: {err}")
+            raise
 
     def _restore_entry(self, name: str, entry: dict | None, instance_id: str) -> None:
         if entry is not None:
