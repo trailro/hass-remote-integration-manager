@@ -182,7 +182,13 @@ class FlowTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_a_failed_info_after_a_successful_start_keeps_the_instance(self):
         env = self.env
-        env.stub.fail[("GET", "/addons/local_hri_garage/info")] = "Supervisor busy"
+        finish = env.manager._finish_setup
+
+        async def then_fail(job, managed):  # the info after the start; the one checking the install succeeds
+            await finish(job, managed)
+            env.stub.fail[("GET", "/addons/local_hri_garage/info")] = "Supervisor busy"
+
+        env.manager._finish_setup = then_fail
         job = await self.create()
         self.assertEqual(job["state"], "succeeded", job)
         self.assertEqual(env.stub.installed["local_hri_garage"]["state"], "started")

@@ -12,8 +12,10 @@ Supervisor client refuses every call that changes an app unless it is given the 
 
 from __future__ import annotations
 
+import dataclasses
 import datetime as _dt
 import errno
+import hashlib
 import json
 import os
 import re
@@ -41,6 +43,10 @@ class NotManaged(Exception):
 
 class UnsafePath(Exception):
     pass
+
+
+class DefinitionChanged(Exception):
+    """A definition folder is no longer what the manager wrote (``check_tree``)."""
 
 
 def now_iso() -> str:
@@ -135,6 +141,9 @@ class Managed:
     marker: dict = field(compare=False, hash=False, repr=False)
     registry: Registry | None = field(default=None, compare=False, hash=False, repr=False)
     entry: dict = field(default_factory=dict, compare=False, hash=False, repr=False)
+    # what the manager wrote (digest_tree), when this Managed comes from write_new: checked again before the store
+    # reads the folder and before the install or update
+    manifest: dict | None = field(default=None, compare=False, hash=False, repr=False)
 
     @property
     def slug(self) -> str:
@@ -244,21 +253,23 @@ def write_new(root: str, name: str, build: Callable[[str], dict], registry: Regi
     try:
         marker = validate_marker(build(tmp), name)
         write_file(tmp, MARKER, marker_bytes(marker))
+        manifest = digest_tree(tmp)
         if os.path.lexists(final):
             raise UnsafePath(f"{names.folder_name(name)} appeared while it was being written")
         os.rename(tmp, final)
     except BaseException:
         _remove_tree(tmp)
         raise
-    return load_managed(root, name, registry)
+    return dataclasses.replace(load_managed(root, name, registry), manifest=manifest)
 
 
 class Replacement:
     """A managed folder swapped for a new build, with the previous one kept until ``commit`` (or put back by
     ``rollback``)."""
 
-    def __init__(self, root: str, name: str, final: str, old: str):
+    def __init__(self, root: str, name: str, final: str, old: str, manifest: dict | None = None):
         self.root, self.name, self.final, self.old = root, name, final, old
+        self.manifest = manifest  # the new build, as digest_tree saw it before it was renamed into place
 
     def commit(self) -> None:
         _remove_tree(self.old)
@@ -279,6 +290,7 @@ def replace(managed: Managed, build: Callable[[str], dict]) -> Replacement:
     try:
         marker = validate_marker(build(tmp), managed.name)
         write_file(tmp, MARKER, marker_bytes(marker))
+        manifest = digest_tree(tmp)
         os.rename(final, old)
         try:
             os.rename(tmp, final)
@@ -288,7 +300,7 @@ def replace(managed: Managed, build: Callable[[str], dict]) -> Replacement:
     except BaseException:
         _remove_tree(tmp)
         raise
-    return Replacement(managed.root, managed.name, final, old)
+    return Replacement(managed.root, managed.name, final, old, manifest)
 
 
 def remove(managed: Managed) -> None:
@@ -298,6 +310,46 @@ def remove(managed: Managed) -> None:
     doomed = os.path.join(os.path.dirname(final), f"{DEL_PREFIX}{managed.name}-{secrets.token_hex(4)}")
     os.rename(final, doomed)
     _remove_tree(doomed)
+
+
+def digest_tree(folder: str) -> dict[str, str]:
+    """Every entry below ``folder``, never through a link: its relative POSIX path -> ``sha256:<hex>`` for a file,
+    ``link:<target>`` for a symlink, ``dir`` for a folder, ``other`` for anything else."""
+    out: dict[str, str] = {}
+    for current, dirnames, filenames in os.walk(folder):  # links to folders are listed, not followed
+        rel_dir = os.path.relpath(current, folder)
+        for entry in dirnames + filenames:
+            path = os.path.join(current, entry)
+            rel = entry if rel_dir == "." else f"{rel_dir.replace(os.sep, '/')}/{entry}"
+            mode = os.lstat(path).st_mode
+            if stat.S_ISLNK(mode):
+                out[rel] = "link:" + os.readlink(path)
+            elif stat.S_ISDIR(mode):
+                out[rel] = "dir"
+            elif stat.S_ISREG(mode):
+                digest = hashlib.sha256()
+                fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+                with os.fdopen(fd, "rb") as fh:
+                    for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+                        digest.update(chunk)
+                out[rel] = "sha256:" + digest.hexdigest()
+            else:
+                out[rel] = "other"
+    return out
+
+
+def check_tree(root: str, name: str, manifest: dict[str, str]) -> None:
+    """DefinitionChanged unless ``hri_<name>/`` holds exactly what ``manifest`` (digest_tree of what the manager
+    wrote) says: anyone who can write the local apps folder can change a definition between its write and the
+    Supervisor's reading of it."""
+    try:
+        found = digest_tree(child_path(root, name))
+    except (OSError, UnsafePath) as err:
+        raise DefinitionChanged(f"{names.folder_name(name)} cannot be read again: {err}") from None
+    if found != manifest:
+        changed = sorted(k for k in set(found) | set(manifest) if found.get(k) != manifest.get(k))
+        shown = ", ".join(repr(c[:80]) for c in changed[:5]) + (f" and {len(changed) - 5} more" if len(changed) > 5 else "")
+        raise DefinitionChanged(f"{names.folder_name(name)} was changed after the manager wrote it ({shown})")
 
 
 def newest_future(root: str, slack: float = 5.0) -> tuple[str, float] | None:
