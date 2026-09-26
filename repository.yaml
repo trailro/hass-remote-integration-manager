@@ -1,0 +1,5 @@
+# Home Assistant OS: add this repository's URL in Settings > Apps > App Store > Repositories.
+# The app itself is in hri_manager/ (the Supervisor finds it by its config.yaml).
+name: HRI Manager
+url: https://github.com/trailro/hass-remote-integration-manager
+maintainer: trailro
