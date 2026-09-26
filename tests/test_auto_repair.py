@@ -7,8 +7,10 @@ import asyncio
 import os
 import shutil
 import unittest
+from unittest import mock
 
 from hrimgr import instances
+from hrimgr.github import GitHubError
 
 from .env import Env
 from .helpers import tmpdir
@@ -100,23 +102,43 @@ class AutoRepairTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(os.path.isdir(self.folder("garage")))
 
     async def test_a_failed_automatic_repair_is_shown_and_tried_again(self):
+        """GitHub unreachable: shown, and tried again at a later check."""
         env = self.env
         await self.create("garage")
         await self.restore_without_the_local_apps_folder()
-        shutil.rmtree(os.path.join(env.data, "definitions", "garage"))  # no copy: GitHub, which fails
-        env.stub.releases.remove("0.25.0")
+        shutil.rmtree(os.path.join(env.data, "definitions", "garage"))  # no copy: GitHub, which is down
         env.manager.auto_repair_interval = instances.AUTO_REPAIR_INTERVAL
-        await env.get("/api/instances")
-        await self.wait_jobs()
+        with mock.patch.object(env.gh, "_get", side_effect=GitHubError("GitHub unreachable: ClientConnectorError")):
+            await env.get("/api/instances")
+            await self.wait_jobs()
         _, data = await env.get("/api/instances")
         row = data["instances"][0]
         self.assertEqual((row["auto_repair"]["state"], row["actions"]), ("failed", ["repair"]))
-        self.assertIn("not a published release", row["auto_repair"]["error"])
-        env.stub.releases.append("0.25.0")
+        self.assertIn("unreachable", row["auto_repair"]["error"])
         env.manager._auto_checked -= instances.AUTO_REPAIR_INTERVAL + 1
         await env.get("/api/instances")
         await self.wait_jobs()
         self.assertTrue(os.path.isdir(self.folder("garage")))
+
+    async def test_never_another_version_and_not_again_when_it_needs_attention(self):
+        """The installed commit of a git instance is gone: automatic repair writes nothing (not the branch's head), and
+        leaves the instance to the user from then on."""
+        env = self.env
+        await self.create("lab", channel="git", ref_kind="branch", ref="main")
+        env.stub.commits.discard(env.stub.refs["main"])
+        env.stub.refs["main"] = "f" * 40
+        await self.restore_without_the_local_apps_folder()
+        env.manager.auto_repair_interval = instances.AUTO_REPAIR_INTERVAL
+        await env.get("/api/instances")
+        await self.wait_jobs()
+        self.assertFalse(os.path.lexists(self.folder("lab")))
+        self.assertNotIn("local_hri_lab", env.stub.store)
+        self.assertNotIn("refs/heads/main", env.stub.codeload_paths[-1:])
+        _, data = await env.get("/api/instances")
+        self.assertTrue(data["instances"][0]["needs_attention"])
+        env.manager._auto_checked -= instances.AUTO_REPAIR_INTERVAL + 1
+        await env.get("/api/instances")
+        self.assertEqual(len([j for j in env.manager.jobs.recent() if j.action == "repair"]), 1)
 
     async def test_at_the_manager_s_start(self):
         env = self.env

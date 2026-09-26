@@ -28,6 +28,11 @@ class TagMoved(JobFailed):
     """A release tag that no longer names the commit an instance was installed from."""
 
 
+class NeedsAttention(JobFailed):
+    """Repair cannot get the exact source of the installed version: nothing was written, and the instance waits for
+    the user (Update or Rebuild, Delete, or Repair again once the cause is gone); automatic repair leaves it alone."""
+
+
 class Job:
     def __init__(self, instance: str, action: str, user: str):
         self.id = secrets.token_hex(8)
