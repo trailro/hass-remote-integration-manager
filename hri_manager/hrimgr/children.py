@@ -2,7 +2,9 @@
 
 Every write stays inside ``<local apps>/hri_<name>/``: a folder is built in a hidden temporary folder next to it
 (``.hri-tmp-*``: the Supervisor's store skips every path part that starts with a dot) and renamed into place, so the
-store never reads half a definition.  No symlink is followed: a folder or marker that is a link is not the manager's.
+store never reads half a definition.  No symlink is followed: a folder or marker that is a link is not the manager's,
+and every file below a folder is created, read or removed through folder descriptors opened part by part with
+O_NOFOLLOW (``_folder_fd``), so a part swapped for a link while the manager writes is refused, never followed.
 
 The marker ``.hri-manager.json`` says that a folder, and the local app defined by it, belongs to the manager; the
 manager's registry (registry.py, in its own /data, which the local apps folder cannot write) has to say so too, with
@@ -108,15 +110,24 @@ def check_registry(marker: dict, registry: Registry, name: str) -> dict:
 
 
 def read_marker(folder: str, name: str) -> dict:
-    path = os.path.join(folder, MARKER)
     try:
-        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        folder_fd = os.open(folder, _DIR_FLAGS)
+    except FileNotFoundError:
+        raise NotManaged(f"no folder {names.folder_name(name)} in the local apps folder") from None
+    except OSError as err:
+        if err.errno in (errno.ELOOP, errno.ENOTDIR):
+            raise NotManaged(f"{names.folder_name(name)} is not a folder") from None
+        raise NotManaged(f"{names.folder_name(name)} cannot be read: {err.strerror}") from None
+    try:
+        fd = os.open(MARKER, os.O_RDONLY | _NOFOLLOW | _CLOEXEC, dir_fd=folder_fd)
     except FileNotFoundError:
         raise NotManaged(f"{names.folder_name(name)} has no {MARKER}") from None
     except OSError as err:
         if err.errno == errno.ELOOP:
             raise NotManaged(f"{MARKER} of {names.folder_name(name)} is a link") from None
         raise NotManaged(f"{MARKER} of {names.folder_name(name)} cannot be read: {err.strerror}") from None
+    finally:
+        os.close(folder_fd)
     try:
         st = os.fstat(fd)
         if not stat.S_ISREG(st.st_mode) or st.st_size > MAX_MARKER:
@@ -194,35 +205,107 @@ def scan(root: str, registry: Registry) -> list[tuple[str, dict | None, str | No
     return out
 
 
-def safe_join(base: str, rel: str) -> str:
-    """``base/rel`` for a relative POSIX path with no empty, ``.`` or ``..`` part."""
+_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+_CLOEXEC = getattr(os, "O_CLOEXEC", 0)
+_DIR_FLAGS = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | _NOFOLLOW | _CLOEXEC
+
+
+def _parts(rel: str) -> list[str]:
+    """The parts of a relative POSIX path with no empty, ``.`` or ``..`` part."""
     parts = rel.split("/")
     if not rel or rel.startswith("/") or "\\" in rel or "\0" in rel or any(p in ("", ".", "..") for p in parts):
         raise UnsafePath(f"refused path {rel!r}")
-    return os.path.join(base, *parts)
+    return parts
+
+
+def safe_join(base: str, rel: str) -> str:
+    """``base/rel`` for a relative POSIX path with no empty, ``.`` or ``..`` part."""
+    return os.path.join(base, *_parts(rel))
+
+
+def _open_folder(path: str, dir_fd: int | None, rel: str) -> int:
+    try:
+        return os.open(path, _DIR_FLAGS, dir_fd=dir_fd)
+    except OSError as err:
+        if err.errno in (errno.ELOOP, errno.ENOTDIR):
+            raise UnsafePath(f"{rel!r} crosses a non-folder") from None
+        raise
+
+
+def _folder_fd(base: str, rel: str, create: bool) -> int:
+    """An open descriptor of the folder ``base/rel``, opened part by part below ``base`` (each part created 0755 when
+    ``create``), every part with O_NOFOLLOW: a part that is, or is swapped for, anything but a real folder is refused
+    (UnsafePath), never followed.  The caller closes it."""
+    fd = _open_folder(base, None, rel)
+    try:
+        for part in _parts(rel) if rel else []:
+            if create:
+                try:
+                    os.mkdir(part, 0o755, dir_fd=fd)
+                except FileExistsError:
+                    pass
+            inner = _open_folder(part, fd, rel)
+            os.close(fd)
+            fd = inner
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
+def _in_folder(base: str, rel: str, create: bool) -> tuple[int, str]:
+    """(descriptor of the folder holding ``rel`` below ``base``, the leaf's name)."""
+    parent, _, leaf = rel.rpartition("/")
+    _parts(rel)
+    return _folder_fd(base, parent, create), leaf
 
 
 def make_dirs(base: str, rel: str) -> str:
     """Create ``base/rel`` folder by folder, refusing any part that exists as something other than a real folder."""
-    path = base
-    for part in rel.split("/") if rel else []:
-        path = safe_join(path, part)
-        try:
-            os.mkdir(path, 0o755)
-        except FileExistsError:
-            if not stat.S_ISDIR(os.lstat(path).st_mode):
-                raise UnsafePath(f"{rel!r} crosses a non-folder") from None
-    return path
+    os.close(_folder_fd(base, rel, True))
+    return safe_join(base, rel) if rel else base
 
 
 def write_file(base: str, rel: str, data: bytes, mode: int = 0o644) -> None:
     """Write a new file below ``base``; never through a link, never over an existing file."""
-    parent, _, leaf = rel.rpartition("/")
-    folder = make_dirs(base, parent) if parent else base
-    path = safe_join(folder, leaf)
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), mode)
+    folder_fd, leaf = _in_folder(base, rel, True)
+    try:
+        fd = os.open(leaf, os.O_WRONLY | os.O_CREAT | os.O_EXCL | _NOFOLLOW | _CLOEXEC, mode, dir_fd=folder_fd)
+    finally:
+        os.close(folder_fd)
     with os.fdopen(fd, "wb") as fh:
         fh.write(data)
+
+
+def make_link(base: str, rel: str, target: str) -> None:
+    """A new symlink ``rel`` below ``base`` pointing at ``target`` (checked by the caller)."""
+    folder_fd, leaf = _in_folder(base, rel, True)
+    try:
+        os.symlink(target, leaf, dir_fd=folder_fd)
+    finally:
+        os.close(folder_fd)
+
+
+def remove_file(base: str, rel: str) -> None:
+    """Remove the file or link ``rel`` below ``base`` (a link itself, not what it points at)."""
+    folder_fd, leaf = _in_folder(base, rel, False)
+    try:
+        os.unlink(leaf, dir_fd=folder_fd)
+    finally:
+        os.close(folder_fd)
+
+
+def read_file(base: str, rel: str) -> bytes:
+    """The regular file ``rel`` below ``base``, never through a link."""
+    folder_fd, leaf = _in_folder(base, rel, False)
+    try:
+        fd = os.open(leaf, os.O_RDONLY | _NOFOLLOW | _CLOEXEC, dir_fd=folder_fd)
+    finally:
+        os.close(folder_fd)
+    with os.fdopen(fd, "rb") as fh:
+        if not stat.S_ISREG(os.fstat(fh.fileno()).st_mode):
+            raise UnsafePath(f"{rel!r} is not a regular file")
+        return fh.read()
 
 
 def marker_bytes(marker: dict) -> bytes:
