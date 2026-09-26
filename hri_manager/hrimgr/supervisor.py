@@ -10,7 +10,9 @@ network I/O:
 - a rule that changes an app needs the ``children.Managed`` of that very slug, whose marker is read from disk again
   right before the call: an app the manager did not create is never changed, even when its slug looks like one;
 - a request body may only carry the keys (and values) its rule lists: the options call can set ``boot``,
-  ``watchdog`` and ``ingress_panel`` and nothing else, so an instance's own options are never written.
+  ``watchdog`` and ``ingress_panel`` and nothing else, so an instance's own options are never written; and it must
+  carry the keys its rule requires: an uninstall says whether the instance's /config folder goes
+  (``remove_config``), never leaving it to the Supervisor's default.
 
 What comes back from an app's info is cut down to ``INFO_FIELDS`` before it leaves this module: the Supervisor
 includes the app's options, and an HRI instance's options hold its password."""
@@ -45,6 +47,7 @@ class Rule:
     pattern: re.Pattern
     changes_app: bool = False  # needs the Managed of the slug in the path
     body: tuple[tuple[str, tuple], ...] = ()  # (key, allowed values) a JSON body may carry
+    required: tuple[str, ...] = ()  # keys of ``body`` a request must carry
     timeout: float = 30
 
     def body_values(self) -> dict[str, tuple]:
@@ -73,7 +76,8 @@ RULES: tuple[Rule, ...] = (
     _rule("POST", rf"/addons/{_SLUG}/start", changes_app=True, timeout=300),
     _rule("POST", rf"/addons/{_SLUG}/stop", changes_app=True, timeout=300),
     _rule("POST", rf"/addons/{_SLUG}/restart", changes_app=True, timeout=600),
-    _rule("POST", rf"/addons/{_SLUG}/uninstall", changes_app=True, body=(("remove_config", _BOOL),), timeout=600),
+    _rule("POST", rf"/addons/{_SLUG}/uninstall", changes_app=True, body=(("remove_config", _BOOL),),
+          required=("remove_config",), timeout=600),
 )
 
 # what an app's info may show: no options, no network details of other kinds
@@ -152,10 +156,13 @@ def _check_body(rule: Rule, method: str, path: str, body: Any) -> None:
         if body is not None:
             raise NotAllowed(f"refused {method} {path}: a GET has no body")
         return
-    if body is None:
+    if body is None and not rule.required:
         return
     if not isinstance(body, dict):
         raise NotAllowed(f"refused {method} {path}: the body is not an object")
+    missing = [key for key in rule.required if key not in body]
+    if missing:
+        raise NotAllowed(f"refused {method} {path}: {', '.join(missing)} must be sent")
     allowed = rule.body_values()
     for key, value in body.items():
         if key not in allowed:

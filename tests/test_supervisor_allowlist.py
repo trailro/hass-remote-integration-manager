@@ -112,6 +112,14 @@ class AllowListTest(unittest.TestCase):
     def test_the_rules_are_exactly_the_pinned_ones(self):
         self.assertEqual({(r.method, r.pattern.pattern) for r in supervisor.RULES}, EXPECTED_RULES)
 
+    def test_the_bodies_and_their_required_keys_are_pinned(self):
+        bodies = {r.pattern.pattern.rsplit("/", 1)[-1]: (dict(r.body), r.required) for r in supervisor.RULES if r.body}
+        self.assertEqual(bodies, {
+            "update": ({"backup": (True, False)}, ()),
+            "options": ({"boot": ("auto",), "watchdog": (True, False), "ingress_panel": (True, False)}, ()),
+            "uninstall": ({"remove_config": (True, False)}, ("remove_config",)),
+        })
+
     def test_read_only_calls_pass_without_an_instance(self):
         for path in READ_ONLY_OK:
             with self.subTest(path=path):
@@ -151,7 +159,8 @@ class AllowListTest(unittest.TestCase):
                     authorize("POST", path, {}, attic)
                 with self.assertRaises(NotAllowed):  # something that only looks like a Managed
                     authorize("POST", path, {}, mock.Mock(slug="local_hri_garage", verify=lambda: None))
-                self.assertTrue(authorize("POST", path, {}, self.garage).changes_app)
+                body = {"remove_config": False} if path.endswith("/uninstall") else {}  # a required key
+                self.assertTrue(authorize("POST", path, body, self.garage).changes_app)
 
     def test_a_marker_gone_since_loading_refuses_the_call(self):
         os.unlink(os.path.join(self.root, "hri_garage", children.MARKER))
@@ -196,6 +205,8 @@ class AllowListTest(unittest.TestCase):
             ("/addons/local_hri_garage/options", {"auto_update": True}),
             ("/addons/local_hri_garage/start", {"x": 1}),
             ("/addons/local_hri_garage/uninstall", {"remove_config": "yes"}),
+            ("/addons/local_hri_garage/uninstall", {}),  # remove_config is required: never the Supervisor's default
+            ("/addons/local_hri_garage/uninstall", None),
             ("/store/addons/local_hri_garage/install", {"background": True}),
             ("/addons/local_hri_garage/options", ["boot"]),
         ]
