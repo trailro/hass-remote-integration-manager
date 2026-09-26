@@ -11,12 +11,13 @@ whose create stopped before its options and start (``setup_complete`` in the reg
 from __future__ import annotations
 
 import asyncio
+import datetime
 import logging
 import os
 import secrets
 from typing import Any
 
-from . import VERSION, children, names, stamp
+from . import VERSION, children, names, stamp, tarsafe
 from .github import GitHub, GitHubError, latest_stable
 from .jobs import Job, JobFailed, Jobs, TagMoved
 from .registry import Registry, RegistryError
@@ -279,7 +280,14 @@ class Manager:
                 job.log(f"the store has {slug} {version}")
                 return
             if waited >= self.store_timeout:
-                raise JobFailed(f"the Supervisor's store did not show {slug} {version} within {int(self.store_timeout)} s")
+                message = f"the Supervisor's store did not show {slug} {version} within {int(self.store_timeout)} s"
+                future = await asyncio.to_thread(children.newest_future, self.root)
+                if future:
+                    when = datetime.datetime.fromtimestamp(future[1], datetime.timezone.utc).replace(microsecond=0).isoformat()
+                    message += (f": {tarsafe.show(future[0])} in the local apps folder is dated {when}, in the future, and "
+                                "the Supervisor notices changes there only by a newer date. Give it the current date "
+                                "(touch it) and try again")
+                raise JobFailed(message)
             if not reloaded_again and waited >= self.store_timeout / 2:
                 await self.sv.reload_store()
                 reloaded_again = True

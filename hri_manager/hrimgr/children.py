@@ -298,6 +298,27 @@ def remove(managed: Managed) -> None:
     _remove_tree(doomed)
 
 
+def newest_future(root: str, slack: float = 5.0) -> tuple[str, float] | None:
+    """The newest file or folder of the local apps folder when it is dated in the future: (relative path, mtime).  The
+    Supervisor notices a change there only when the newest date changes (utils get_latest_mtime), so such a file hides
+    every later change to any local app."""
+    try:
+        real_root = _root(root)
+    except UnsafePath:
+        return None
+    newest: tuple[str, float] | None = None
+    for folder, dirnames, filenames in os.walk(real_root):
+        for entry in dirnames + filenames:
+            path = os.path.join(folder, entry)
+            try:
+                mtime = os.stat(path).st_mtime
+            except OSError:
+                continue
+            if newest is None or mtime > newest[1]:
+                newest = (os.path.relpath(path, real_root), mtime)
+    return newest if newest and newest[1] > _dt.datetime.now().timestamp() + slack else None
+
+
 _OLD_RE = re.compile(re.escape(OLD_PREFIX) + r"(" + names.NAME_RE.pattern + r")-[0-9a-f]{8}")
 
 

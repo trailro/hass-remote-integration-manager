@@ -77,6 +77,7 @@ class Stub:
         self.codeload_paths: list[str] = []
         self.users: object = [dict(u) for u in USERS]  # what config/auth/list answers (tests put other shapes here)
         self.core_down = False
+        self.store_frozen = False  # a reload that notices nothing, as the Supervisor after a file dated in the future
         self.ws_messages: list[object] = []  # every message the manager sent to Core
         self.ws_connections = 0
 
@@ -160,7 +161,8 @@ class Stub:
         return ok()
 
     async def store_reload(self, request):
-        self.store = self._scan()
+        if not self.store_frozen:
+            self.store = self._scan()
         return ok()
 
     async def store_app(self, request):

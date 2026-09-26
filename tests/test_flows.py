@@ -5,6 +5,7 @@ import asyncio
 import json
 import os
 import shutil
+import time
 import unittest
 from unittest import mock
 
@@ -272,6 +273,28 @@ class FlowTest(unittest.IsolatedAsyncioTestCase):
             job = await self.create("attic", version=version)
             self.assertEqual(job["state"], "failed")
             self.assertIn("not a published release", job["error"])
+
+    async def test_a_store_timeout_names_a_file_dated_in_the_future(self):
+        """The Supervisor notices a change in the local apps folder by its newest date: one file dated in the future
+        (another app's, a restored one) hides every later change."""
+        env = self.env
+        env.stub.store_frozen = True
+        env.manager.store_timeout = 0.2
+        job = await self.create()
+        self.assertEqual(job["state"], "failed")
+        self.assertIn("did not show", job["error"])
+        self.assertNotIn("future", job["error"])
+        other = os.path.join(env.local_apps, "someones_app")
+        os.makedirs(other)
+        path = os.path.join(other, "run.sh")
+        with open(path, "w") as fh:
+            fh.write("x")
+        future = time.time() + 400 * 86400
+        os.utime(path, (future, future))
+        job = await self.create()
+        self.assertEqual(job["state"], "failed")
+        self.assertIn("someones_app/run.sh", job["error"])
+        self.assertIn("in the future", job["error"])
 
     async def test_a_failed_download_writes_nothing(self):
         job = await self.create(version="0.99.0")
