@@ -13,6 +13,7 @@ from unittest import mock
 import yaml
 
 from hrimgr import children, copies, stamp
+from hrimgr.registry import RegistryError
 
 from .env import Env
 from .fakes.tarballs import sha_of
@@ -227,12 +228,33 @@ class BluetoothFlowTest(unittest.IsolatedAsyncioTestCase):
         with open(os.path.join(env.data, "definitions", "garage", "config.yaml"), encoding="utf-8") as fh:
             self.assertIs(yaml.safe_load(fh)["host_dbus"], True)
 
-    async def test_a_lagging_record_the_badge_and_a_same_version_update_follow_the_app(self):
+    def not_followed(self, job):
+        """R2-9: the job refused to take the app's host_dbus as the instance's Bluetooth, and wrote nothing of it."""
+        env = self.env
+        self.assertEqual(job["state"], "failed", job)
+        self.assertIn("the manager did not make that change", job["error"])
+        self.assertIs(env.registry.get("garage")["bluetooth"], False)
+        self.assertNotIn(("POST", "/addons/local_hri_garage/uninstall", {"remove_config": False}), env.stub.calls)
+
+    def manager_made_it(self):
+        """The registry's flag of an update the manager made, whose record is late, names Bluetooth on."""
+        entry = self.env.registry.get("garage")
+        self.env.registry.update("garage", updating={"at": "t", "fields": {
+            **{k: entry.get(k) for k in ("version", "ref_kind", "ref", "sha", "stamp_version")}, "bluetooth": True}})
+
+    async def test_a_lagging_record_is_taken_only_as_the_admin_s_choice(self):
+        """R2-9: the installed app has the host's D-Bus, the record says off, and nothing says the manager made that
+        change (the Supervisor's own Update of a definition someone changed would do it): an Update at the same version
+        refuses to record it, until the admin chooses Bluetooth on in it."""
         await self.lagging_record()
         row = await self.row()
         self.assertIs(row["bluetooth"], True)
         self.assertIn("Bluetooth: the installed app has the host's D-Bus", row["problem"])
-        job = await self.update(version="0.25.0")  # nothing to install: the definition and the record follow the app
+        self.assertIn("the manager did not make that change", row["problem"])
+        before = self.config()
+        self.not_followed(await self.update(version="0.25.0"))
+        self.assertEqual(self.config(), before)
+        job = await self.update(version="0.25.0", bluetooth=True)  # the admin's choice: recorded
         self.assertEqual(job["state"], "succeeded", job)
         self.followed()
         self.assertNotIn("Bluetooth", (await self.row())["problem"] or "")
@@ -240,17 +262,19 @@ class BluetoothFlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(job["state"], "failed")
         self.assertIn("only when the app's version changes", job["error"])
 
-    async def test_repair_of_a_lagging_record_follows_the_installed_app(self):
+    async def test_repair_of_a_lagging_record_needs_the_admin(self):
         env = self.env
         await self.lagging_record()
         shutil.rmtree(os.path.join(env.local_apps, "hri_garage"))  # a restore without the local apps folder
         await env.sv.reload_store()
         job = await env.job(await env.send("POST", "/api/instances/garage/repair"))
-        self.assertEqual(job["state"], "succeeded", job)
-        self.assertTrue(any("the definition follows the app" in line["msg"] for line in job["lines"]))
-        self.followed()
+        self.not_followed(job)
+        self.assertFalse(os.path.exists(os.path.join(env.local_apps, "hri_garage")))  # nothing written
+        self.assertIsInstance(env.registry.get("garage")["needs_attention"], dict)
+        row = await self.row()
+        self.assertEqual(row["actions"], ["update", "delete", "repair"])
 
-    async def test_automatic_repair_of_a_lagging_record_follows_the_installed_app(self):
+    async def test_automatic_repair_of_a_lagging_record_needs_the_admin(self):
         env = self.env
         await self.lagging_record()
         shutil.rmtree(os.path.join(env.local_apps, "hri_garage"))
@@ -258,19 +282,63 @@ class BluetoothFlowTest(unittest.IsolatedAsyncioTestCase):
         env.manager.auto_repair_interval = 300.0
         await env.get("/api/instances")  # the list starts the automatic repair
         await env.manager.jobs.wait_all()
+        self.assertIs(env.registry.get("garage")["bluetooth"], False)
+        self.assertIsInstance(env.registry.get("garage")["needs_attention"], dict)
+        self.assertFalse(os.path.exists(os.path.join(env.local_apps, "hri_garage")))
+
+    async def test_repair_follows_a_change_the_manager_made(self):
+        """An update the manager made turned Bluetooth on and was recorded late (its flag names it): that is the
+        admin's choice, and Repair records it."""
+        env = self.env
+        await self.lagging_record()
+        self.manager_made_it()
+        shutil.rmtree(os.path.join(env.local_apps, "hri_garage"))
+        await env.sv.reload_store()
+        job = await env.job(await env.send("POST", "/api/instances/garage/repair"))
+        self.assertEqual(job["state"], "succeeded", job)
+        self.assertTrue(any("the definition follows the app" in line["msg"] for line in job["lines"]))
         self.followed()
 
-    async def test_finish_setup_of_a_lagging_record_follows_the_installed_app(self):
+    async def test_finish_setup_of_a_lagging_record_needs_the_admin(self):
         env = self.env
         await self.lagging_record()
         env.registry.update("garage", setup_complete=False)
+        env.stub.installed["local_hri_garage"]["state"] = "stopped"
+        job = await env.job(await env.send("POST", "/api/instances/garage/finish"))
+        self.not_followed(job)
+        self.assertEqual(env.stub.installed["local_hri_garage"]["state"], "stopped")  # not started
+        self.assertNotIn("host_dbus", self.config())
+        job = await self.update(version="0.25.0", bluetooth=True)  # the admin's choice
+        self.assertEqual(job["state"], "succeeded", job)
         job = await env.job(await env.send("POST", "/api/instances/garage/finish"))
         self.assertEqual(job["state"], "succeeded", job)
         self.followed()
         with open(os.path.join(env.local_apps, "hri_garage", ".hri-manager.json"), encoding="utf-8") as fh:
             self.assertIs(json.load(fh)["bluetooth"], True)
-        self.assertEqual(sorted(os.listdir(os.path.join(env.local_apps, "hri_garage"))),
-                         sorted(e for e in os.listdir(os.path.join(env.local_apps, "hri_garage")) if not e.startswith(".hri-new")))
+
+    async def test_following_the_app_writes_the_registry_first(self):
+        """R2-10: when the registry cannot record the Bluetooth the definition follows, the definition is left as it
+        was (a definition and a record that disagree refuse every later check), and a later try works."""
+        env = self.env
+        await self.lagging_record()
+        self.manager_made_it()
+        env.registry.update("garage", setup_complete=False)
+        update = env.registry.update
+
+        def full_disk(name, **fields):
+            if "bluetooth" in fields:
+                raise RegistryError("the manager's registry cannot be written: No space left on device")
+            return update(name, **fields)
+
+        with mock.patch.object(env.registry, "update", side_effect=full_disk):
+            job = await env.job(await env.send("POST", "/api/instances/garage/finish"))
+        self.assertEqual(job["state"], "failed", job)
+        self.assertNotIn("host_dbus", self.config())  # the folder as it was
+        with open(os.path.join(env.local_apps, "hri_garage", ".hri-manager.json"), encoding="utf-8") as fh:
+            self.assertIs(json.load(fh)["bluetooth"], False)
+        job = await env.job(await env.send("POST", "/api/instances/garage/finish"))
+        self.assertEqual(job["state"], "succeeded", job)
+        self.followed()
 
     async def test_only_true_or_false(self):
         env = self.env
