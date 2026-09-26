@@ -503,27 +503,45 @@ def newest_future(root: str, slack: float = 5.0) -> tuple[str, float] | None:
 _OLD_RE = re.compile(re.escape(OLD_PREFIX) + r"(" + names.NAME_RE.pattern + r")-[0-9a-f]{8}")
 
 
-def _update_unfinished(real_root: str, name: str, registry: Registry | None) -> bool:
-    """Whether an update of ``name`` stopped before it was committed: the registry still has its ``updating`` flag
-    (set before the swap, cleared when the update is recorded or undone) and the definition in place is of another
-    version than the registry's."""
+def pending_mark(reason: str) -> dict:
+    """The registry's mark of an installed app the manager has not checked yet (it was installed while the manager was
+    not watching): it keeps running, and the manager checks it (at its start, or Check again on its row)."""
+    return {"reason": reason[:500], "at": now_iso(), "unverified": True, "pending": True, "uninstalled": False,
+            "stopped": False, "failure": None}
+
+
+def _update_state(real_root: str, name: str, registry: Registry | None, installed: dict[str, str | None] | None) -> str:
+    """What to do with an update of ``name`` that stopped between its swap and its record (the registry's ``updating``
+    flag, set before the swap and cleared when the update is recorded or undone): "keep" the new definition when the
+    Supervisor has installed its version (putting the previous one back would offer a downgrade, and install it with
+    auto-update on), "restore" the previous one when the Supervisor still has another version, "leave" both when it
+    could not be asked (``installed`` None), "none" when there is no such update."""
     try:
         entry = registry.get(name) if isinstance(registry, Registry) else None
     except RegistryError:
-        return False
+        return "none"
     if not entry or not isinstance(entry.get("updating"), dict):
-        return False
+        return "none"
     try:
         marker = read_marker(os.path.join(real_root, names.folder_name(name)), name)
     except NotManaged:
-        return True  # not the manager's definition in place: the previous one is
-    return marker.get("version") != entry.get("version")
+        return "restore"  # not the manager's definition in place: the previous one is
+    if marker.get("version") == entry.get("version"):
+        return "none"
+    if installed is None:
+        return "leave"
+    fields = entry["updating"].get("fields") if isinstance(entry["updating"].get("fields"), dict) else {}
+    if installed.get(name) is not None and installed.get(name) == marker.get("version") == fields.get("version"):
+        return "keep"
+    return "restore"
 
 
-def settle_update(registry: Registry, name: str, entry: dict, marker: dict) -> str | None:
-    """An ``updating`` flag left after the swap was undone or committed (no previous definition to put back any more):
-    when the definition in place (``marker``) is the one the flag names (its version, commit and stamping, from the
-    registry itself), the registry records it now; when it is the registry's own, the flag goes.  What was done."""
+def settle_update(registry: Registry, name: str, entry: dict, marker: dict, installed_version: str | None) -> str | None:
+    """An ``updating`` flag left after the swap (no previous definition to put back any more).  When the definition in
+    place (``marker``) is the one the flag names (its version, commit and stamping, from the registry itself) and the
+    Supervisor has installed that version, the registry records it now, marked to be checked (pending_mark);
+    when the Supervisor has another version, or the definition in place is the registry's own, the flag goes; when
+    the installed version is not known (None), nothing changes.  What was done."""
     target = entry.get("updating")
     if not isinstance(target, dict):
         return None
@@ -533,15 +551,22 @@ def settle_update(registry: Registry, name: str, entry: dict, marker: dict) -> s
         return d.get("version"), d.get("sha"), d.get("stamp_version")
 
     if fields and key(marker) == key(fields):
-        registry.update(name, updating=None, **fields)
-        return f"{name}: its update to {fields.get('version')} had finished; the registry records it now"
+        if installed_version is None:
+            return None
+        if installed_version == fields.get("version"):
+            registry.update(name, updating=None, **{**fields, "tampered": pending_mark(
+                f"its update to {fields.get('version')} was recorded late: the manager had stopped before it compared "
+                "the installed app with the definition it wrote")})
+            return f"{name}: its update to {fields.get('version')} had finished; the registry records it now"
+        registry.update(name, updating=None)
+        return f"{name}: its update to {fields.get('version')} was not installed; its flag is cleared"
     if (marker.get("version"), marker.get("stamp_version")) == (entry.get("version"), entry.get("stamp_version")):
         registry.update(name, updating=None)
         return f"{name}: its unfinished update had changed nothing; its flag is cleared"
     return None
 
 
-def _settle_updates(real_root: str, registry: Registry, done: list[str]) -> None:
+def _settle_updates(real_root: str, registry: Registry, done: list[str], installed: dict[str, str | None]) -> None:
     """settle_update for every flag without a previous definition left (see cleanup_stale)."""
     for name, entry in registry.all().items():
         if not isinstance(entry.get("updating"), dict) or any(
@@ -551,22 +576,62 @@ def _settle_updates(real_root: str, registry: Registry, done: list[str]) -> None
             marker = read_marker(os.path.join(real_root, names.folder_name(name)), name)
         except NotManaged:
             continue
-        note = settle_update(registry, name, entry, marker)
+        note = settle_update(registry, name, entry, marker, installed.get(name))
         if note:
             done.append(note)
 
 
-def cleanup_stale(root: str, registry: Registry | None = None) -> list[str]:
+def cleanup_stale(root: str, registry: Registry | None = None, installed: dict[str, str | None] | None = None) -> list[str]:
     """Tidy what a crash left behind, touching only the manager's own hidden names: a folder being built or deleted
-    goes; a previous definition goes too, unless it is the only definition left, or the update that set it aside
-    stopped before it was committed (the registry's ``updating`` flag, _update_unfinished): it is then put back.
-    Never raises for one entry: what cannot be tidied is reported and the manager starts anyway."""
+    goes; a previous definition goes too, unless it is the only definition left (put back), or the update that set
+    it aside stopped before it was recorded (_update_state): then the new definition stays when the Supervisor has
+    installed it (recorded, and marked to be checked), the previous one is put back when the Supervisor has another
+    version, and both stay when ``installed`` (name -> installed version, from the Supervisor) is None: it could not
+    be asked.  Never raises for one entry: what cannot be tidied is reported and the manager starts anyway."""
     done = []
     try:
         real_root = _root(root)
         entries = sorted(os.listdir(real_root))
     except (OSError, UnsafePath):
         return done
+    for entry in entries:
+        if not entry.startswith((TMP_PREFIX, OLD_PREFIX, DEL_PREFIX)):
+            continue
+        path = os.path.join(real_root, entry)
+        if not os.path.isdir(path) or os.path.islink(path):
+            continue
+        m = _OLD_RE.fullmatch(entry)
+        name = m.group(1) if m else None
+        final = os.path.join(real_root, names.folder_name(name)) if name else None
+        try:
+            state = _update_state(real_root, name, registry, installed) if final and os.path.lexists(final) else "none"
+            if final and not os.path.lexists(final):
+                os.rename(path, final)
+                done.append(f"restored {entry}")
+            elif state == "restore":
+                _remove_tree(final)
+                os.rename(path, final)
+                registry.update(name, updating=None)
+                done.append(f"restored {entry}: the update of {name} stopped before it was recorded, and the "
+                            "Supervisor has not installed it")
+            elif state == "keep":
+                note = settle_update(registry, name, registry.get(name), read_marker(final, name), installed.get(name))
+                shutil.rmtree(path, ignore_errors=True)
+                done.append(note or f"removed {entry}")
+            elif state == "leave":
+                done.append(f"left {entry}: whether the Supervisor installed the update of {name} is not known (it "
+                            "could not be asked); the next start settles it")
+            else:
+                shutil.rmtree(path, ignore_errors=True)
+                done.append(f"removed {entry}")
+        except (OSError, RegistryError, NotManaged) as err:
+            done.append(f"could not tidy {entry}: {err}")
+    if isinstance(registry, Registry) and installed is not None:
+        try:
+            _settle_updates(real_root, registry, done, installed)
+        except (OSError, RegistryError) as err:
+            done.append(f"could not settle the registry's unfinished updates: {err}")
+    return done
     for entry in entries:
         if not entry.startswith((TMP_PREFIX, OLD_PREFIX, DEL_PREFIX)):
             continue

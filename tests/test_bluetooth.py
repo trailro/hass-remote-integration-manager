@@ -177,15 +177,13 @@ class BluetoothFlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(job["state"], "succeeded", job)
         self.assertIs(self.installed_host_dbus(), True)
 
-    async def test_after_a_killed_update_the_badge_and_the_record_follow_the_installed_app(self):
-        """An update turning Bluetooth on is killed after the Supervisor applied it: the next start puts the previous
-        definition back (off), while the app has D-Bus. The row says what the app has; the catch-up Update records it."""
+    async def killed_after_the_supervisor_applied(self, body: dict) -> None:
+        """An update is killed after the Supervisor had its call, which it then finishes on its own."""
         env = self.env
-        await self.create()
         env.stub.delay = 0.3
         with mock.patch.object(type(env.manager), "_rollback_update", new=mock.AsyncMock()):
-            status, body = await env.send("POST", "/api/instances/garage/update", {"version": "0.25.1", "bluetooth": True})
-            job = env.manager.jobs.get(body["job"]["id"])
+            status, answer = await env.send("POST", "/api/instances/garage/update", body)
+            job = env.manager.jobs.get(answer["job"]["id"])
             for _ in range(300):
                 if any(m == "POST" and p.endswith("/update") for m, p, _ in env.stub.calls):
                     break
@@ -193,25 +191,22 @@ class BluetoothFlowTest(unittest.IsolatedAsyncioTestCase):
             job.task.cancel()
             await asyncio.gather(job.task, return_exceptions=True)
         for _ in range(100):  # the Supervisor finishes what it was asked
-            if env.stub.installed["local_hri_garage"]["version"] == "0.25.1":
+            if env.stub.installed["local_hri_garage"]["version"] == body["version"]:
                 break
             await asyncio.sleep(0.02)
         env.stub.delay = 0
-        children.cleanup_stale(env.local_apps, env.registry)  # the next start
-        self.assertNotIn("host_dbus", self.config())
-        self.assertIs(env.registry.get("garage")["bluetooth"], False)
-        self.assertIs(self.installed_host_dbus(), True)
-        row = await self.row()
-        self.assertIs(row["bluetooth"], True)
-        self.assertIn("Bluetooth: the installed app has the host's D-Bus", row["problem"])
-        job = await self.update(version="0.25.1")  # the catch-up: nothing to install, the record follows the app
-        self.assertEqual(job["state"], "succeeded", job)
+
+    async def test_after_a_killed_update_the_next_start_keeps_and_records_its_bluetooth(self):
+        """An update turning Bluetooth on is killed after the Supervisor applied it: the next start keeps the new
+        definition (Bluetooth on) and records it, as the installed app has it."""
+        env = self.env
+        await self.create()
+        await self.killed_after_the_supervisor_applied({"version": "0.25.1", "bluetooth": True})
+        await env.manager.startup()  # the next start
         self.assertIs(self.config()["host_dbus"], True)
         self.assertIs(env.registry.get("garage")["bluetooth"], True)
-        self.assertNotIn("Bluetooth", (await self.row())["problem"] or "")
-        job = await self.update(version="0.25.1", bluetooth=False)  # the other value at the same version: refused
-        self.assertEqual(job["state"], "failed")
-        self.assertIn("only when the app's version changes", job["error"])
+        self.assertIs(self.installed_host_dbus(), True)
+        self.assertIs((await self.row())["bluetooth"], True)
 
     async def test_only_true_or_false(self):
         env = self.env

@@ -325,31 +325,108 @@ class FlowTest(unittest.IsolatedAsyncioTestCase):
         env = self.env
         await self.create()
         env.stub.delay = 0.3
-        status, body = await env.send("POST", "/api/instances/garage/update", {"version": "0.25.1"})
-        job = await self._cancel_when(body["job"]["id"], "updating")
+        never = asyncio.Event()
+
+        async def before_the_call(*args):  # stopped before the update call is made: nothing to wait for
+            await never.wait()
+
+        with mock.patch.object(env.manager, "_verify_store", side_effect=before_the_call):
+            status, body = await env.send("POST", "/api/instances/garage/update", {"version": "0.25.1"})
+            job = await self._cancel_when(body["job"]["id"], "the store has local_hri_garage 0.25.1")
         self.assertEqual(job["state"], "failed")
         self.assertEqual(self.config("garage")["version"], "0.25.0")
         self.assertEqual(self.marker("garage")["version"], "0.25.0")
         self.assertEqual(sorted(os.listdir(env.local_apps)), ["hri_garage"])
 
-    async def test_an_update_killed_midway_is_put_back_at_the_next_start(self):
-        """A hard kill (OOM, power, the Supervisor's SIGKILL): no rollback runs; the next start puts X back."""
+    async def test_an_update_killed_before_the_supervisor_applied_it_is_put_back_at_the_next_start(self):
+        """A hard kill (OOM, power, the Supervisor's SIGKILL) while the update call was on its way, which the
+        Supervisor then did not apply: no rollback runs; the next start sees the old version installed and puts the
+        previous definition back."""
         env = self.env
         await self.create()
-        env.stub.delay = 0.3
-        with mock.patch.object(type(env.manager), "_rollback_update", new=mock.AsyncMock()):  # killed: nothing runs
+        never = asyncio.Event()
+
+        async def hangs(managed):
+            await never.wait()
+
+        with mock.patch.object(type(env.manager), "_rollback_update", new=mock.AsyncMock()), \
+                mock.patch.object(env.sv, "update", side_effect=hangs):
             status, body = await env.send("POST", "/api/instances/garage/update", {"version": "0.25.1"})
             await self._cancel_when(body["job"]["id"], "updating")
         self.assertEqual(self.config("garage")["version"], "0.25.1")  # as the kill left it
         self.assertEqual(len(os.listdir(env.local_apps)), 2)
         self.assertIsInstance(env.registry.get("garage")["updating"], dict)
-        done = children.cleanup_stale(env.local_apps, env.registry)  # what the next start runs first
-        self.assertIn("stopped before it was committed", done[0])
+        done = await env.manager.startup()  # what the next start runs first
+        self.assertIn("the Supervisor has not installed it", " ".join(done))
         self.assertEqual(sorted(os.listdir(env.local_apps)), ["hri_garage"])
         self.assertEqual(self.config("garage")["version"], "0.25.0")
         self.assertEqual(self.marker("garage")["version"], "0.25.0")
         entry = env.registry.get("garage")
         self.assertEqual((entry["version"], entry["updating"]), ("0.25.0", None))
+
+    async def test_an_update_the_supervisor_finished_after_a_kill_is_kept_never_downgraded(self):
+        """The kill came after the Supervisor had the call, and it finished the update: putting the previous definition
+        back would make it offer 0.25.0 over the installed 0.25.1, and install it with auto-update on."""
+        env = self.env
+        await self.create()
+        env.stub.delay = 0.3
+        with mock.patch.object(type(env.manager), "_rollback_update", new=mock.AsyncMock()):
+            status, body = await env.send("POST", "/api/instances/garage/update", {"version": "0.25.1"})
+            await self._cancel_when(body["job"]["id"], "updating", "/store/addons/local_hri_garage/update")
+        for _ in range(100):
+            if env.stub.installed["local_hri_garage"]["version"] == "0.25.1":
+                break
+            await asyncio.sleep(0.02)
+        await env.manager.startup()
+        self.assertEqual(sorted(os.listdir(env.local_apps)), ["hri_garage"])
+        self.assertEqual(self.config("garage")["version"], "0.25.1")
+        entry = env.registry.get("garage")
+        self.assertEqual((entry["version"], entry["updating"]), ("0.25.1", None))
+        self.assertTrue(entry["tampered"]["pending"])  # checked by the manager before anything else is done with it
+        await env.sv.reload_store()
+        _, data = await env.get("/api/instances")
+        self.assertFalse(data["instances"][0]["update_available"])  # no downgrade offered
+
+    async def test_an_update_call_that_fails_after_the_supervisor_applied_it_keeps_the_new_definition(self):
+        env = self.env
+        await self.create()
+        update = env.sv.update
+
+        async def applied_then_lost(managed):
+            await update(managed)
+            raise SupervisorError(f"POST /store/addons/{managed.slug}/update: no answer from the Supervisor in 3600 s")
+
+        with mock.patch.object(env.sv, "update", side_effect=applied_then_lost):
+            job = await env.job(await env.send("POST", "/api/instances/garage/update", {"version": "0.25.1"}))
+        self.assertEqual(job["state"], "failed")
+        self.assertIn("The Supervisor has installed 0.25.1 all the same", job["error"])
+        self.assertEqual(sorted(os.listdir(env.local_apps)), ["hri_garage"])
+        self.assertEqual(self.config("garage")["version"], "0.25.1")
+        self.assertEqual(env.registry.get("garage")["version"], "0.25.1")
+
+    async def test_an_update_call_without_an_answer_leaves_both_definitions_for_the_next_start(self):
+        env = self.env
+        await self.create()
+
+        app_info, down = env.sv.app_info, []
+
+        async def lost(managed):  # no answer, and the Supervisor stays unreachable for a while
+            down.append(True)
+            raise SupervisorError(f"POST /store/addons/{managed.slug}/update: ServerDisconnectedError")
+
+        async def info(slug):
+            if down:
+                raise SupervisorError(f"GET /addons/{slug}/info: ServerDisconnectedError")
+            return await app_info(slug)
+
+        with mock.patch.object(env.sv, "update", side_effect=lost), mock.patch.object(env.sv, "app_info", side_effect=info):
+            job = await env.job(await env.send("POST", "/api/instances/garage/update", {"version": "0.25.1"}))
+        self.assertEqual(job["state"], "failed")
+        self.assertIn("is not known yet", job["error"])
+        self.assertEqual(len(os.listdir(env.local_apps)), 2)
+        await env.manager.startup()  # the Supervisor still has 0.25.0: the previous definition comes back
+        self.assertEqual(sorted(os.listdir(env.local_apps)), ["hri_garage"])
+        self.assertEqual(self.config("garage")["version"], "0.25.0")
 
     async def test_a_registry_error_after_the_update_is_a_warning(self):
         env = self.env
@@ -368,7 +445,7 @@ class FlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(env.stub.installed["local_hri_garage"]["version"], "0.25.1")
         self.assertEqual(sorted(os.listdir(env.local_apps)), ["hri_garage"])
         self.assertEqual(env.registry.get("garage")["version"], "0.25.0")
-        children.cleanup_stale(env.local_apps, env.registry)  # the next start catches up
+        await env.manager.startup()  # the next start catches up
         entry = env.registry.get("garage")
         self.assertEqual((entry["version"], entry["updating"]), ("0.25.1", None))
 
