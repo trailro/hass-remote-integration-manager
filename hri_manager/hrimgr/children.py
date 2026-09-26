@@ -38,6 +38,7 @@ TMP_PREFIX = ".hri-tmp-"  # a folder being built
 OLD_PREFIX = ".hri-old-"  # the previous definition during an update, until it succeeds
 DEL_PREFIX = ".hri-del-"  # a folder being deleted
 CHANNELS = ("release", "git")
+MAX_DEPTH = 64  # folders below a definition's folder (walk): HRI's tree is far shallower
 
 
 class NotManaged(Exception):
@@ -457,32 +458,66 @@ def folder_identity(folder: str) -> str:
     return "dir " + _identity(os.lstat(folder))
 
 
+def walk(base: str, skip: Callable[[str], bool] | None = None, max_depth: int = MAX_DEPTH,
+         max_entries: int | None = None):
+    """Every entry below the folder ``base``, depth first in name order, as (relative POSIX path, its name, a
+    descriptor of the folder holding it, its stat): each folder is opened from its parent's descriptor with O_NOFOLLOW,
+    so a folder swapped for a link after it was listed is refused (UnsafePath), never followed, and a link is listed,
+    never followed.  A folder's stat is its descriptor's, taken after it was opened (what is walked is what is
+    described).  ``skip(name)``: an entry neither listed nor walked into.  Deeper than ``max_depth``, or more than
+    ``max_entries`` entries: UnsafePath.  The descriptors are valid only until the next entry is asked for."""
+    count = [0]
+
+    def folder(fd: int, rel_dir: str, depth: int):
+        for name in sorted(os.listdir(fd)):
+            if skip is not None and skip(name):
+                continue
+            count[0] += 1
+            if max_entries is not None and count[0] > max_entries:
+                raise UnsafePath(f"more than {max_entries} entries")
+            rel = f"{rel_dir}/{name}" if rel_dir else name
+            st = os.stat(name, dir_fd=fd, follow_symlinks=False)
+            if not stat.S_ISDIR(st.st_mode):
+                yield rel, name, fd, st
+                continue
+            if depth >= max_depth:
+                raise UnsafePath(f"{rel[:80]!r} is more than {max_depth} folders deep")
+            sub = _open_folder(name, fd, rel)
+            try:
+                yield rel, name, fd, os.fstat(sub)
+                yield from folder(sub, rel, depth + 1)
+            finally:
+                os.close(sub)
+
+    top = _open_folder(base, None, ".")
+    try:
+        yield from folder(top, "", 0)
+    finally:
+        os.close(top)
+
+
 def digest_tree(folder: str) -> dict[str, str]:
-    """Every entry below ``folder``, and ``.`` for the folder itself, never through a link: its relative POSIX path ->
-    what it is (``sha256:<hex>`` for a file, ``link:<target>`` for a symlink, ``dir`` for a folder, ``other`` for
-    anything else), its inode and its change time.  The change time moves on every write, rename, link or metadata
-    change of an entry (a folder's, on every entry added to or removed from it) and user space cannot set it back: a
-    definition changed and put back as it was, around the Supervisor's reading of it, differs here."""
+    """Every entry below ``folder``, and ``.`` for the folder itself, never through a link (``walk``): its relative
+    POSIX path -> what it is (``sha256:<hex>`` for a file, ``link:<target>`` for a symlink, ``dir`` for a folder,
+    ``other`` for anything else), its inode and its change time.  The change time moves on every write, rename, link or
+    metadata change of an entry (a folder's, on every entry added to or removed from it) and user space cannot set it
+    back: a definition changed and put back as it was, around the Supervisor's reading of it, differs here."""
     out: dict[str, str] = {".": folder_identity(folder)}
-    for current, dirnames, filenames in os.walk(folder):  # links to folders are listed, not followed
-        rel_dir = os.path.relpath(current, folder)
-        for entry in dirnames + filenames:
-            path = os.path.join(current, entry)
-            rel = entry if rel_dir == "." else f"{rel_dir.replace(os.sep, '/')}/{entry}"
-            st = os.lstat(path)
-            if stat.S_ISLNK(st.st_mode):
-                kind = "link:" + os.readlink(path)
-            elif stat.S_ISDIR(st.st_mode):
-                kind = "dir"
-            elif stat.S_ISREG(st.st_mode):
-                digest = hashlib.sha256()
-                with os.fdopen(open_regular(path), "rb") as fh:
-                    for chunk in iter(lambda: fh.read(1024 * 1024), b""):
-                        digest.update(chunk)
-                kind = "sha256:" + digest.hexdigest()
-            else:
-                kind = "other"
-            out[rel] = f"{kind} {_identity(st)}"
+    for rel, name, parent, st in walk(folder):
+        if stat.S_ISLNK(st.st_mode):
+            kind = "link:" + os.readlink(name, dir_fd=parent)
+        elif stat.S_ISDIR(st.st_mode):
+            kind = "dir"
+        elif stat.S_ISREG(st.st_mode):
+            digest = hashlib.sha256()
+            with os.fdopen(open_regular(name, parent), "rb") as fh:
+                st = os.fstat(fh.fileno())  # the identity of what is hashed
+                for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+                    digest.update(chunk)
+            kind = "sha256:" + digest.hexdigest()
+        else:
+            kind = "other"
+        out[rel] = f"{kind} {_identity(st)}"
     return out
 
 
@@ -492,7 +527,7 @@ def check_tree(root: str, name: str, manifest: dict[str, str]) -> None:
     Supervisor's reading of it."""
     try:
         found = digest_tree(child_path(root, name))
-    except (OSError, UnsafePath) as err:
+    except (OSError, UnsafePath) as err:  # a folder swapped for a link, or a tree deeper than MAX_DEPTH, among them
         raise DefinitionChanged(f"{names.folder_name(name)} cannot be read again: {err}") from None
     if found != manifest:
         changed = sorted(k for k in set(found) | set(manifest) if found.get(k) != manifest.get(k))
