@@ -1,0 +1,20 @@
+# Monthly version updates: the Actions (pinned by SHA), the app's Python requirements and its base image.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    groups:
+      actions:
+        patterns: ["*"]
+
+  - package-ecosystem: pip
+    directory: /hri_manager
+    schedule:
+      interval: monthly
+
+  - package-ecosystem: docker
+    directory: /hri_manager
+    schedule:
+      interval: monthly

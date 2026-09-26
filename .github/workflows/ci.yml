@@ -1,0 +1,94 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # the Supervisor the app was last reviewed on: its own schema checks the app and a stamped instance
+  SUPERVISOR_REF: "2026.09.3"
+
+jobs:
+  tests:
+    name: Unit tests (Python ${{ matrix.python }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.13", "3.14"]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Requirements
+        run: python -m pip install --quiet -r hri_manager/requirements.txt
+      - name: Unit tests
+        run: python -m unittest discover -s tests -t . -v
+      - name: JavaScript syntax
+        run: node --check hri_manager/hrimgr/static/mgr.js
+
+  app:
+    name: Home Assistant app
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - name: App linter on the manager (frenck/action-app-linter)
+        uses: frenck/action-app-linter@b9cfd1bc62ba60d2c4fc96317b5f7ada5923f4a7  # v2.21.1
+        with:
+          path: hri_manager
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: "3.14"
+      - name: Stamp an instance from HRI's v0.25.0 template, on both channels
+        run: |
+          python -m pip install --quiet -r hri_manager/requirements.txt
+          python .github/stamp_children.py _stamped
+      - name: App linter on a stamped release instance
+        uses: frenck/action-app-linter@b9cfd1bc62ba60d2c4fc96317b5f7ada5923f4a7  # v2.21.1
+        with:
+          path: _stamped/release
+      - name: App linter on a stamped git instance
+        uses: frenck/action-app-linter@b9cfd1bc62ba60d2c4fc96317b5f7ada5923f4a7  # v2.21.1
+        with:
+          path: _stamped/git
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: home-assistant/supervisor
+          ref: ${{ env.SUPERVISOR_REF }}
+          path: .supervisor   # a dot folder: the discovery check skips it, as the Supervisor does
+          persist-credentials: false
+      - name: The Supervisor's own validation of the manager and of a stamped instance
+        # its requirements only: "pip install supervisor" would install supervisord
+        run: |
+          rm -rf _stamped
+          python -m pip install --quiet -r .supervisor/requirements.txt pyyaml
+          python .github/app_supervisor_check.py .supervisor
+
+  image:
+    name: Build the app's image (amd64)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Build as the Supervisor does (its build arguments, the app folder as the context)
+        run: docker buildx build hri_manager --load --tag hri-manager:ci --build-arg BUILD_ARCH=amd64 --build-arg BUILD_VERSION=ci
+      - name: The package imports in the image
+        run: docker run --rm hri-manager:ci python -c "import hrimgr, hrimgr.web, hrimgr.__main__; print(hrimgr.VERSION)"
