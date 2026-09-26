@@ -310,6 +310,97 @@ class HostNetworkFlowTest(unittest.IsolatedAsyncioTestCase):
         self.assert_on("old")
         self.assertIs(self.installed_host_network("local_hri_old"), True)
 
+    def lacks_it(self, job, version="0.26.3"):
+        self.assertEqual(job["state"], "failed", job)
+        self.assertIn(f"the release {version} does not have the host network support the manager needs", job["error"])
+
+    async def test_a_release_of_0_26_0_on_is_checked_for_the_code_too(self):
+        """0.26.3 is new enough by its number, but its entrypoint.py does not set APP_DYNAMIC_PORT: every write of a
+        definition with Host network from it is refused (create, update turning it on or keeping it on, a restamp at
+        the installed version, the update of an instance without its definition), and nothing is written."""
+        env = self.env
+        env.stub.releases.append("0.26.3")
+        env.stub.no_dynamic_port_refs.add("v0.26.3")
+        self.lacks_it(await self.create("attic", version="0.26.3", host_network=True))
+        self.assertFalse(os.path.exists(os.path.join(env.local_apps, "hri_attic")))
+        self.assertIsNone(env.registry.get("attic"))
+        self.assertEqual(env.changing_calls(), [])
+
+        await self.create()
+        before = self.config()
+        self.lacks_it(await self.update(version="0.26.3", host_network=True))
+        self.assertEqual(self.config(), before)
+        self.assertIs(env.registry.get("garage")["host_network"], False)
+        self.assertEqual(env.stub.installed["local_hri_garage"]["version"], "0.26.0")
+        self.assertEqual((await self.update(version="0.26.1", host_network=True))["state"], "succeeded")
+        before = self.config()
+        self.lacks_it(await self.update(version="0.26.3"))  # kept on by an update that does not name it
+        self.assertEqual(self.config(), before)
+        self.assertIs(env.registry.get("garage")["host_network"], True)
+        self.assertEqual(env.stub.installed["local_hri_garage"]["version"], "0.26.1")
+        job = await self.update(version="0.26.3", host_network=False)
+        self.assertEqual(job["state"], "succeeded", job)
+        self.assert_off()
+
+        # a restamp at the installed version: the admin's choice of what the installed app has
+        await self.create("shed", version="0.26.3")
+        env.stub.installed["local_hri_shed"]["definition"]["host_network"] = True
+        before = self.config("shed")
+        self.lacks_it(await self.update("shed", version="0.26.3", host_network=True))
+        self.assertEqual(self.config("shed"), before)
+        self.assertIs(env.registry.get("shed")["host_network"], False)
+
+        # the update of an instance without its definition
+        await self.create("old", version="0.26.1", host_network=True)
+        shutil.rmtree(os.path.join(env.local_apps, "hri_old"))
+        await env.sv.reload_store()
+        self.lacks_it(await self.update("old", version="0.26.3"))
+        self.assertFalse(os.path.exists(os.path.join(env.local_apps, "hri_old")))
+        self.assertEqual(env.registry.get("old")["version"], "0.26.1")
+        self.assertEqual(env.stub.installed["local_hri_old"]["version"], "0.26.1")
+
+    async def test_a_definition_follows_the_installed_app_to_on_only_for_an_hri_that_reads_its_port(self):
+        """Finish setup of an app a late-recorded update of the manager put on the host's network: the definition of
+        the installed version is stamped again with Host network only when that version's code has it."""
+        env = self.env
+        env.stub.releases.append("0.26.3")
+        env.stub.no_dynamic_port_refs.add("v0.26.3")
+        await self.create(version="0.26.3")
+        env.stub.installed["local_hri_garage"]["definition"]["host_network"] = True
+        self.manager_made_it()
+        env.registry.update("garage", setup_complete=False)
+        before = self.config()
+        job = await env.job(await env.send("POST", "/api/instances/garage/finish"))
+        self.lacks_it(job)
+        self.assertEqual(self.config(), before)
+        self.assertIs(env.registry.get("garage")["host_network"], False)
+        self.assertNotIn("host_network", self.copy_config())
+
+    async def test_a_git_definition_follows_the_installed_app_to_on_only_for_a_tree_that_reads_its_port(self):
+        env = self.env
+        for ref, supported in (("old", False), ("main", True)):
+            with self.subTest(ref=ref):
+                name = f"lab{ref}"
+                env.stub.refs[ref] = sha_of(f"{ref}-1")
+                if supported:
+                    env.stub.dynamic_port_refs.add(ref)
+                job = await self.create(name, channel="git", ref_kind="branch", ref=ref)
+                self.assertEqual(job["state"], "succeeded", job)
+                env.stub.installed[f"local_hri_{name}"]["definition"]["host_network"] = True
+                entry = env.registry.get(name)
+                env.registry.update(name, setup_complete=False, updating={"at": "t", "fields": {
+                    **{k: entry.get(k) for k in ("version", "ref_kind", "ref", "sha", "stamp_version", "bluetooth")},
+                    "host_network": True}})
+                job = await env.job(await env.send("POST", f"/api/instances/{name}/finish"))
+                if supported:
+                    self.assertEqual(job["state"], "succeeded", job)
+                    self.assert_on(name)
+                else:
+                    self.assertEqual(job["state"], "failed", job)
+                    self.assertIn(f"of the branch {ref} does not", job["error"])
+                    self.assertNotIn("host_network", self.config(name))
+                    self.assertIs(env.registry.get(name)["host_network"], False)
+
     async def test_not_without_a_version_change(self):
         env = self.env
         await self.create()

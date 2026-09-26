@@ -96,6 +96,11 @@ CHOOSE_DETACHED = "Update it to a newer release (or Rebuild it) with {label} cho
 # HRI's own app, would clash with it
 HOST_NETWORK_RELEASE = ("Host network needs HRI {min} or newer, the first release that listens on the port the "
                         "Supervisor gives it: not {version}")
+# a release from DYNAMIC_PORT_VERSION on whose archive does not set APP_DYNAMIC_PORT (stamp.reads_dynamic_port): the
+# version alone is not taken for the code
+HOST_NETWORK_RELEASE_CODE = ("the release {version} does not have the host network support the manager needs (its "
+                             "entrypoint.py does not set APP_DYNAMIC_PORT = True): choose Host network off, or a "
+                             "release that has it")
 HOST_NETWORK_GIT = ("Host network needs an HRI that listens on the port the Supervisor gives it (its entrypoint.py "
                     "says APP_DYNAMIC_PORT = True, from 0.26.0 on), and commit {sha} of the {kind} {ref} does not: "
                     "Rebuild with Host network off, or from a branch or tag that has it")
@@ -661,19 +666,20 @@ class Manager:
         return ".".join(str(n) for n in names.DYNAMIC_PORT_VERSION)
 
     def _refuse_host_network(self, channel: str, version: str, archive, ref: tuple[str, str]) -> None:
-        """JobFailed unless the HRI being written listens on the port the Supervisor gives it: a release from
-        names.DYNAMIC_PORT_VERSION on, a git tree whose entrypoint.py says so (stamp.reads_dynamic_port, read from the
-        archive the manager downloaded, never run).  Only for a definition written with Host network."""
-        if channel == "release":
-            if not names.reads_dynamic_port(version):
-                raise JobFailed(HOST_NETWORK_RELEASE.format(min=self._dynamic_port_min(), version=version))
-            return
+        """JobFailed unless the HRI being written listens on the port the Supervisor gives it: its archive, the one the
+        manager downloaded and stamps, has an entrypoint.py that says so (stamp.reads_dynamic_port, parsed, never run),
+        and a release is names.DYNAMIC_PORT_VERSION or newer too.  Only for a definition written with Host network."""
+        if channel == "release" and not names.reads_dynamic_port(version):
+            raise JobFailed(HOST_NETWORK_RELEASE.format(min=self._dynamic_port_min(), version=version))
         try:
             supported = stamp.reads_dynamic_port(archive)
         except tarsafe.UnsafeArchive as err:
             raise JobFailed(f"the archive's {stamp.DYNAMIC_PORT_FILE}: {err}") from None
-        if not supported:
-            raise JobFailed(HOST_NETWORK_GIT.format(sha=(archive.sha or "")[:12], kind=ref[0], ref=ref[1]))
+        if supported:
+            return
+        if channel == "release":
+            raise JobFailed(HOST_NETWORK_RELEASE_CODE.format(version=version))
+        raise JobFailed(HOST_NETWORK_GIT.format(sha=(archive.sha or "")[:12], kind=ref[0], ref=ref[1]))
 
     async def managed(self, name: str) -> children.Managed:
         """The instance's Managed, for a request: its marker and the registry (up to 4 MB) are read off the event loop."""
@@ -1951,16 +1957,42 @@ class Manager:
                             "installed; Delete removes it") from None
         return stamp.expected_view(config, managed.slug), manifest
 
+    async def _refuse_host_network_installed(self, job: Job, managed: children.Managed) -> None:
+        """_refuse_host_network for the definition of the installed version, which is stamped again in place: the
+        archive of its release (the commit the registry recorded), or of its commit, downloaded to be checked."""
+        channel, version, sha = managed.entry.get("channel"), str(managed.marker.get("version")), managed.marker.get("sha")
+        if channel == "release":
+            ref = ("tag", f"v{version}")
+            archive, _ = await self._fetch(job, channel, version, ref, recorded=managed.entry.get("sha"))
+        else:
+            try:
+                ref = names.validate_ref(managed.marker.get("ref_kind"), managed.marker.get("ref"))
+            except ValueError as err:
+                raise JobFailed(f"the manager has no usable branch or tag for {managed.name}: {err}") from None
+            if not isinstance(sha, str) or not names.SHA_RE.fullmatch(sha):
+                raise JobFailed(f"the manager has no record of the commit of {managed.slug}")
+            job.log(f"downloading commit {sha[:12]}, the installed one, to check it")
+            try:
+                archive, _ = await self.gh.tarball_of_commit(sha, *ref)
+            except (GitHubError, NotHRICommit) as err:
+                raise JobFailed(str(err)) from None
+            except Exception as err:  # noqa: BLE001 - tarsafe.UnsafeArchive
+                raise JobFailed(f"the archive of commit {sha[:12]} was refused: {err}") from None
+            job.keep(archive)
+        self._refuse_host_network(channel, version, archive, ref)
+
     async def _follow_access(self, job: Job, managed: children.Managed, installed: dict[str, bool]) -> children.Managed:
         """The installed app has ``installed`` (host_dbus, host_network), the registry's record and the definition
         something else: the definition's config.yaml is stamped again with it (checked first as this manager writes
         it, then replaced at once), and the marker, the registry and the copy in /data record it.  The Managed read
         again.  Never to Host network off (FOLLOW_HOST_NETWORK_OFF): HRI's own ingress_port is not in the stamped
-        definition."""
+        definition; to Host network on only for an HRI that reads its port (_refuse_host_network_installed)."""
         recorded = self._access_of(managed.entry)
         if recorded["host_network"] and not installed["host_network"]:
             raise JobFailed(FOLLOW_HOST_NETWORK_OFF.format(slug=managed.slug, choose=CHOOSE.format(
                 label=ACCESS["host_network"][1], state="off")))
+        if installed["host_network"] and not recorded["host_network"]:
+            await self._refuse_host_network_installed(job, managed)
         for access, (_, label, what) in ACCESS.items():
             if installed[access] != recorded[access]:
                 job.log(f"{label}: the installed app {'has' if installed[access] else 'does not have'} {what}, the "
