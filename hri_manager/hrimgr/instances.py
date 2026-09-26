@@ -17,7 +17,7 @@ import os
 import secrets
 from typing import Any
 
-from . import VERSION, children, names, stamp, tarsafe
+from . import VERSION, children, copies, names, stamp, tarsafe
 from .github import GitHub, GitHubError, latest_stable
 from .jobs import Job, JobFailed, Jobs, TagMoved
 from .registry import Registry, RegistryError
@@ -48,6 +48,8 @@ class Manager:
         self.dev = dev
         self.poll_interval = poll_interval
         self.store_timeout = store_timeout
+        # the copies of the instances' definitions, next to the registry in /data (copies.py)
+        self.copies_root = os.path.join(os.path.dirname(registry.path), copies.DIR_NAME)
 
     # ------------------------------------------------------------------ reading
 
@@ -373,17 +375,47 @@ class Manager:
         return {**{k: marker.get(k) for k in REGISTRY_FIELDS}, "setup_complete": False, **extra}
 
     def _forget(self, name: str, instance_id: str) -> None:
-        """Drop the registry's entry of ``name``, when it is still the one of that instance."""
+        """Drop the registry's entry of ``name``, and the copy of its definition, when it is still that instance."""
         entry = self.registry.get(name)
         if entry and entry.get("instance_id") == instance_id:
             self.registry.remove(name)
+            try:
+                copies.remove(self.copies_root, name)
+            except OSError as err:
+                _LOGGER.warning("the copy of %s's definition was not removed: %s", name, err)
 
-    def _builder(self, job: Job, archive, channel: str, name: str, version: str, sha: str | None, marker: dict, source: str):
+    async def _save_copy(self, job: Job, managed: children.Managed) -> None:
+        """Keep a copy of the definition just written in /data (copies.py).  A failure costs only the offline Repair:
+        the job goes on."""
+        try:
+            saved = await asyncio.to_thread(copies.save, self.copies_root, managed.name,
+                                            children.child_path(self.root, managed.name), managed.marker)
+        except (copies.CopyError, children.UnsafePath, names.InvalidName, OSError) as err:
+            job.log(f"no copy of the definition kept in the manager's /data ({err}): a Repair would download it")
+            _LOGGER.warning("the copy of %s's definition was not saved: %s", managed.name, err)
+            return
+        job.log(f"a copy of the definition is kept in the manager's /data ({len(saved)} file(s))")
+
+    async def _usable_copy(self, job: Job, name: str, entry: dict, version: str) -> copies.Copy | None:
+        try:
+            return await asyncio.to_thread(copies.load, self.copies_root, name, entry, version)
+        except (copies.CopyError, names.InvalidName, OSError) as err:
+            job.log(f"the manager's copy of the definition is not used: {err}")
+            return None
+
+    def _builder(self, job: Job, archive, channel: str, name: str, version: str, sha: str | None, marker: dict, source: str,
+                 copy: copies.Copy | None = None):
+        """``copy``: Repair from the manager's copy, of a release (its files as they are: no archive) or of a git
+        instance (its stamped config over the archive of its commit)."""
         def build(tmp: str) -> dict:
-            if channel == "release":
+            if copy is not None and channel == "release":
+                for rel, data in sorted(copy.files.items()):
+                    children.write_file(tmp, rel, data)
+            elif channel == "release":
                 stamp.build_release(archive, tmp, name, version, source)
             else:
-                _, notes = stamp.build_git(archive, tmp, name, version, sha, source)
+                _, notes = stamp.build_git(archive, tmp, name, version, sha, source,
+                                           config=copy.config if copy is not None else None)
                 for note in notes:
                     job.log(note)
             found = stamp.find_configs(tmp)
@@ -425,6 +457,7 @@ class Manager:
         except (stamp.TemplateError, children.UnsafePath, children.NotManaged, RegistryError, OSError) as err:
             await asyncio.to_thread(self._forget, name, marker["instance_id"])
             raise JobFailed(f"the definition was not written: {err}") from None
+        await self._save_copy(job, managed)
         try:
             await self._wait_store(job, slug, version)
             job.log("installing (a git build takes several minutes)" if channel == "git" else "installing (pulling the image)")
@@ -578,6 +611,7 @@ class Manager:
         await asyncio.to_thread(replacement.commit)
         await asyncio.to_thread(self.registry.update, managed.name, tag_moved=None,
                                 **{k: new_marker[k] for k in ("version", "ref_kind", "ref", "sha", "updated_at", "stamp_version")})
+        await self._save_copy(job, managed)
         if restamp:
             job.log(f"the definition is stamped by this manager now (stamping {marker.get('stamp_version')} -> "
                     f"{stamp.STAMP_VERSION}); the Supervisor applies it to the running app at its next version change "
@@ -630,8 +664,10 @@ class Manager:
         return {"removed": managed.slug, "data_removed": remove_data}
 
     async def _repair(self, job: Job, name: str, user: str) -> dict:
-        """Write the definition of an installed instance again, from the manager's registry (its channel, branch or
-        tag).  Only for an instance the registry holds: never an app the manager did not create."""
+        """Write the definition of an installed instance again.  Only for an instance the registry holds: never an app
+        the manager did not create.  From the manager's copy of the definition when it has one of that instance at the
+        installed version (copies.py: a release offline, a git instance with the source of its installed commit),
+        else from GitHub, by the registry's channel, branch or tag."""
         slug = names.supervisor_slug(name)
         try:
             entry = await asyncio.to_thread(self.registry.get, name)
@@ -665,36 +701,57 @@ class Manager:
                 raise JobFailed(f"the manager's registry has no usable branch or tag for {name}: {err}") from None
         elif names.parse_version(version) and names.supported_version(version):
             channel, ref = "release", ("tag", f"v{version}")
-            await self._check_release(version)
         elif names.GIT_VERSION_RE.fullmatch(version):
             raise JobFailed(f"{slug} is a git build ({version}) the manager's registry does not know: it cannot tell "
                             "which branch or tag to write again")
         else:
             raise JobFailed(f"cannot tell which HRI {version!r} is")
-        recorded = (entry.get("sha") if channel == "release" and entry.get("channel") == "release"
-                    and entry.get("version") == version else None)
-        try:
-            archive, source = await self._fetch(job, channel, version if channel == "release" else None, ref, recorded=recorded)
-        except TagMoved as err:
-            await self._flag_moved(name, err)
-            raise
-        sha = archive.sha
-        if channel == "git" and names.git_version(sha) != version:
-            job.log(f"the {ref[0]} {ref[1]} is now at {sha[:12]}, not the installed {version}: the definition is written "
-                    "for the new commit, and Rebuild installs it")
-            version = names.git_version(sha)
+        # the manager's own copy of the definition first: a release needs nothing from GitHub, a git instance only the
+        # source of its installed commit.  GitHub as before when there is no usable copy
+        copy = await self._usable_copy(job, name, entry, version)
+        archive = None
+        if copy is not None and channel == "release":
+            sha, source = copy.sha, str(copy.meta.get("template_source") or "the manager's copy")
+            job.log(f"from the manager's copy of its definition (release {version}): nothing downloaded")
+        elif copy is not None:
+            try:
+                job.log(f"downloading hass-remote-integration at commit {copy.sha[:12]}, the installed one")
+                archive, source = await self.gh.tarball_of_commit(copy.sha)
+                sha = copy.sha
+            except Exception as err:  # noqa: BLE001 - GitHubError, tarsafe.UnsafeArchive: the branch instead
+                job.log(f"{err}: from the {ref[0]} {ref[1]} instead")
+                copy = None
+        if copy is None:
+            if channel == "release":
+                await self._check_release(version)
+            recorded = (entry.get("sha") if channel == "release" and entry.get("channel") == "release"
+                        and entry.get("version") == version else None)
+            try:
+                archive, source = await self._fetch(job, channel, version if channel == "release" else None, ref, recorded=recorded)
+            except TagMoved as err:
+                await self._flag_moved(name, err)
+                raise
+            sha = archive.sha
+            if channel == "git" and names.git_version(sha) != version:
+                job.log(f"the {ref[0]} {ref[1]} is now at {sha[:12]}, not the installed {version}: the definition is written "
+                        "for the new commit, and Rebuild installs it")
+                version = names.git_version(sha)
         marker = self._marker(name, channel, version, ref, sha, source, user, instance_id=entry.get("instance_id"))
+        if copy is not None and isinstance(copy.meta.get("stamp_version"), int):
+            marker["stamp_version"] = copy.meta["stamp_version"]  # the copy's config, as that manager stamped it
         marker["repaired_at"] = marker["updated_at"]
         marker["created_at"] = entry.get("created_at") or marker["created_at"]
         setup_complete = entry.get("setup_complete", True)
         job.log(f"writing {names.folder_name(name)} again for {version} (from the manager's registry)")
         try:
             await asyncio.to_thread(self.registry.put, name, self._registry_entry(marker, setup_complete=setup_complete))
-            await asyncio.to_thread(children.write_new, self.root, name,
-                                    self._builder(job, archive, channel, name, version, sha, marker, source), self.registry)
+            managed = await asyncio.to_thread(
+                children.write_new, self.root, name,
+                self._builder(job, archive, channel, name, version, sha, marker, source, copy=copy), self.registry)
         except (stamp.TemplateError, children.UnsafePath, children.NotManaged, RegistryError, OSError) as err:
             await asyncio.to_thread(self._restore_entry, name, entry, marker["instance_id"])
             raise JobFailed(f"the definition was not written: {err}") from None
+        await self._save_copy(job, managed)
         await self._wait_store(job, slug, version)
         return {"slug": slug, "version": version}
 

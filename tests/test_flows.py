@@ -33,6 +33,18 @@ class FlowTest(unittest.IsolatedAsyncioTestCase):
         with open(os.path.join(self.folder(name), "config.yaml"), encoding="utf-8") as fh:
             return yaml.safe_load(fh)
 
+    def copy_dir(self, name):
+        return os.path.join(self.env.data, "definitions", name)
+
+    def read_tree(self, path):
+        out = {}
+        for folder, _, files in os.walk(path):
+            for f in files:
+                full = os.path.join(folder, f)
+                with open(full, "rb") as fh:
+                    out[os.path.relpath(full, path)] = fh.read()
+        return out
+
     def marker(self, name):
         with open(os.path.join(self.folder(name), children.MARKER), encoding="utf-8") as fh:
             return json.load(fh)
@@ -349,8 +361,9 @@ class FlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.marker("garage")["sha"], installed_sha)  # the definition is untouched
         _, data = await env.get("/api/instances")
         self.assertIn("tag moved", data["instances"][0]["problem"])
-        # the same for a repair from the registry
+        # the same for a repair from GitHub (without the manager's copy of the definition, which needs no download)
         shutil.rmtree(self.folder("garage"))
+        shutil.rmtree(self.copy_dir("garage"))
         await env.sv.reload_store()
         job = await env.job(await env.send("POST", "/api/instances/garage/repair"))
         self.assertEqual(job["state"], "failed")
@@ -385,6 +398,113 @@ class FlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("repaired_at", self.marker("garage"))
         _, data = await env.get("/api/instances")
         self.assertTrue(data["instances"][0]["managed"])
+
+    async def test_a_copy_of_each_definition_is_kept_in_data(self):
+        """The manager's /data (in its own backups) keeps each definition: a release's whole, a git instance's
+        config only, never its source tree."""
+        env = self.env
+        await self.create()
+        copy = self.read_tree(self.copy_dir("garage"))
+        self.assertEqual(sorted(copy), ["CHANGELOG.md", "DOCS.md", "config.yaml", "copy.json", "translations/en.yaml"])
+        folder = self.read_tree(self.folder("garage"))
+        for rel in ("config.yaml", "DOCS.md", "CHANGELOG.md", "translations/en.yaml"):
+            self.assertEqual(copy[rel], folder[rel], rel)
+        meta, m = json.loads(copy["copy.json"]), self.marker("garage")
+        self.assertEqual({k: meta[k] for k in ("instance_id", "channel", "version", "sha", "stamp_version")},
+                         {k: m[k] for k in ("instance_id", "channel", "version", "sha", "stamp_version")})
+        await env.job(await env.send("POST", "/api/instances/garage/update", {"version": "0.25.1"}))
+        self.assertEqual(yaml.safe_load(self.read_tree(self.copy_dir("garage"))["config.yaml"])["version"], "0.25.1")
+        self.assertEqual(sorted(os.listdir(os.path.join(env.data, "definitions"))), ["garage"])  # no leftovers
+
+        await self.create("lab", channel="git", ref_kind="branch", ref="main")
+        copy = self.read_tree(self.copy_dir("lab"))
+        self.assertEqual(sorted(copy), ["config.yaml", "copy.json"])
+        self.assertEqual(copy["config.yaml"], self.read_tree(self.folder("lab"))["config.yaml"])
+        self.assertEqual(json.loads(copy["copy.json"])["sha"], env.stub.refs["main"])
+        self.assertLess(sum(len(d) for d in copy.values()), 8192)
+
+        for name in ("garage", "lab"):
+            await env.job(await env.send("DELETE", f"/api/instances/{name}", {"remove_data": False, "confirm": name}))
+            self.assertFalse(os.path.exists(self.copy_dir(name)))
+        env.stub.fail[("POST", "/addons/local_hri_attic/start")] = "Can't start"
+        await self.create("attic")
+        self.assertFalse(os.path.exists(self.copy_dir("attic")))  # rolled back with the rest
+
+    async def test_repair_of_a_release_from_the_copy_downloads_nothing(self):
+        env = self.env
+        await self.create()
+        before, m = self.read_tree(self.folder("garage")), self.marker("garage")
+        shutil.rmtree(self.folder("garage"))
+        await env.sv.reload_store()
+        paths = list(env.stub.codeload_paths)
+        with mock.patch.object(env.gh, "_get", side_effect=AssertionError("GitHub was asked")):
+            job = await env.job(await env.send("POST", "/api/instances/garage/repair"))
+        self.assertEqual(job["state"], "succeeded", job)
+        self.assertTrue(any("nothing downloaded" in l["msg"] for l in job["lines"]), job["lines"])
+        self.assertEqual(env.stub.codeload_paths, paths)
+        after = self.read_tree(self.folder("garage"))
+        for rel in ("config.yaml", "DOCS.md", "CHANGELOG.md", "translations/en.yaml"):
+            self.assertEqual(after[rel], before[rel], rel)
+        self.assertEqual({k: self.marker("garage")[k] for k in ("instance_id", "version", "sha", "stamp_version")},
+                         {k: m[k] for k in ("instance_id", "version", "sha", "stamp_version")})
+        status, _ = await env.send("POST", "/api/instances/garage/restart")
+        self.assertEqual(status, 202)
+
+    async def test_repair_of_a_git_instance_from_the_copy_keeps_its_commit(self):
+        """The branch moved on since: the definition is written for the installed commit, with its source."""
+        env = self.env
+        await self.create("lab", channel="git", ref_kind="branch", ref="main")
+        sha, version = env.stub.refs["main"], env.stub.installed["local_hri_lab"]["version"]
+        env.stub.refs["main"] = sha_of("main-moved-on")
+        shutil.rmtree(self.folder("lab"))
+        await env.sv.reload_store()
+        job = await env.job(await env.send("POST", "/api/instances/lab/repair"))
+        self.assertEqual(job["state"], "succeeded", job)
+        self.assertEqual(env.stub.codeload_paths[-1], sha)
+        m = self.marker("lab")
+        self.assertEqual((m["sha"], m["version"], m["ref"]), (sha, version, "main"))
+        self.assertEqual(env.stub.store["local_hri_lab"]["version"], version)  # nothing to rebuild
+        with open(os.path.join(self.folder("lab"), "Dockerfile"), encoding="utf-8") as fh:
+            self.assertIn(f"ARG HRI_BUILD={sha}", fh.read())
+        # the commit cannot be downloaded: the branch, as before
+        shutil.rmtree(self.folder("lab"))
+        await env.sv.reload_store()
+        env.stub.commits.discard(sha)
+        job = await env.job(await env.send("POST", "/api/instances/lab/repair"))
+        self.assertEqual(job["state"], "succeeded", job)
+        self.assertEqual(self.marker("lab")["sha"], sha_of("main-moved-on"))
+        self.assertEqual(env.stub.codeload_paths[-1], "refs/heads/main")
+
+    async def test_a_copy_that_does_not_fit_is_not_used(self):
+        """Another instance's copy, another version's, or a config the manager would not write: GitHub instead."""
+        env = self.env
+        await self.create()
+
+        def spoil_meta(**over):
+            path = os.path.join(self.copy_dir("garage"), "copy.json")
+            with open(path, encoding="utf-8") as fh:
+                meta = json.load(fh)
+            with open(path, "w", encoding="utf-8") as fh:
+                json.dump({**meta, **over}, fh)
+
+        def spoil_config():
+            path = os.path.join(self.copy_dir("garage"), "config.yaml")
+            with open(path, "a", encoding="utf-8") as fh:
+                fh.write("privileged:\n  - SYS_ADMIN\n")
+
+        for label, spoil in (("another instance", lambda: spoil_meta(instance_id="f" * 32)),
+                             ("another version", lambda: spoil_meta(version="0.25.1")),
+                             ("a privileged config", spoil_config)):
+            with self.subTest(case=label):
+                shutil.rmtree(self.folder("garage"))
+                await env.sv.reload_store()
+                spoil()
+                env.stub.codeload_paths.clear()
+                job = await env.job(await env.send("POST", "/api/instances/garage/repair"))
+                self.assertEqual(job["state"], "succeeded", job)
+                self.assertTrue(any("copy of the definition is not used" in l["msg"] for l in job["lines"]), job["lines"])
+                self.assertEqual(env.stub.codeload_paths, ["refs/tags/v0.25.0"])
+                self.assertNotIn("privileged", self.config("garage"))
 
     def _hand_made_app(self, folder="my_garage", slug="hri_garage"):
         """A local app someone wrote by hand in another folder, with an instance's slug and HRI's url, installed."""

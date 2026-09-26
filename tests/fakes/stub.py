@@ -93,6 +93,7 @@ class Stub:
         self.tags = {"test-tag": sha_of("test-tag")}  # tags that are not releases
         self.moved: dict[str, str] = {}  # a release tag force-pushed to another commit: tag -> its new commit
         self.codeload_paths: list[str] = []
+        self.commits: set[str] = set()  # every commit codeload served by a ref: GitHub serves it by its sha too
         self.users: object = [dict(u) for u in USERS]  # what config/auth/list answers (tests put other shapes here)
         self.core_down = False
         self.store_frozen = False  # a reload that notices nothing, as the Supervisor after a file dated in the future
@@ -321,10 +322,14 @@ class Stub:
         return None
 
     def tarball_for(self, ref: str) -> bytes | None:
-        """Only full refs: the manager never asks codeload for a short name, a commit or a pull request."""
+        """Full refs, and a commit served before by one (the manager asks for a commit only in a Repair, the one it
+        recorded); never a short name or a pull request."""
+        if ref in self.commits:
+            return make_tarball(f"hass-remote-integration-{ref[:7]}", hri_files("0.25.0"), ref)
         sha = self.ref_sha(ref)
         if sha is None:
             return None
+        self.commits.add(sha)
         if ref.startswith("refs/tags/v"):
             version = ref[len("refs/tags/v"):]
             # at a release tag HRI's app/config.yaml still names the previous version

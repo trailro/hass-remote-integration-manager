@@ -27,8 +27,9 @@ single hass-remote-integration app. Its port 8087 is off; map one on its **Netwo
 
 **Backups.** On current Supervisors a full backup leaves out the local apps folder, where each instance's definition
 lives (an upstream issue). After a full restore the instances come back detached; **Repair** in the manager writes
-their definitions again (a release from GitHub; a git instance from its branch or tag, which must still exist). Keep
-the manager in the same backups: its `/data` holds the registry that Repair works from.
+their definitions again from the copy it keeps in its own `/data` (a release needs nothing from GitHub; a git instance
+downloads the source of its installed commit), or from GitHub when it has no usable copy. Keep the manager in the
+same backups: its `/data` holds the registry and the copies that Repair works from.
 
 ## Options
 
