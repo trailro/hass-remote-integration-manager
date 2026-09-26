@@ -13,7 +13,7 @@ sidebar panel, **Configuration** tab, data folder, logs and backups.
 HRI itself is unchanged and stays the source of truth: the manager takes each instance's definition from the HRI
 release you choose. On a plain Docker install you do not need this: run one HRI container per integration.
 
-**Status: 0.1.0, experimental.** Home Assistant OS only (the Supervisor's local apps folder is required).
+**Status: 0.1.1, experimental.** Home Assistant OS only (the Supervisor's local apps folder is required).
 
 ## Requirements
 
