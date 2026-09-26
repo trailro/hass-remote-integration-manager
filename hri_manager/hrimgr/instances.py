@@ -383,7 +383,12 @@ class Manager:
         contained when they differ, stopped and kept when the Supervisor does not report a field."""
         job.log("checking the installed app against its definition")
         try:
-            expected, manifest = await asyncio.to_thread(self._definition_on_disk, managed)
+            try:
+                expected, manifest = await asyncio.to_thread(self._definition_on_disk, managed)
+            except JobFailed as err:
+                # nothing to compare the running app with: not left running unchecked
+                raise await self._hold(job, managed, reason=f"{err}; so the manager could not check the installed "
+                                                            f"{managed.slug}") from None
             await self._check_tree(managed.slug, manifest)
             missing = await self._verify_installed(job, managed, expected)
         except Tampered as err:
