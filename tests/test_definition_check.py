@@ -880,6 +880,16 @@ class DecoyScanTest(unittest.TestCase):
         self.assertEqual(set(found), set(cases))
         self.assertEqual(found["docs/config.example.yaml"], "hri_attic")
 
+    def test_the_manager_s_own_definition_and_reserved_names_are_not_decoys(self):
+        """F1: a clone of the manager's repository in the local apps folder (hri_manager/config.yaml, slug
+        hri_manager) defines no instance: no instance can be named manager, or any reserved word."""
+        write(os.path.join(self.root, "hass-remote-integration-manager", "hri_manager", "config.yaml"),
+              b"slug: hri_manager\nversion: 0.1.3\n")
+        for word in sorted(names.RESERVED):
+            write(os.path.join(self.root, "x", word, "config.yaml"), f"slug: HRI-{word}\n".encode())
+        write(os.path.join(self.root, "y", "config.yaml"), b"slug: hri_managers\n")  # not reserved: an instance's
+        self.assertEqual(self.found(), {"y/config.yaml": "hri_managers"})
+
     def test_what_the_supervisor_skips_is_skipped(self):
         for rel, data in ((".hidden/config.yaml", b"slug: hri_garage\n"), ("z/rootfs/config.yaml", b"slug: hri_garage\n"),
                           ("z/.git/config.yaml", b"slug: hri_garage\n"), ("w/config.js", b"slug: hri_garage\n"),
