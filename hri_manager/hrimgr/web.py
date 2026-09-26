@@ -157,7 +157,9 @@ def _error(status: int, message: str) -> web.Response:
 async def _body(request: web.Request) -> dict:
     if not request.can_read_body:
         return {}
-    raw = await request.content.read(MAX_BODY + 1)
+    # the whole body (content.read(n) returns what has arrived so far); past client_max_size (MAX_BODY) aiohttp answers
+    # 413 itself
+    raw = await request.read()
     if len(raw) > MAX_BODY:
         raise InvalidRequest("the request body is too large")
     try:

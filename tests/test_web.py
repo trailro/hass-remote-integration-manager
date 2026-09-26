@@ -1,6 +1,7 @@
 """The HTTP gate: only the Supervisor's transport peer, only the allowed Home Assistant users, state changes only as
 fetch + JSON; the policy headers on every answer; the page and its assets."""
 
+import asyncio
 import re
 import unittest
 
@@ -66,6 +67,21 @@ class GuardTest(unittest.IsolatedAsyncioTestCase):
         resp = await client.put("/api/instances", json={}, headers={"X-Requested-With": "fetch"})
         self.assertEqual(resp.status, 405)
         self.assertEqual(self.env.changing_calls(), [])
+
+    async def test_a_body_that_arrives_in_pieces_is_read_whole(self):
+        async def pieces():
+            yield b'{"name": "garage", "channel": '
+            await asyncio.sleep(0.05)
+            yield b'"release", "version": "0.25.0"}'
+
+        resp = await self.env.client.post("/api/instances", data=pieces(),
+                                          headers={"X-Requested-With": "fetch", "Content-Type": "application/json"})
+        self.assertEqual(resp.status, 202, await resp.text())
+        await self.env.job((resp.status, await resp.json()))
+        big = b'{"x": "' + b"a" * (mgrweb.MAX_BODY + 10) + b'"}'
+        resp = await self.env.client.post("/api/instances", data=big,
+                                          headers={"X-Requested-With": "fetch", "Content-Type": "application/json"})
+        self.assertIn(resp.status, (400, 413))
 
     async def test_policy_headers_everywhere(self):
         client = self.env.client
