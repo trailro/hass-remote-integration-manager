@@ -9,6 +9,8 @@ updates:
       actions:
         patterns: ["*"]
 
+  # requirements.in names the app's dependencies; requirements.txt is its pip-compile lock (--generate-hashes), which
+  # Dependabot compiles again when it bumps one (its pip ecosystem reads only *.in and *.txt files)
   - package-ecosystem: pip
     directory: /hri_manager
     schedule:
