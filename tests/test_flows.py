@@ -4,6 +4,7 @@ real HTTP; rollbacks on failure; and the marker and slug checks in front of ever
 import asyncio
 import datetime
 import json
+import threading
 import os
 import shutil
 import time
@@ -404,6 +405,32 @@ class FlowTest(unittest.IsolatedAsyncioTestCase):
         with mock.patch.object(env.sv, "store_app", side_effect=slow), self.assertRaises(JobFailed):
             await env.manager._wait_store(Job("garage", "create", "t"), "local_hri_garage", "0.25.0")
         self.assertLess(time.monotonic() - start, 1.5)
+
+    async def test_the_request_handlers_read_the_marker_and_registry_off_the_event_loop(self):
+        """The checks a request makes before its job starts (marker, registry) read files: never on the event loop."""
+        env = self.env
+        await self.create()
+        on_loop = []
+        load, get = children.load_managed, env.registry.get
+
+        def recording(real):
+            def call(*args, **kw):
+                on_loop.append((real.__name__, threading.current_thread() is threading.main_thread()))
+                return real(*args, **kw)
+            return call
+
+        def no_run(instance, action, user, work):  # the job's own reads are not the handler's
+            return Job(instance, action, user)
+
+        with mock.patch.object(children, "load_managed", recording(load)), \
+                mock.patch.object(env.registry, "get", recording(get)), \
+                mock.patch.object(env.manager.jobs, "start", side_effect=no_run):
+            for path, body in (("garage/stop", {}), ("garage/update", {"version": "0.25.1"}), ("garage/finish", {}),
+                               ("garage/repair", {}), ("garage/forget", {"confirm": "garage"})):
+                await env.send("POST", f"/api/instances/{path}", body)
+            await env.send("DELETE", "/api/instances/garage", {"remove_data": False, "confirm": "garage"})
+        self.assertTrue(on_loop)
+        self.assertEqual([name for name, main in on_loop if main], [])
 
     async def test_finish_setup_and_install(self):
         env = self.env
