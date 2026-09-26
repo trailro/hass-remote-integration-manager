@@ -31,7 +31,8 @@ REF_KINDS = ("branch", "tag")
 REF_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/-]{0,99}")
 BARE_SHA_RE = re.compile(r"[0-9a-fA-F]{7,40}")
 SHA_RE = re.compile(r"[0-9a-f]{40}")
-GIT_VERSION_RE = re.compile(r"0\.0\.0-([0-9a-f]{7,40})")
+GIT_VERSION_LENGTH = 12  # hex digits of the commit in a git build's version
+GIT_VERSION_RE = re.compile(r"0\.0\.0-([0-9a-f]{12})")
 
 
 class InvalidName(ValueError):
@@ -122,5 +123,6 @@ def full_ref(kind: str, ref: str) -> str:
 
 def git_version(sha: str) -> str:
     """The version a git-channel instance gets: valid for a local build, and different for every commit, which is
-    what makes the Supervisor offer the update (it compares versions for inequality)."""
-    return f"0.0.0-{sha[:7]}"
+    what makes the Supervisor offer the update (it compares versions for inequality).  Twelve hex digits: two
+    commits that share them are refused by the update instead of being a silent no-op."""
+    return f"0.0.0-{sha[:GIT_VERSION_LENGTH]}"

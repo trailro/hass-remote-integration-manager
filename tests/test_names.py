@@ -72,8 +72,9 @@ class VersionTest(unittest.TestCase):
         self.assertEqual(names.full_ref("tag", "v0.25.0"), "refs/tags/v0.25.0")
 
     def test_git_version(self):
-        self.assertEqual(names.git_version("0123456789abcdef" * 2 + "01234567"), "0.0.0-0123456")
-        self.assertTrue(names.GIT_VERSION_RE.fullmatch("0.0.0-0123456"))
+        self.assertEqual(names.git_version("0123456789abcdef" * 2 + "01234567"), "0.0.0-0123456789ab")
+        self.assertTrue(names.GIT_VERSION_RE.fullmatch("0.0.0-0123456789ab"))
+        self.assertFalse(names.GIT_VERSION_RE.fullmatch("0.0.0-0123456"))
 
 
 if __name__ == "__main__":

@@ -499,6 +499,9 @@ class Manager:
                 job.log(f"the {new_ref[0]} {new_ref[1]} is still {sha[:12]}: nothing to rebuild")
                 return {"version": marker.get("version"), "unchanged": True}
             version = names.git_version(sha)
+            if version == marker.get("version") and sha != marker.get("sha"):
+                raise JobFailed(f"commit {sha[:12]} has the same version {version} as the installed {marker.get('sha', '')[:12]}: "
+                                "the Supervisor would not install it")
             job.log(f"commit {sha[:12]}: version {version}")
         new_marker = self._marker(managed.name, channel, version, new_ref, sha, source, user, previous=marker)
         job.log(f"rewriting {names.folder_name(managed.name)} (the previous definition is kept until the update succeeds)")

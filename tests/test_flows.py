@@ -97,7 +97,7 @@ class FlowTest(unittest.IsolatedAsyncioTestCase):
         job = await self.create("lab", channel="git", ref_kind="branch", ref="main")
         self.assertEqual(job["state"], "succeeded", job)
         sha = env.stub.refs["main"]
-        self.assertEqual(env.stub.installed["local_hri_lab"]["version"], f"0.0.0-{sha[:7]}")
+        self.assertEqual(env.stub.installed["local_hri_lab"]["version"], f"0.0.0-{sha[:12]}")
         self.assertTrue(env.stub.installed["local_hri_lab"]["build"])
         config = self.config("lab")
         self.assertNotIn("image", config)
@@ -114,13 +114,25 @@ class FlowTest(unittest.IsolatedAsyncioTestCase):
         env.stub.refs["main"] = sha_of("main-2")
         job = await env.job(await env.send("POST", "/api/instances/lab/update", {}))
         self.assertEqual(job["state"], "succeeded", job)
-        self.assertEqual(env.stub.installed["local_hri_lab"]["version"], f"0.0.0-{sha_of('main-2')[:7]}")
+        self.assertEqual(env.stub.installed["local_hri_lab"]["version"], f"0.0.0-{sha_of('main-2')[:12]}")
         self.assertEqual(self.marker("lab")["history"][0]["sha"], sha)
 
         job = await env.job(await env.send("DELETE", "/api/instances/lab", {"remove_data": True, "confirm": "lab"}))
         self.assertEqual(job["state"], "succeeded", job)
         self.assertIn(("POST", "/addons/local_hri_lab/uninstall", {"remove_config": True}), env.stub.calls)
         self.assertEqual(set(env.stub.codeload_paths), {"refs/heads/main"})  # always the full ref
+
+    async def test_a_new_commit_with_the_same_version_is_refused(self):
+        """Two commits whose versions are equal (the same leading hex): an update that would be a silent no-op fails."""
+        env = self.env
+        env.stub.refs["main"] = "0123456789ab" + "0" * 28
+        await self.create("lab", channel="git", ref_kind="branch", ref="main")
+        self.assertEqual(env.stub.installed["local_hri_lab"]["version"], "0.0.0-0123456789ab")
+        env.stub.refs["main"] = "0123456789ab" + "1" * 28
+        job = await env.job(await env.send("POST", "/api/instances/lab/update", {}))
+        self.assertEqual(job["state"], "failed")
+        self.assertIn("same version", job["error"])
+        self.assertEqual(self.marker("lab")["sha"], "0123456789ab" + "0" * 28)
 
     async def test_git_channel_takes_only_branches_and_tags_of_hri(self):
         env = self.env
