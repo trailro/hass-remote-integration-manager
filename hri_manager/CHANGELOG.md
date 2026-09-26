@@ -24,6 +24,15 @@ Fixes from an external review of 0.1.1, and Bluetooth per instance. Still **expe
   instance's own container around a backup), which the manager now accepts as HRI wrote them (one line, at most 512
   characters); 0.1.1 refused them, so no instance could update to 0.25.2. Instances created from, or updated to, HRI
   0.25.2 or newer keep HRI's own backups in their Home Assistant backup.
+- **Never a downgrade after an interrupted update.** When the Supervisor has installed an update the manager stopped
+  waiting for, the new definition is kept and recorded (then checked), never the previous one put back, which the
+  Supervisor would offer, and auto-update install, as a downgrade.
+- **A definition the manager did not write is flagged.** Every list compares the version the store offers with the
+  one the manager recorded; another one is flagged ("do not update from the Supervisor's app page"), with Repair to
+  write the manager's definition again. Never update an instance with the Supervisor's own Update button.
+- **Marks with a way out:** an app the manager could not check can be checked again (Check again, Repair); a
+  containment a stop cut short says "interrupted" and is done again at the next start; Bluetooth follows the
+  installed app when Repair, Finish setup or an Update to the installed version write its definition.
 - **An update killed midway is put back** at the manager's next start (the registry marks an update in progress
   before the swap); only the manager's records failing after a successful update is a warning, not a failure, and the
   next start records it.
