@@ -3,6 +3,7 @@
 import json
 import os
 import unittest
+from unittest import mock
 
 from hrimgr import children
 
@@ -199,6 +200,57 @@ class WriteTest(unittest.TestCase):
         done = children.cleanup_stale(self.root)
         self.assertEqual(self.entries(), [".other-tool", "hri_cellar", "hri_porch"])
         self.assertEqual(len(done), 4)
+
+    def read(self, name="garage"):
+        with open(os.path.join(self.root, f"hri_{name}", "config.yaml"), "rb") as fh:
+            return fh.read()
+
+    def test_an_update_stopped_before_its_commit_is_put_back(self):
+        """The manager killed between the swap and the commit (OOM, power, SIGKILL): the registry's flag says so."""
+        m = children.write_new(self.root, "garage", build_with({"config.yaml": b"old"}, marker("garage")), self.reg)
+        self.reg.update("garage", updating={"at": "t", "fields": {"version": "0.25.1", "sha": "b" * 40}})
+        children.replace(m, build_with({"config.yaml": b"new"}, marker("garage", version="0.25.1", sha="b" * 40)))
+        self.assertEqual(len(self.entries()), 2)
+        done = children.cleanup_stale(self.root, self.reg)
+        self.assertEqual(self.entries(), ["hri_garage"])
+        self.assertEqual(self.read(), b"old")
+        self.assertIsNone(self.reg.get("garage")["updating"])
+        self.assertEqual(self.reg.get("garage")["version"], "0.25.0")
+        self.assertIn("stopped before it was committed", done[0])
+
+    def test_without_the_flag_the_new_definition_stays(self):
+        m = children.write_new(self.root, "garage", build_with({"config.yaml": b"old"}, marker("garage")), self.reg)
+        children.replace(m, build_with({"config.yaml": b"new"}, marker("garage", version="0.25.1")))
+        children.cleanup_stale(self.root, self.reg)
+        self.assertEqual((self.entries(), self.read()), (["hri_garage"], b"new"))
+
+    def test_a_committed_update_the_registry_missed_is_recorded(self):
+        m = children.write_new(self.root, "garage", build_with({"config.yaml": b"old"}, marker("garage")), self.reg)
+        fields = {"version": "0.25.1", "sha": "b" * 40, "ref": "v0.25.1", "updated_by": "alice"}
+        self.reg.update("garage", updating={"at": "t", "fields": fields})
+        children.replace(m, build_with({"config.yaml": b"new"}, marker("garage", version="0.25.1", sha="b" * 40))).commit()
+        children.cleanup_stale(self.root, self.reg)
+        entry = self.reg.get("garage")
+        self.assertEqual((entry["version"], entry["ref"], entry["updated_by"], entry["updating"]), ("0.25.1", "v0.25.1", "alice", None))
+        self.assertEqual(self.read(), b"new")
+
+    def test_a_commit_stopped_midway_leaves_nothing_to_put_back(self):
+        m = children.write_new(self.root, "garage", build_with({"config.yaml": b"old", "a/b": b"x"}, marker("garage")), self.reg)
+        r = children.replace(m, build_with({"config.yaml": b"new"}, marker("garage", version="0.25.1")))
+        with mock.patch.object(children, "_remove_tree", side_effect=KeyboardInterrupt):
+            with self.assertRaises(KeyboardInterrupt):
+                r.commit()
+        self.assertFalse(any(e.startswith(children.OLD_PREFIX) for e in self.entries()))
+        children.cleanup_stale(self.root, self.reg)
+        self.assertEqual((self.entries(), self.read()), (["hri_garage"], b"new"))
+
+    def test_a_rename_that_fails_does_not_stop_the_start(self):
+        os.makedirs(os.path.join(self.root, ".hri-old-cellar-0123abcd"))
+        os.makedirs(os.path.join(self.root, ".hri-tmp-garage-0123abcd"))
+        with mock.patch("os.rename", side_effect=PermissionError(13, "Permission denied")):
+            done = children.cleanup_stale(self.root, self.reg)
+        self.assertTrue(done[0].startswith("could not tidy .hri-old-cellar-0123abcd: "), done)
+        self.assertEqual(done[1], "removed .hri-tmp-garage-0123abcd")
 
 
 if __name__ == "__main__":

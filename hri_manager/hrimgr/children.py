@@ -272,7 +272,11 @@ class Replacement:
         self.manifest = manifest  # the new build, as digest_tree saw it before it was renamed into place
 
     def commit(self) -> None:
-        _remove_tree(self.old)
+        # renamed out first: a commit stopped midway leaves a folder being deleted, never half a previous definition
+        # that cleanup_stale would put back
+        doomed = os.path.join(os.path.dirname(self.old), f"{DEL_PREFIX}{self.name}-{secrets.token_hex(4)}")
+        os.rename(self.old, doomed)
+        _remove_tree(doomed)
 
     def rollback(self) -> None:
         if not os.path.lexists(self.old):
@@ -376,10 +380,49 @@ def newest_future(root: str, slack: float = 5.0) -> tuple[str, float] | None:
 _OLD_RE = re.compile(re.escape(OLD_PREFIX) + r"(" + names.NAME_RE.pattern + r")-[0-9a-f]{8}")
 
 
-def cleanup_stale(root: str) -> list[str]:
+def _update_unfinished(real_root: str, name: str, registry: Registry | None) -> bool:
+    """Whether an update of ``name`` stopped before it was committed: the registry still has its ``updating`` flag
+    (set before the swap, cleared when the update is recorded or undone) and the definition in place is of another
+    version than the registry's."""
+    try:
+        entry = registry.get(name) if isinstance(registry, Registry) else None
+    except RegistryError:
+        return False
+    if not entry or not isinstance(entry.get("updating"), dict):
+        return False
+    try:
+        marker = read_marker(os.path.join(real_root, names.folder_name(name)), name)
+    except NotManaged:
+        return True  # not the manager's definition in place: the previous one is
+    return marker.get("version") != entry.get("version")
+
+
+def _settle_updates(real_root: str, registry: Registry, done: list[str]) -> None:
+    """An ``updating`` flag left without a previous definition to put back: the update was committed, but the manager
+    stopped (or the registry could not be written) before the registry recorded it.  When the definition in place
+    is the one the flag names (its version and commit, from the registry itself), the registry records it now;
+    when it is the registry's own version, the flag goes."""
+    for name, entry in registry.all().items():
+        target = entry.get("updating")
+        if not isinstance(target, dict) or any(e.startswith(f"{OLD_PREFIX}{name}-") for e in os.listdir(real_root)):
+            continue
+        try:
+            marker = read_marker(os.path.join(real_root, names.folder_name(name)), name)
+        except NotManaged:
+            continue
+        fields = target.get("fields") if isinstance(target.get("fields"), dict) else {}
+        if (marker.get("version"), marker.get("sha")) == (fields.get("version"), fields.get("sha")) and fields:
+            registry.update(name, updating=None, **fields)
+            done.append(f"{name}: its update to {fields.get('version')} had finished; the registry records it now")
+        elif marker.get("version") == entry.get("version"):
+            registry.update(name, updating=None)
+
+
+def cleanup_stale(root: str, registry: Registry | None = None) -> list[str]:
     """Tidy what a crash left behind, touching only the manager's own hidden names: a folder being built or deleted
-    goes; a previous definition goes too, unless the update stopped between its two renames and it is the only
-    definition left, which is then put back."""
+    goes; a previous definition goes too, unless it is the only definition left, or the update that set it aside
+    stopped before it was committed (the registry's ``updating`` flag, _update_unfinished): it is then put back.
+    Never raises for one entry: what cannot be tidied is reported and the manager starts anyway."""
     done = []
     try:
         real_root = _root(root)
@@ -393,11 +436,25 @@ def cleanup_stale(root: str) -> list[str]:
         if not os.path.isdir(path) or os.path.islink(path):
             continue
         m = _OLD_RE.fullmatch(entry)
-        final = os.path.join(real_root, names.folder_name(m.group(1))) if m else None
-        if final and not os.path.lexists(final):
-            os.rename(path, final)
-            done.append(f"restored {entry}")
-        else:
-            shutil.rmtree(path, ignore_errors=True)
-            done.append(f"removed {entry}")
+        name = m.group(1) if m else None
+        final = os.path.join(real_root, names.folder_name(name)) if name else None
+        try:
+            if final and not os.path.lexists(final):
+                os.rename(path, final)
+                done.append(f"restored {entry}")
+            elif final and _update_unfinished(real_root, name, registry):
+                _remove_tree(final)
+                os.rename(path, final)
+                registry.update(name, updating=None)
+                done.append(f"restored {entry}: the update of {name} stopped before it was committed")
+            else:
+                shutil.rmtree(path, ignore_errors=True)
+                done.append(f"removed {entry}")
+        except (OSError, RegistryError) as err:
+            done.append(f"could not tidy {entry}: {err}")
+    if isinstance(registry, Registry):
+        try:
+            _settle_updates(real_root, registry, done)
+        except (OSError, RegistryError) as err:
+            done.append(f"could not settle the registry's unfinished updates: {err}")
     return done

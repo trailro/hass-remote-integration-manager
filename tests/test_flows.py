@@ -12,6 +12,7 @@ from unittest import mock
 import yaml
 
 from hrimgr import VERSION, children, stamp
+from hrimgr.registry import RegistryError
 
 from .env import Env
 from .fakes.tarballs import sha_of
@@ -253,6 +254,55 @@ class FlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.config("garage")["version"], "0.25.0")
         self.assertEqual(self.marker("garage")["version"], "0.25.0")
         self.assertEqual(sorted(os.listdir(env.local_apps)), ["hri_garage"])
+
+    async def test_an_update_killed_midway_is_put_back_at_the_next_start(self):
+        """A hard kill (OOM, power, the Supervisor's SIGKILL): no rollback runs; the next start puts X back."""
+        env = self.env
+        await self.create()
+        env.stub.delay = 0.3
+        with mock.patch.object(type(env.manager), "_rollback_update", new=mock.AsyncMock()):  # killed: nothing runs
+            status, body = await env.send("POST", "/api/instances/garage/update", {"version": "0.25.1"})
+            await self._cancel_when(body["job"]["id"], "updating")
+        self.assertEqual(self.config("garage")["version"], "0.25.1")  # as the kill left it
+        self.assertEqual(len(os.listdir(env.local_apps)), 2)
+        self.assertIsInstance(env.registry.get("garage")["updating"], dict)
+        done = children.cleanup_stale(env.local_apps, env.registry)  # what the next start runs first
+        self.assertIn("stopped before it was committed", done[0])
+        self.assertEqual(sorted(os.listdir(env.local_apps)), ["hri_garage"])
+        self.assertEqual(self.config("garage")["version"], "0.25.0")
+        self.assertEqual(self.marker("garage")["version"], "0.25.0")
+        entry = env.registry.get("garage")
+        self.assertEqual((entry["version"], entry["updating"]), ("0.25.0", None))
+
+    async def test_a_registry_error_after_the_update_is_a_warning(self):
+        env = self.env
+        await self.create()
+        update = env.registry.update
+
+        def full_disk(name, **fields):
+            if "stamp_version" in fields:
+                raise RegistryError("the manager's registry cannot be written: No space left on device")
+            return update(name, **fields)
+
+        with mock.patch.object(env.registry, "update", side_effect=full_disk):
+            job = await env.job(await env.send("POST", "/api/instances/garage/update", {"version": "0.25.1"}))
+        self.assertEqual(job["state"], "succeeded", job)
+        self.assertIn("updated to 0.25.1, but the manager's records were not updated", job["result"]["warning"])
+        self.assertEqual(env.stub.installed["local_hri_garage"]["version"], "0.25.1")
+        self.assertEqual(sorted(os.listdir(env.local_apps)), ["hri_garage"])
+        self.assertEqual(env.registry.get("garage")["version"], "0.25.0")
+        children.cleanup_stale(env.local_apps, env.registry)  # the next start catches up
+        entry = env.registry.get("garage")
+        self.assertEqual((entry["version"], entry["updating"]), ("0.25.1", None))
+
+    async def test_a_failed_update_clears_its_flag(self):
+        env = self.env
+        await self.create()
+        env.stub.fail[("POST", "/store/addons/local_hri_garage/update")] = "pull failed"
+        job = await env.job(await env.send("POST", "/api/instances/garage/update", {"version": "0.25.1"}))
+        self.assertEqual(job["state"], "failed")
+        self.assertIsNone(env.registry.get("garage")["updating"])
+        self.assertEqual(children.cleanup_stale(env.local_apps, env.registry), [])
 
     async def test_finish_setup_and_install(self):
         env = self.env
