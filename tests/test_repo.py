@@ -94,6 +94,24 @@ class AppConfigTest(unittest.TestCase):
         self.assertRegex((APP_DIR / "Dockerfile").read_text(encoding="utf-8"), r"(?m)^FROM [\w./:-]+@sha256:[0-9a-f]{64}$")
 
 
+class DevSmokeTest(unittest.TestCase):
+    def test_an_interrupted_run_stops_after_its_cleanup(self):
+        """tools/dev_smoke.sh's own trap lines: INT runs the cleanup and ends the script, which does not go on."""
+        smoke = (ROOT / "tools" / "dev_smoke.sh").read_text(encoding="utf-8")
+        traps = [line for line in smoke.splitlines() if line.startswith("trap ")]
+        self.assertEqual(len(traps), 2, traps)
+        script = "cleanup() { echo cleaned; }\n" + "\n".join(traps) + "\nkill -INT $$\necho went on\n"
+        run = subprocess.run(["sh", "-c", script], capture_output=True, text=True, timeout=10)
+        self.assertEqual(run.returncode, 130, run)
+        self.assertNotIn("went on", run.stdout)
+        self.assertIn("cleaned", run.stdout)
+
+    def test_the_playwright_image_and_package_are_pinned_together(self):
+        smoke = (ROOT / "tools" / "dev_smoke.sh").read_text(encoding="utf-8")
+        self.assertRegex(smoke, r"PLAYWRIGHT_IMAGE:-mcr\.microsoft\.com/playwright/python@sha256:[0-9a-f]{64}\}")
+        self.assertRegex(smoke, r"PLAYWRIGHT_PIP:-1\.46\.0\}")
+
+
 class RelativeUrlTest(unittest.TestCase):
     """Ingress serves the page under /api/hassio_ingress/<token>/: a URL starting with / leaves the app.  The one
     exception is panelHref() in mgr.js, which links Home Assistant's own pages (an instance's panel)."""
