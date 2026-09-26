@@ -111,11 +111,12 @@ def check_registry(marker: dict, registry: Registry, name: str) -> dict:
     return entry
 
 
-def open_regular(path: str, dir_fd: int | None = None) -> int:
+def open_regular(path: str, dir_fd: int | None = None, follow: bool = False) -> int:
     """A descriptor of the regular file ``path`` (relative to ``dir_fd``), for reading: opened without following a
-    link and without blocking (a FIFO put in its place would block an open forever), then checked with fstat.
-    UnsafePath for anything but a regular file; OSError as os.open raises it."""
-    fd = os.open(path, os.O_RDONLY | _NOFOLLOW | _CLOEXEC | os.O_NONBLOCK, dir_fd=dir_fd)
+    link (unless ``follow``: what a link points at, as the Supervisor reads a file) and without blocking (a FIFO put
+    in its place would block an open forever), then checked with fstat.  UnsafePath for anything but a regular file;
+    OSError as os.open raises it."""
+    fd = os.open(path, os.O_RDONLY | (0 if follow else _NOFOLLOW) | _CLOEXEC | os.O_NONBLOCK, dir_fd=dir_fd)
     try:
         if not stat.S_ISREG(os.fstat(fd).st_mode):
             raise UnsafePath(f"{os.path.basename(path)!r} is not a regular file")

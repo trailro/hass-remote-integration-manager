@@ -132,12 +132,17 @@ class Manager:
         installed = {a.get("slug"): a for a in apps if isinstance(a.get("slug"), str)}
         latest = latest_stable(self.gh.cached_releases())
         folders = await asyncio.to_thread(children.scan, self.root, self.registry)
+        found = await self._decoys()
         try:
             registered = await asyncio.to_thread(self.registry.all)
         except RegistryError as err:
             _LOGGER.error("%s", err)
             registered = {}
         out, others, seen, repairable = [], [], set(), []
+        for decoy in found:
+            # the slug the Supervisor gives it: local_ (its local repository) and the one it declares
+            others.append({"slug": f"local_{decoy.slug}" if decoy.slug else "", "name": decoy.path, "kind": "decoy",
+                           "installed": False, "state": None, "problem": decoy.problem})
         for name, marker, problem in folders:
             slug = names.supervisor_slug(name)
             seen.add(slug)
@@ -154,6 +159,11 @@ class Manager:
                 entry["problem"] = "; ".join(p for p in (entry.get("problem"), foreign) if p)
                 entry["actions"] = ["repair"] + (["stop"] if entry["state"] == "started" else []) + ["delete"]
                 entry["foreign"] = True
+            decoyed = self._decoys_of(found, slug)
+            if decoyed and not entry.get("job"):
+                # nothing that makes the Supervisor install or start it while the store may take the decoy
+                entry["problem"] = "; ".join(p for p in (entry.get("problem"), self._decoy_text(decoyed)) if p)
+                entry["actions"] = [a for a in entry["actions"] if a in ("stop", "delete")]
             out.append(entry)
         for slug, app in sorted(installed.items()):
             name = names.name_from_slug(slug)
@@ -375,6 +385,11 @@ class Manager:
             raise JobFailed(str(err)) from None
         if missing:
             raise await self._hold(job, managed, missing)
+        decoyed = self._decoys_of(await self._decoys(), managed.slug)
+        if decoyed:
+            raise await self._hold(job, managed, reason=(
+                f"{self._decoy_text(decoyed)}; the Supervisor may have installed {managed.slug} from it, so the "
+                "manager could not check it"))
         await asyncio.to_thread(self.registry.update, managed.name, tampered=None)
         return {"checked": managed.slug}
 
@@ -619,7 +634,12 @@ class Manager:
                 "definition again, Delete removes the instance")
 
     async def _refuse_foreign(self, managed: children.Managed) -> None:
-        """InvalidRequest while the store offers a definition of the instance the manager did not write."""
+        """InvalidRequest while the store offers a definition of the instance the manager did not write, or the local
+        apps folder holds a decoy of it (stamp.decoys) that the store may take instead."""
+        found = self._decoys_of(await self._decoys(), managed.slug)
+        if found:
+            raise InvalidRequest(f"{managed.name}: {self._decoy_text(found)}. Nothing is installed, updated or started "
+                                 "while it is there")
         try:
             offered = (await self.sv.store_app(managed.slug) or {}).get("version_latest")
         except (SupervisorError, NotAllowed) as err:
@@ -735,22 +755,68 @@ class Manager:
 
     # ------------------------------------------------------------------ job bodies
 
-    async def _check_tree(self, slug: str, manifest: dict | None) -> None:
-        """JobFailed when the definition folder is no longer what the manager wrote (``manifest``, None: not checked)."""
+    async def _check_tree(self, slug: str, manifest: dict | None, installed: bool = False) -> None:
+        """JobFailed when the definition folder is no longer what the manager wrote (``manifest``, None: not checked);
+        Tampered when that is found right after an install or update (``installed``): the Supervisor may have
+        installed the changed definition."""
         if manifest is None:
             return
         try:
             await asyncio.to_thread(children.check_tree, self.root, names.name_from_slug(slug), manifest)
         except children.DefinitionChanged as err:
+            if installed:
+                raise Tampered(f"{err}, around the install or update: the Supervisor may have installed the changed "
+                               "definition") from None
             message = (f"{err}: refused, nothing installed or updated. Anyone who can write the local apps folder (the "
                        "addons share, SSH, another app that maps it) can change a definition; find out who did")
             _LOGGER.error("%s", message)
             raise JobFailed(message) from None
 
+    async def _decoys(self) -> list[stamp.Decoy]:
+        """stamp.decoys of the local apps folder, read off the event loop; a folder that cannot be searched is a decoy
+        of every instance (slug None), whose problem says why."""
+        try:
+            return await asyncio.to_thread(stamp.decoys, self.root)
+        except stamp.ScanError as err:
+            return [stamp.Decoy(".", None, str(err))]
+
+    @staticmethod
+    def _decoys_of(found: list[stamp.Decoy], slug: str) -> list[stamp.Decoy]:
+        """The decoys that may be taken for the definition of the instance ``slug`` (local_hri_<name>): those declaring
+        its slug (compared as stamp.in_manager_space does), and those the manager could not read."""
+        key = names.host_key(names.config_slug(slug[len(names.SLUG_PREFIX):]))
+        return [d for d in found if d.slug is None or names.host_key(d.slug) == key]
+
+    @staticmethod
+    def _decoy_text(found: list[stamp.Decoy]) -> str:
+        return "; ".join(d.problem for d in found[:3]) + (f"; and {len(found) - 3} more" if len(found) > 3 else "")
+
+    async def _refuse_decoys(self, installed: bool = False) -> None:
+        """While the local apps folder holds a decoy of any instance (stamp.decoys: a store reload makes the Supervisor
+        read it, and an install or update may take it): JobFailed, or Tampered when found right after an install or
+        update (``installed``): the Supervisor may have installed it."""
+        found = await self._decoys()
+        if not found:
+            return
+        if installed:
+            raise Tampered(f"after the install or update, {self._decoy_text(found)}")
+        message = f"{self._decoy_text(found)}: refused, nothing installed or updated"
+        _LOGGER.error("%s", message)
+        raise JobFailed(message)
+
+    async def _check_installed_source(self, managed: children.Managed, manifest: dict | None) -> None:
+        """Right after an install or update, before the installed app is compared with the definition: the folder is
+        still what the manager wrote, and no decoy has appeared; either may be what the Supervisor installed (a store
+        reload by anyone, the Supervisor's own every 3 hours among them, can come between the last check and the
+        install).  Tampered otherwise."""
+        await self._check_tree(managed.slug, manifest, installed=True)
+        await self._refuse_decoys(installed=True)
+
     async def _wait_store(self, job: Job, slug: str, version: str, manifest: dict | None = None) -> None:
         """Reload the store until it has ``slug`` at ``version``.  ``manifest``: what the manager wrote, checked
-        again right before each reload (the store reads the folder then)."""
+        again right before each reload (the store reads the folder then), and that no other folder holds a decoy."""
         await self._check_tree(slug, manifest)
+        await self._refuse_decoys()
         job.log("reloading the Supervisor's store")
         await self.sv.reload_store()
         # by the clock: a store answer can take up to its own timeout, which counting sleeps would not see
@@ -773,6 +839,7 @@ class Manager:
                 raise JobFailed(message)
             if not reloaded_again and waited >= self.store_timeout / 2:
                 await self._check_tree(slug, manifest)
+                await self._refuse_decoys()
                 await self.sv.reload_store()
                 reloaded_again = True
             await asyncio.sleep(self.poll_interval)
@@ -941,6 +1008,7 @@ class Manager:
             raise JobFailed(f"the app {clash} is installed, and its host name is the one {slug} would get: choose another name")
         if os.path.lexists(os.path.join(self.root, names.folder_name(name))):
             raise JobFailed(f"the local apps folder already has {names.folder_name(name)}")
+        await self._refuse_decoys()
         await self.sv.reload_store()
         if await self.sv.store_app(slug) is not None:
             raise JobFailed(f"the store already has an app {slug} (another local app uses the slug {names.config_slug(name)})")
@@ -976,6 +1044,7 @@ class Manager:
             installing = True
             await self.sv.install(managed)
             installing = False
+            await self._check_installed_source(managed, managed.manifest)
             missing = await self._verify_installed(job, managed, expected)
             if missing:
                 raise await self._hold(job, managed, missing)
@@ -1048,6 +1117,7 @@ class Manager:
             _LOGGER.error("%s", message)
             raise JobFailed(message)
         await self._check_tree(managed.slug, manifest)
+        await self._refuse_decoys()
         job.log("the store's definition is the one the manager wrote")
 
     async def _verify_installed(self, job: Job, managed: children.Managed, expected: dict) -> list[str]:
@@ -1065,11 +1135,14 @@ class Manager:
             job.log("the installed definition is the one the manager wrote")
         return missing
 
-    async def _hold(self, job: Job, managed: children.Managed, missing: list[str]) -> Unverified:
-        """An installed app the manager could not check: marked, stopped (through the marker gate), kept installed
-        with its options and data.  The error for the job."""
-        mark = {"reason": (f"the Supervisor does not report {', '.join(missing)} of the installed {managed.slug}, so "
-                           "the manager could not check it (a change of the Supervisor's API?)"),
+    async def _hold(self, job: Job, managed: children.Managed, missing: list[str] | None = None,
+                    reason: str | None = None) -> Unverified:
+        """An installed app the manager could not check (the fields the Supervisor did not report, ``missing``, or
+        ``reason``): marked, stopped (through the marker gate), kept installed with its options and data.  The error
+        for the job."""
+        mark = {"reason": reason or (f"the Supervisor does not report {', '.join(missing or [])} of the installed "
+                                     f"{managed.slug}, so the manager could not check it (a change of the Supervisor's "
+                                     "API?)"),
                 "at": children.now_iso(), "unverified": True, "uninstalled": False, "stopped": False, "failure": None}
         await self._set_mark(managed.name, mark)
         try:
@@ -1321,6 +1394,7 @@ class Manager:
                 job.log(f"updating {info.get('version')} -> {version}" + (" (building)" if channel == "git" else ""))
                 sent = True
                 await self.sv.update(managed)
+                await self._check_installed_source(managed, replacement.manifest)
                 missing = await self._verify_installed(job, managed, expected)
                 verified = not missing
             elif version != marker.get("version"):
@@ -1514,13 +1588,16 @@ class Manager:
                 await self._verify_store(job, managed, expected, manifest)
                 job.log("installing")
                 await self.sv.install(managed)
+                await self._check_installed_source(managed, manifest)
                 missing = await self._verify_installed(job, managed, expected)
                 if missing:
                     raise await self._hold(job, managed, missing)
             elif not installed:
                 raise JobFailed(f"{managed.slug} is not installed: Install it")
             else:
-                # installed by a create the manager did not finish: taken over only once checked against its folder
+                # installed by a create the manager did not finish: taken over only once checked against its folder,
+                # and never started while a decoy the store may take is there
+                await self._refuse_decoys()
                 recorded = managed.entry.get("bluetooth") is True
                 if await self._installed_bluetooth(managed.slug, recorded) != recorded:
                     managed = await self._follow_bluetooth(job, managed, not recorded)
@@ -1806,6 +1883,7 @@ class Manager:
             await self._verify_store(job, managed, expected, managed.manifest)
             job.log(f"updating {installed} -> {version}" + (" (building)" if channel == "git" else ""))
             await self.sv.update(managed)
+            await self._check_installed_source(managed, managed.manifest)
             missing = await self._verify_installed(job, managed, expected)
             after = await self.sv.app_info(slug)
             if after.get("version") != version:
