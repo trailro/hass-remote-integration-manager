@@ -30,6 +30,9 @@ homeassistant_api: true
 map:
   - type: local_apps
     read_only: false
+# seconds between the Supervisor's SIGTERM and its SIGKILL (its default is 10): the manager cancels its jobs first,
+# whose rollbacks take up to 8 s (hrimgr/instances.py ROLLBACK_BOUND), then waits up to 5 s for open requests
+timeout: 30
 # the UI is the sidebar panel only: no port is published, and the app serves only requests the Supervisor proxies
 ingress: true
 panel_icon: mdi:server-network

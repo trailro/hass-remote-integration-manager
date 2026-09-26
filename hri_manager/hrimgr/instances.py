@@ -34,7 +34,8 @@ from .supervisor import NotAllowed, SupervisorClient, SupervisorError
 
 _LOGGER = logging.getLogger(__name__)
 HISTORY = 20
-# the Supervisor stops an app 10 s after SIGTERM by default: a rollback when the manager stops gets less than that
+# the Supervisor kills the manager 30 s after SIGTERM (config.yaml timeout), and the manager cancels its jobs before it
+# waits for open requests (__main__.py): a rollback when the manager stops gets well within that
 ROLLBACK_BOUND = 8.0
 AUTO_REPAIR_INTERVAL = 300.0
 AUTO_REPAIR_MAX_DELAY = 86400.0  # an instance's automatic repair that keeps failing is tried at least once a day
