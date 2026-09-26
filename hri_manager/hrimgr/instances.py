@@ -48,6 +48,10 @@ AUTO_USER = "automatic repair"
 # an install the manager stopped waiting for, the Supervisor may finish later (it installs as a task of its own): its
 # registry entry is not forgotten before the install call's own timeout has passed
 INTERRUPTED_GRACE = 3600.0
+# the background loop (run_background) started again after an error it did not expect: after this many seconds,
+# doubling each time up to LOOP_RESTART_MAX
+LOOP_RESTART_MIN = 5.0
+LOOP_RESTART_MAX = 600.0
 # a git definition is HRI's whole source tree in the local apps folder, which others can write, and a build runs its
 # Dockerfile: it is installed only right after the manager downloaded and wrote it, never from what the folder holds
 GIT_NOT_INSTALLED = ("{name} is a git build whose definition is not installed: the manager builds a git instance only "
@@ -108,6 +112,8 @@ class Manager:
         # name -> mark the registry could not record (a full /data): refused all the same while the manager runs, and
         # kept in the instance's marker for its next start (_contain)
         self._unrecorded_marks: dict[str, dict] = {}
+        # what stopped the background loop last, while it waits to start again (run_background): shown by status()
+        self.loop_problem: dict | None = None
 
     # ------------------------------------------------------------------ reading
 
@@ -132,6 +138,10 @@ class Manager:
             out["problems"].append(f"{self.root} is not a writable folder: the app needs the local_apps map")
         if out.get("role_ok") is False and "role" in out:
             out["problems"].append(f"the app's role is {out['role']!r}, not 'manager'")
+        if self.loop_problem:
+            out["problems"].append(f"the automatic check and repair stopped at {self.loop_problem['at']} "
+                                   f"({self.loop_problem['error']}); it starts again in {self.loop_problem['delay']} s: "
+                                   "the manager's log has the details")
         return out
 
     async def releases(self, refresh: bool = False) -> dict:
@@ -359,6 +369,10 @@ class Manager:
             except (copies.CopyError, children.UnsafePath, OSError, RegistryError) as err:
                 _LOGGER.warning("the copy of %s's definition was not saved: %s", name, err)
                 continue
+            except Exception as err:  # noqa: BLE001 - one folder, whatever it holds, never stops the others
+                _LOGGER.warning("the copy of %s's definition was not saved (%s): %s", name, type(err).__name__,
+                                str(err)[:300], exc_info=True)
+                continue
             done.append(name)
         return done
 
@@ -470,9 +484,28 @@ class Manager:
             _LOGGER.info("instance %s: a copy of its definition is kept in /data now", name)
         while True:
             await self.auto_repair_check()
+            self.loop_problem = None
             if self.auto_repair_interval is None:
                 return
             await asyncio.sleep(self.auto_repair_interval)
+
+    async def run_background(self) -> None:
+        """auto_repair_loop, supervised (__main__ runs this as a task of its own, which nothing awaits): an error it
+        does not expect is logged with its traceback and shown by the status, and the loop starts again after
+        LOOP_RESTART_MIN seconds, doubling up to LOOP_RESTART_MAX, instead of ending unseen for the rest of the
+        manager's life.  Cancelled when the manager stops."""
+        delay = LOOP_RESTART_MIN
+        while True:
+            try:
+                await self.auto_repair_loop()
+                return
+            except Exception as err:  # noqa: BLE001 - logged, shown, and the loop starts again
+                self.loop_problem = {"error": f"{type(err).__name__}: {str(err)[:200]}", "at": children.now_iso(),
+                                     "delay": round(delay)}
+                _LOGGER.error("the automatic check and repair stopped (%s); it starts again in %d s", type(err).__name__,
+                              delay, exc_info=True)
+            await asyncio.sleep(delay)
+            delay = min(delay * 2, LOOP_RESTART_MAX)
 
     async def _info(self, slug: str) -> dict | None:
         try:
@@ -1028,9 +1061,11 @@ class Manager:
         offline Repair: the job goes on.  ``bluetooth``: the instance's choice, as the registry records it."""
         try:
             saved = await asyncio.to_thread(copies.save, self.copies_root, managed.name, files, managed.marker, bluetooth)
-        except (copies.CopyError, children.UnsafePath, names.InvalidName, OSError) as err:
-            job.log(f"no copy of the definition kept in the manager's /data ({err}): a Repair would download it")
-            _LOGGER.warning("the copy of %s's definition was not saved: %s", managed.name, err)
+        except Exception as err:  # noqa: BLE001 - a copy that fails, however, costs only the offline Repair
+            job.log(f"no copy of the definition kept in the manager's /data ({type(err).__name__}: {str(err)[:300]}): "
+                    "a Repair would download it")
+            _LOGGER.warning("the copy of %s's definition was not saved: %s", managed.name, err,
+                            exc_info=not isinstance(err, (copies.CopyError, children.UnsafePath, OSError)))
             return
         job.log(f"a copy of the definition is kept in the manager's /data ({len(saved)} file(s))")
 
@@ -1731,8 +1766,8 @@ class Manager:
                 raise copies.CopyError("its config.yaml changed while it was read")
             config = copies.check(yaml.safe_load(raw.decode("utf-8")), managed.name, str(managed.marker.get("version")),
                                   managed.entry.get("channel"), managed.entry.get("bluetooth") is True)
-        except (copies.CopyError, OSError, UnicodeDecodeError, yaml.YAMLError) as err:
-            raise JobFailed(f"{names.folder_name(managed.name)} is not a definition this manager writes ({err}): not "
+        except (copies.CopyError, OSError, UnicodeDecodeError, yaml.YAMLError, RecursionError) as err:
+            raise JobFailed(f"{names.folder_name(managed.name)} is not a definition this manager writes ({str(err)[:300]}): not "
                             "installed; Delete removes it") from None
         return stamp.expected_view(config, managed.slug), manifest
 
@@ -1778,7 +1813,7 @@ class Manager:
             files = await asyncio.to_thread(rewrite)
             managed = await asyncio.to_thread(children.load_managed, self.root, managed.name, self.registry)
         except (copies.CopyError, children.UnsafePath, children.NotManaged, stamp.TemplateError, RegistryError, OSError,
-                UnicodeDecodeError, yaml.YAMLError) as err:
+                UnicodeDecodeError, yaml.YAMLError, RecursionError) as err:
             raise JobFailed(f"{names.folder_name(managed.name)} could not follow the installed app's Bluetooth: {err}") from None
         await self._save_copy(job, managed, bluetooth, files)
         return managed

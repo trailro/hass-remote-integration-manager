@@ -75,7 +75,7 @@ def main() -> int:
                 log.warning("instance %s: its create stopped before its setup finished; the page offers Finish setup", name)
             # instances left detached by a restore get their definitions written again, by a loop of its own (the
             # page is served meanwhile, and nobody needs to open it)
-            background.append(asyncio.get_running_loop().create_task(manager.auto_repair_loop()))
+            background.append(asyncio.get_running_loop().create_task(manager.run_background()))
 
         app.on_startup.append(report)
         app.on_shutdown.append(stop_jobs)
