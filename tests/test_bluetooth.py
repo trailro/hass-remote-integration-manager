@@ -286,6 +286,25 @@ class BluetoothFlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsInstance(env.registry.get("garage")["needs_attention"], dict)
         self.assertFalse(os.path.exists(os.path.join(env.local_apps, "hri_garage")))
 
+    async def test_a_follow_that_fails_says_bluetooth(self):
+        """Finish setup follows the app's Bluetooth in place; when that write fails, and putting it back fails too,
+        the job and the log name Bluetooth as they did before Host network was added."""
+        env = self.env
+        await self.lagging_record()
+        self.manager_made_it()
+        env.registry.update("garage", setup_complete=False)
+
+        def full_disk(folder, rel, data):
+            raise OSError("No space left on device")
+
+        with mock.patch.object(children, "replace_file", side_effect=full_disk), \
+                self.assertLogs("hrimgr.instances", "ERROR") as logs:
+            job = await env.job(await env.send("POST", "/api/instances/garage/finish"))
+        self.assertEqual(job["state"], "failed", job)
+        self.assertEqual(job["error"], "hri_garage could not follow the installed app's Bluetooth: No space left on device")
+        self.assertIn("garage: its definition and its record of Bluetooth may disagree now: No space left on device",
+                      logs.output[0])
+
     async def test_repair_follows_a_change_the_manager_made(self):
         """An update the manager made turned Bluetooth on and was recorded late (its flag names it): that is the
         admin's choice, and Repair records it."""
