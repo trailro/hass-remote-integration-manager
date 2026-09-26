@@ -14,8 +14,9 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  # the Supervisor the app was last reviewed on: its own schema checks the app and a stamped instance
-  SUPERVISOR_REF: "2026.09.3"
+  # the Supervisor the app was last reviewed on, 2026.09.3, by the commit of that tag (a tag can be moved): its own
+  # schema checks the app and a stamped instance
+  SUPERVISOR_SHA: "64ea3be4322537fd5dcfbf620c4dc25490c1f56d"
 
 jobs:
   tests:
@@ -70,14 +71,14 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           repository: home-assistant/supervisor
-          ref: ${{ env.SUPERVISOR_REF }}
+          ref: ${{ env.SUPERVISOR_SHA }}
           path: .supervisor   # a dot folder: the discovery check skips it, as the Supervisor does
           persist-credentials: false
       - name: The Supervisor's own validation of the manager and of a stamped instance
         # its requirements only: "pip install supervisor" would install supervisord
         run: |
           rm -rf _stamped
-          python -m pip install --quiet -r .supervisor/requirements.txt pyyaml
+          python -m pip install --quiet -r .supervisor/requirements.txt PyYAML==6.0.3
           python .github/app_supervisor_check.py .supervisor
 
   published-image:
