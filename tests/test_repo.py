@@ -138,6 +138,18 @@ class AppConfigTest(unittest.TestCase):
         self.assertRegex((APP_DIR / "Dockerfile").read_text(encoding="utf-8"), r"(?m)^FROM [\w./:-]+@sha256:[0-9a-f]{64}$")
 
 
+class ScanLimitsDocTest(unittest.TestCase):
+    def test_the_docs_state_the_search_limits(self):
+        """F6: the limits of the search for decoys, as the code has them, in the README and DOCS.md."""
+        limits = (f"{stamp.MAX_APP_CONFIG // (1024 * 1024)} MiB", f"{stamp.MAX_SCAN_DEPTH} folders deep",
+                  f"{stamp.MAX_SCAN_ENTRIES:,} entries")
+        for doc in (ROOT / "README.md", APP_DIR / "DOCS.md"):
+            text = " ".join(doc.read_text(encoding="utf-8").split())
+            for limit in limits:
+                with self.subTest(doc=doc.name, limit=limit):
+                    self.assertIn(limit, text)
+
+
 class DevSmokeTest(unittest.TestCase):
     def test_an_interrupted_run_stops_after_its_cleanup(self):
         """tools/dev_smoke.sh's own trap lines: INT runs the cleanup and ends the script, which does not go on."""
