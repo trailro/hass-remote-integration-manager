@@ -20,7 +20,6 @@ import os
 import re
 import secrets
 import shutil
-import stat
 from dataclasses import dataclass, field
 
 import yaml
@@ -73,10 +72,13 @@ def folder(root: str, name: str) -> str:
 
 
 def read_file(path: str, cap: int = MAX_FILE) -> bytes:
-    fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    try:
+        fd = children.open_regular(path)
+    except children.UnsafePath:
+        raise CopyError(f"{os.path.basename(path)} is not a small regular file") from None
     try:
         st = os.fstat(fd)
-        if not stat.S_ISREG(st.st_mode) or st.st_size > cap:
+        if st.st_size > cap:
             raise CopyError(f"{os.path.basename(path)} is not a small regular file")
         with os.fdopen(fd, "rb", closefd=False) as fh:
             return fh.read(cap + 1)

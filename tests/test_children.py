@@ -3,10 +3,11 @@
 import json
 import os
 import stat
+import threading
 import unittest
 from unittest import mock
 
-from hrimgr import children
+from hrimgr import children, copies
 
 from hrimgr.registry import Registry
 
@@ -60,6 +61,43 @@ class MarkerTest(unittest.TestCase):
         self.assertEqual(oct(os.stat(reg.path).st_mode & 0o777), "0o600")
         reg.remove("garage")
         self.assertIsNone(reg.get("garage"))
+
+    def test_a_fifo_is_refused_at_once(self):
+        """A FIFO where a marker or a file is expected would block an open forever: refused without waiting."""
+        folder = make_child(self.root, "garage", False)
+        os.mkfifo(os.path.join(folder, children.MARKER))
+        os.mkfifo(os.path.join(folder, "fifo"))
+        calls = {
+            "the marker": lambda: children.read_marker(folder, "garage"),
+            "load_managed": lambda: children.load_managed(self.root, "garage", self.reg),
+            "read_file": lambda: children.read_file(folder, "fifo"),
+            "open_regular": lambda: os.close(children.open_regular(os.path.join(folder, "fifo"))),
+            "copies.read_file": lambda: copies.read_file(os.path.join(folder, "fifo")),
+        }
+        for what, call in calls.items():
+            outcome = []
+            thread = threading.Thread(target=lambda: outcome.append(self._raised(call)), daemon=True)
+            thread.start()
+            thread.join(2)
+            if thread.is_alive():  # the old code: unblock the open, then fail
+                for fifo in (children.MARKER, "fifo"):
+                    try:
+                        os.close(os.open(os.path.join(folder, fifo), os.O_WRONLY | os.O_NONBLOCK))
+                    except OSError:
+                        pass
+                thread.join(2)
+            with self.subTest(what=what):
+                self.assertEqual(len(outcome), 1, f"{what} blocked")
+                self.assertIn(outcome[0], (children.NotManaged, children.UnsafePath, copies.CopyError))
+        self.assertEqual(children.digest_tree(folder)["fifo"].split()[0], "other")
+
+    @staticmethod
+    def _raised(call):
+        try:
+            call()
+        except Exception as err:  # noqa: BLE001
+            return type(err)
+        return None
 
     def test_the_registry_s_rename_is_made_durable(self):
         """fsync of the file, then of its folder after the rename: the rename survives a power loss."""
