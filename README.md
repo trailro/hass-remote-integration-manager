@@ -409,7 +409,9 @@ narrows itself, in code, and the tests pin it:
   check fails closed. `allowed_users` narrows the administrators further, keyed on the verified id: an entry
   matches the id, or the login name Core reports for that id, never the display name (any administrator can change
   it); a list whose entries are all blank refuses everyone. The `X-Remote-User-Name` header is shown and logged,
-  never trusted. State-changing requests need `X-Requested-With: fetch` and a
+  never trusted. `allowed_users` is **not a security boundary between administrators**: any Home Assistant
+  administrator can edit the manager's options and change other users' login names, so it narrows which
+  administrators use the panel, and nothing more. State-changing requests need `X-Requested-With: fetch` and a
   JSON body; the page's policy allows only its own scripts and styles and framing by Home Assistant. Like every
   ingress app, the panel shares Home Assistant's origin with other apps' panels.
 
