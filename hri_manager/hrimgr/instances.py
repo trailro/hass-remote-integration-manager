@@ -103,7 +103,7 @@ HOST_NETWORK_RELEASE_CODE = ("the release {version} does not have the host netwo
                              "release that has it")
 HOST_NETWORK_GIT = ("Host network needs an HRI that listens on the port the Supervisor gives it (its entrypoint.py "
                     "says APP_DYNAMIC_PORT = True, from 0.26.0 on), and commit {sha} of the {kind} {ref} does not: "
-                    "Rebuild with Host network off, or from a branch or tag that has it")
+                    "choose Host network off, or a branch or tag that has it")
 # a definition follows the installed app in place (_follow_access) only where stamping can write it from the stamped
 # one: turning Host network off needs HRI's own ingress_port back, which only its template has
 FOLLOW_HOST_NETWORK_OFF = ("the installed {slug} does not have the host's network (Host network), the manager's record "

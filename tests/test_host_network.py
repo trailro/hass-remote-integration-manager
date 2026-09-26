@@ -526,7 +526,7 @@ class HostNetworkFlowTest(unittest.IsolatedAsyncioTestCase):
         job = await self.update("lab", ref_kind="branch", ref="old")
         self.assertEqual(job["state"], "failed")
         self.assertIn("of the branch old does not", job["error"])
-        self.assertIn("Rebuild with Host network off", job["error"])
+        self.assertIn("choose Host network off, or a branch or tag that has it", job["error"])
         self.assertEqual(self.config("lab"), before)
         self.assertEqual(env.registry.get("lab")["ref"], "main")
         job = await self.update("lab", ref_kind="branch", ref="old", host_network=False)
