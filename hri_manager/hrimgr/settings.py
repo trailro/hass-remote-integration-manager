@@ -1,0 +1,119 @@
+"""The manager's settings: the app's options (/data/options.json) and the Supervisor's environment.
+
+Development mode exists only to run the manager outside Home Assistant against a fake Supervisor.  It is turned on
+by environment variables named ``HRI_MANAGER_DEV_*``, which nothing in the app can set: the Supervisor sets an app's
+environment only from the ``environment`` key of its config.yaml, which hri_manager/config.yaml does not have (a
+test pins that), and no option becomes a variable.  Dev mode also refuses the real Supervisor URL, so it can never
+point a relaxed peer check at a real Supervisor."""
+
+from __future__ import annotations
+
+import ipaddress
+import json
+import logging
+import os
+from dataclasses import dataclass, field
+
+from . import github, supervisor
+
+_LOGGER = logging.getLogger(__name__)
+
+SUPERVISOR_PEER = "172.30.32.2"  # the Supervisor on the hassio network: the only client ingress requests come from
+DEV_PREFIX = "HRI_MANAGER_DEV_"
+DEV_VARS = ("PEERS", "SUPERVISOR_URL", "GITHUB_API", "CODELOAD", "LOCAL_APPS", "DATA", "PORT")
+INGRESS_PORT = 8099
+
+
+class SettingsError(Exception):
+    pass
+
+
+@dataclass
+class Settings:
+    supervisor_token: str
+    supervisor_url: str = supervisor.DEFAULT_URL
+    local_apps: str = "/local_apps"
+    data_dir: str = "/data"
+    port: int = INGRESS_PORT
+    peers: frozenset[str] = frozenset({SUPERVISOR_PEER})
+    allowed_users: frozenset[str] = frozenset()
+    github_token: str = ""
+    github_api: str = github.API_URL
+    codeload: str = github.CODELOAD_URL
+    debug: bool = False
+    dev: bool = False
+    secrets: tuple[str, ...] = field(default=(), repr=False)
+
+
+def _peer(value: str) -> str:
+    try:
+        return str(ipaddress.ip_address(value.strip()))
+    except ValueError:
+        raise SettingsError(f"{DEV_PREFIX}PEERS: {value!r} is not an IP address") from None
+
+
+def read_options(path: str) -> dict:
+    try:
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except FileNotFoundError:
+        return {}
+    except (OSError, ValueError) as err:
+        raise SettingsError(f"{path} cannot be read: {err}") from None
+    return data if isinstance(data, dict) else {}
+
+
+def from_environment(env: dict[str, str] | None = None) -> Settings:
+    env = dict(os.environ if env is None else env)
+    dev_given = {k[len(DEV_PREFIX):]: v for k, v in env.items() if k.startswith(DEV_PREFIX)}
+    unknown = sorted(set(dev_given) - set(DEV_VARS))
+    if unknown:
+        raise SettingsError(f"unknown development variables: {', '.join(DEV_PREFIX + u for u in unknown)}")
+    dev = bool(dev_given)
+    if dev:
+        url = dev_given.get("SUPERVISOR_URL", "").strip().rstrip("/")
+        if not dev_given.get("PEERS") or not url:
+            raise SettingsError(f"development mode needs both {DEV_PREFIX}PEERS and {DEV_PREFIX}SUPERVISOR_URL")
+        if url == supervisor.DEFAULT_URL or url.startswith(supervisor.DEFAULT_URL + ":") or url.startswith(supervisor.DEFAULT_URL + "/"):
+            raise SettingsError("development mode refuses the real Supervisor")
+    token = env.get("SUPERVISOR_TOKEN") or env.get("HASSIO_TOKEN") or ""
+    if not token:
+        raise SettingsError("SUPERVISOR_TOKEN is not set: the manager runs as a Home Assistant app")
+    data_dir = dev_given.get("DATA", "/data") if dev else "/data"
+    options = read_options(os.path.join(data_dir, "options.json"))
+    users = options.get("allowed_users") or []
+    gh_token = str(options.get("github_token") or "")
+    settings = Settings(
+        supervisor_token=token,
+        data_dir=data_dir,
+        allowed_users=frozenset(str(u).strip().casefold() for u in users if isinstance(u, str) and u.strip()),
+        github_token=gh_token,
+        debug=bool(options.get("debug")),
+        secrets=tuple(s for s in (token, gh_token) if s),
+    )
+    if dev:
+        settings.dev = True
+        settings.supervisor_url = dev_given["SUPERVISOR_URL"].strip().rstrip("/")
+        settings.peers = frozenset(_peer(p) for p in dev_given["PEERS"].split(",") if p.strip())
+        settings.local_apps = dev_given.get("LOCAL_APPS", settings.local_apps)
+        settings.github_api = dev_given.get("GITHUB_API", settings.github_api)
+        settings.codeload = dev_given.get("CODELOAD", settings.codeload)
+        settings.port = int(dev_given.get("PORT", settings.port))
+    return settings
+
+
+class Redact(logging.Filter):
+    """Keeps the tokens out of every log line, whatever the formatting."""
+
+    def __init__(self, secrets: tuple[str, ...]):
+        super().__init__()
+        self._secrets = tuple(s for s in secrets if len(s) >= 6)
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if self._secrets:
+            message = record.getMessage()
+            if any(s in message for s in self._secrets):
+                for s in self._secrets:
+                    message = message.replace(s, "***")
+                record.msg, record.args = message, None
+        return True

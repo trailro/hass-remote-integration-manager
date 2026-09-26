@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>HRI Manager</title>
+<link rel="stylesheet" href="static/mgr.css?v=__V__">
+</head><body>
+<nav class="topbar"><div class="tb-nav"><a class="brand" href="./">HRI<b> Manager</b></a><span class="ver" id="ver">…</span></div><span id="tb-chips"></span></nav>
+<main>
+<h1>Instances</h1>
+<p class="mut lead">Each instance is its own <a href="https://github.com/trailro/hass-remote-integration" target="_blank" rel="noopener">hass-remote-integration</a> app running one integration, with its own sidebar panel, options, data and backups.</p>
+<div id="flash" class="flash" role="status"></div>
+<div id="problems" class="card bad-card" hidden></div>
+
+<div class="card"><h2>Managed instances</h2>
+ <div class="wrap"><table id="inst" class="stack"><thead><tr><th>instance</th><th>state</th><th>HRI</th><th>channel</th><th class="act"></th></tr></thead><tbody></tbody></table></div>
+ <p id="empty" class="mut" hidden>No instance yet: create one below.</p>
+</div>
+
+<div class="card"><h2>New instance</h2>
+ <form id="create" class="form" autocomplete="off">
+  <label>Name <input id="c-name" name="name" required maxlength="20" pattern="[a-z][a-z0-9_]{0,19}" placeholder="garage" spellcheck="false"></label>
+  <label>Channel <select id="c-channel"><option value="release">Release</option><option value="git">Git ref (testing)</option></select></label>
+  <label id="c-version-row">HRI version <select id="c-version"><option value="">loading…</option></select></label>
+  <label id="c-ref-row" hidden>Git ref <input id="c-ref" maxlength="100" placeholder="main" spellcheck="false"></label>
+  <button id="c-go" class="primary" type="submit">Create</button>
+ </form>
+ <p class="mut small">The app is called <code id="c-slug">local_hri_…</code>, starts at boot with its Watchdog on and shows in the sidebar. Lowercase letters, digits and <code>_</code>, starting with a letter, at most 20.</p>
+ <p id="c-git-note" class="warn small" hidden>Testing: the Supervisor builds HRI from the source of that ref on this machine (several minutes). Not for production.</p>
+</div>
+
+<div class="card" id="jobcard" hidden><h2>Job <span id="jobtitle" class="tag"></span></h2>
+ <pre id="joblog"></pre>
+</div>
+
+<div class="card" id="otherscard" hidden><h2>Other HRI apps <span class="tag">not managed</span></h2>
+ <p class="mut small">Shown for reference; the manager does not change them.</p>
+ <div class="wrap"><table id="others" class="stack"><thead><tr><th>app</th><th>state</th><th>version</th><th>note</th><th class="act"></th></tr></thead><tbody></tbody></table></div>
+</div>
+</main>
+
+<dialog id="confirm">
+ <form method="dialog" id="cf-form">
+  <h3 id="cf-title"></h3>
+  <p id="cf-text"></p>
+  <label id="cf-version-row" hidden>Version <select id="cf-version"></select></label>
+  <label id="cf-ref-row" hidden>Git ref <input id="cf-ref" maxlength="100" spellcheck="false"></label>
+  <label id="cf-data-row" class="check" hidden><input type="checkbox" id="cf-data"><span>Also delete the instance's data (its Home Assistant, integration and configuration)</span></label>
+  <label id="cf-name-row" hidden><span>Type <b id="cf-name-hint"></b> to confirm</span><input id="cf-name" spellcheck="false" autocomplete="off"></label>
+  <div class="row end"><button value="cancel" type="submit">Cancel</button><button id="cf-ok" value="ok" type="submit" class="primary">OK</button></div>
+ </form>
+</dialog>
+<script src="static/mgr.js?v=__V__"></script>
+</body></html>

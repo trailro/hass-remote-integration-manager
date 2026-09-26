@@ -1,0 +1,217 @@
+'use strict';
+// HRI Manager's page.  Every URL is relative: Home Assistant's ingress serves the page under a prefix it never sees.
+// The one exception is panelHref(): an instance's own sidebar panel, a page of Home Assistant itself (top window).
+const $ = s => document.querySelector(s);
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[c]));
+let releases = [], latest = null, instances = [], watching = null;
+
+async function answer(r) {
+  const text = await r.text();
+  try { return JSON.parse(text); } catch (e) { return {ok: false, error: `HTTP ${r.status}: ${text.trim().slice(0, 200) || r.statusText}`}; }
+}
+async function get(path) {
+  try { return await answer(await fetch(path, {cache: 'no-store'})); } catch (e) { return {ok: false, error: String(e)}; }
+}
+async function send(method, path, body) {
+  try {
+    return await answer(await fetch(path, {method, headers: {'content-type': 'application/json', 'X-Requested-With': 'fetch'}, body: JSON.stringify(body || {})}));
+  } catch (e) { return {ok: false, error: String(e)}; }
+}
+function flash(msg, kind) {
+  const el = $('#flash'); el.textContent = msg || ''; el.className = 'flash' + (kind ? ' ' + kind : '');
+  clearTimeout(el._t); if (msg) el._t = setTimeout(() => { el.textContent = ''; }, 12000);
+}
+const vparts = v => { const m = String(v || '').match(/^(\d+)\.(\d+)\.(\d+)(?:(a|b|rc)(\d+))?$/); return m ? [+m[1], +m[2], +m[3], m[4] ? 0 : 1, m[4] ? ({a: 1, b: 2, rc: 3}[m[4]] * 10000 + +m[5]) : 0] : null; };
+const vcmp = (a, b) => { const x = vparts(a) || [], y = vparts(b) || []; for (let i = 0; i < 5; i++) { const d = (x[i] || 0) - (y[i] || 0); if (d) return d; } return 0; };
+
+function panelHref(i) {
+  // Home Assistant registers an app's sidebar panel at /<slug>
+  if (i.ingress_panel && /^(local_hri_[a-z][a-z0-9_]{0,19}|[a-z0-9]{1,16}_hass_remote_integration)$/.test(i.slug || '')) return {href: '/' + i.slug, target: '_top'};
+  if (/^\/api\/hassio_ingress\/[A-Za-z0-9_-]+\/$/.test(i.ingress_url || '')) return {href: i.ingress_url, target: '_blank'};
+  return null;
+}
+
+function chip(label, value, cls) { return `<span class="chip ${cls || ''}"><span class="dot"></span>${esc(label)} <b>${esc(value)}</b></span>`; }
+
+async function loadStatus() {
+  const s = await get('api/status');
+  if (!s.ok) { flash(s.error, 'err'); return; }
+  $('#ver').textContent = 'v' + s.version + (s.dev ? ' · dev' : '');
+  $('#tb-chips').innerHTML = [
+    chip('Supervisor', s.supervisor || '?', s.supervisor ? 'ok' : 'warn'),
+    chip('Core', s.homeassistant || '?', s.homeassistant ? 'ok' : 'warn'),
+    chip('local apps', s.map_ok ? 'ok' : 'missing', s.map_ok ? 'ok' : 'bad'),
+    chip('role', s.role || '?', s.role_ok ? 'ok' : 'bad'),
+  ].join('');
+  const box = $('#problems');
+  box.hidden = !(s.problems && s.problems.length);
+  box.innerHTML = box.hidden ? '' : '<h2>Problems</h2>' + s.problems.map(p => `<div class="bad">${esc(p)}</div>`).join('');
+}
+
+async function loadReleases(refresh) {
+  const r = await get('api/releases' + (refresh ? '?refresh=1' : ''));
+  const sel = $('#c-version');
+  if (!r.ok) { sel.innerHTML = '<option value="">GitHub unreachable</option>'; flash('Releases: ' + r.error, 'err'); return; }
+  releases = r.releases || []; latest = r.latest;
+  sel.innerHTML = releases.length ? releases.map(x => `<option value="${esc(x.version)}"${x.version === latest ? ' selected' : ''}>${esc(x.version)}${x.prerelease ? ' (pre-release)' : ''}${x.version === latest ? ' (latest)' : ''}</option>`).join('')
+    : '<option value="">no release 0.25.0 or newer</option>';
+}
+
+function stateCell(i) {
+  if (!i.installed) return '<span class="state unknown"><span class="dot"></span>not installed</span>';
+  const st = i.state || 'unknown';
+  return `<span class="state ${esc(st)}"><span class="dot"></span>${esc(st)}</span>`;
+}
+function versionCell(i) {
+  const shown = i.installed_version || i.version || '?';
+  let out = esc(shown);
+  if (i.newer_release) out += ` <span class="tag acc" title="a newer HRI release">${esc(i.newer_release)} available</span>`;
+  else if (i.update_available) out += ' <span class="tag warn" title="the definition is newer than the installed app">update pending</span>';
+  return out;
+}
+function channelCell(i) {
+  if (i.channel === 'git') return `<span class="tag warn" title="testing build from source">git · testing</span><span class="sub">${esc(i.ref)} @ ${esc((i.sha || '').slice(0, 7))}</span>`;
+  if (i.channel === 'release') return '<span class="tag">release</span>';
+  return '<span class="tag bad">unknown</span>';
+}
+const LABELS = {start: 'Start', stop: 'Stop', restart: 'Restart', update: 'Update', delete: 'Delete', repair: 'Repair'};
+function actionsCell(i) {
+  const busy = i.job && i.job.state === 'running';
+  const link = panelHref(i);
+  let out = link ? `<a class="btn" href="${esc(link.href)}" target="${link.target}" rel="noopener">Open</a>` : '';
+  if (busy) return out + ` <button data-job="${esc(i.job.id)}">${esc(i.job.action)}…</button>`;
+  for (const a of i.actions || []) {
+    const label = a === 'update' && i.channel === 'git' ? 'Rebuild' : LABELS[a] || a;
+    out += `<button data-act="${esc(a)}" data-name="${esc(i.name)}"${a === 'delete' ? ' class="danger"' : ''}>${esc(label)}</button>`;
+  }
+  return out;
+}
+
+async function loadInstances() {
+  const r = await get('api/instances');
+  if (!r.ok) { flash('Instances: ' + r.error, 'err'); return; }
+  instances = r.instances || [];
+  const body = $('#inst tbody');
+  body.innerHTML = instances.map(i => `<tr><td><b>${esc(i.name)}</b><span class="sub">${esc(i.slug)}</span>${i.problem ? `<span class="problem">${esc(i.problem)}</span>` : ''}</td>`
+    + `<td>${stateCell(i)}</td><td>${versionCell(i)}</td><td>${channelCell(i)}</td><td class="act">${actionsCell(i)}</td></tr>`).join('');
+  $('#empty').hidden = instances.length > 0;
+  const others = r.others || [];
+  $('#otherscard').hidden = !others.length;
+  $('#others tbody').innerHTML = others.map(o => {
+    const note = o.kind === 'published' ? 'the published single app' : o.problem || '';
+    const link = o.kind === 'published' ? panelHref({slug: o.slug, ingress_panel: true}) : null;
+    return `<tr><td><b>${esc(o.name || o.slug)}</b><span class="sub">${esc(o.slug)}</span></td><td>${o.installed ? stateCell(o) : '—'}</td>`
+      + `<td>${esc(o.version || '')}${o.update_available ? ' <span class="tag acc">update</span>' : ''}</td><td class="mut">${esc(note)}</td><td class="act">${link ? `<a class="btn" href="${esc(link.href)}" target="${link.target}" rel="noopener">Open</a>` : ''}</td></tr>`;
+  }).join('');
+  body.querySelectorAll('button[data-act]').forEach(b => { b.onclick = () => act(b.dataset.act, b.dataset.name); });
+  body.querySelectorAll('button[data-job]').forEach(b => { b.onclick = () => watch(b.dataset.job); });
+}
+
+function dialog({title, text, ok, danger, versions, selected, ref, data, name}) {
+  const d = $('#confirm');
+  $('#cf-title').textContent = title; $('#cf-text').textContent = text;
+  const okb = $('#cf-ok'); okb.textContent = ok; okb.className = danger ? 'danger' : 'primary';
+  $('#cf-version-row').hidden = !versions;
+  if (versions) $('#cf-version').innerHTML = versions.map(v => `<option value="${esc(v.version)}"${v.version === selected ? ' selected' : ''}>${esc(v.version)}${v.prerelease ? ' (pre-release)' : ''}${v.version === latest ? ' (latest)' : ''}</option>`).join('');
+  $('#cf-ref-row').hidden = ref === undefined; $('#cf-ref').value = ref || '';
+  $('#cf-data-row').hidden = !data; $('#cf-data').checked = false;
+  $('#cf-name-row').hidden = true; $('#cf-name').value = ''; $('#cf-name-hint').textContent = name || '';
+  const sync = () => {
+    const need = data && $('#cf-data').checked;
+    $('#cf-name-row').hidden = !need;
+    okb.disabled = need && $('#cf-name').value !== name;
+  };
+  $('#cf-data').onchange = sync; $('#cf-name').oninput = sync; sync();
+  d.returnValue = '';
+  return new Promise(resolve => {
+    d.onclose = () => resolve(d.returnValue === 'ok' ? {version: $('#cf-version').value, ref: $('#cf-ref').value.trim(), removeData: $('#cf-data').checked, confirm: $('#cf-name').value} : null);
+    d.showModal();
+  });
+}
+
+async function act(action, name) {
+  const i = instances.find(x => x.name === name) || {name};
+  let r;
+  if (action === 'update') {
+    if (i.channel === 'git') {
+      const c = await dialog({title: `Rebuild ${name}`, text: 'Downloads the ref again and rebuilds the app on this machine when its commit changed. The app restarts; its data stays.', ok: 'Rebuild', ref: i.ref || ''});
+      if (!c) return;
+      r = await send('POST', `api/instances/${encodeURIComponent(name)}/update`, {ref: c.ref || undefined});
+    } else {
+      const choices = releases.filter(x => vcmp(x.version, i.version) >= 0);
+      if (!choices.length) { flash('No release at or above ' + i.version + ' is known yet.', 'err'); return; }
+      const c = await dialog({title: `Update ${name}`, text: `From ${i.installed_version || i.version}. The Supervisor pulls the new image and restarts the app; its options and data stay.`, ok: 'Update', versions: choices, selected: i.newer_release || latest});
+      if (!c) return;
+      r = await send('POST', `api/instances/${encodeURIComponent(name)}/update`, {version: c.version});
+    }
+  } else if (action === 'delete') {
+    const c = await dialog({title: `Delete ${name}`, text: `Stops and uninstalls ${i.slug} and removes its definition. Without the box below its data folder stays, and a new instance named ${name} would reuse it.`, ok: 'Delete', danger: true, data: true, name});
+    if (!c) return;
+    r = await send('DELETE', `api/instances/${encodeURIComponent(name)}`, {remove_data: c.removeData, confirm: c.removeData ? c.confirm : undefined});
+  } else if (action === 'repair') {
+    const c = await dialog({title: `Repair ${name}`, text: 'Writes the definition folder again for the installed version, so the app can be updated and managed again.', ok: 'Repair'});
+    if (!c) return;
+    r = await send('POST', `api/instances/${encodeURIComponent(name)}/repair`, {});
+  } else {
+    r = await send('POST', `api/instances/${encodeURIComponent(name)}/${action}`, {});
+  }
+  if (!r.ok) { flash(r.error, 'err'); return; }
+  watch(r.job.id);
+  loadInstances();
+}
+
+function renderJob(job) {
+  $('#jobcard').hidden = false;
+  const cls = job.state === 'succeeded' ? 'ok' : job.state === 'failed' ? 'bad' : 'acc';
+  $('#jobtitle').className = 'tag ' + cls;
+  $('#jobtitle').textContent = `${job.action} ${job.instance} · ${job.state}`;
+  const pre = $('#joblog');
+  pre.textContent = job.lines.map(l => `${String(l.t.toFixed(1)).padStart(6)}s  ${l.msg}`).join('\n');
+  pre.scrollTop = pre.scrollHeight;
+}
+
+async function watch(id) {
+  watching = id;
+  for (;;) {
+    const r = await get(`api/jobs/${encodeURIComponent(id)}`);
+    if (watching !== id) return;
+    if (!r.ok) { flash(r.error, 'err'); return; }
+    renderJob(r.job);
+    if (r.job.state !== 'running') {
+      flash(r.job.state === 'succeeded' ? `${r.job.action} ${r.job.instance}: done` : `${r.job.action} ${r.job.instance} failed: ${r.job.error}`, r.job.state === 'succeeded' ? 'okmsg' : 'err');
+      loadInstances();
+      return;
+    }
+    await new Promise(res => setTimeout(res, 1000));
+  }
+}
+
+function syncForm() {
+  const git = $('#c-channel').value === 'git';
+  $('#c-version-row').hidden = git; $('#c-ref-row').hidden = !git; $('#c-git-note').hidden = !git;
+  $('#c-slug').textContent = 'local_hri_' + ($('#c-name').value || '…');
+}
+
+$('#create').addEventListener('submit', async ev => {
+  ev.preventDefault();
+  const name = $('#c-name').value.trim(), channel = $('#c-channel').value;
+  const body = channel === 'git' ? {name, channel, ref: $('#c-ref').value.trim()} : {name, channel, version: $('#c-version').value};
+  const b = $('#c-go'); b.disabled = true;
+  const r = await send('POST', 'api/instances', body);
+  b.disabled = false;
+  if (!r.ok) { flash(r.error, 'err'); return; }
+  $('#c-name').value = ''; syncForm();
+  watch(r.job.id);
+  loadInstances();
+});
+$('#c-channel').onchange = syncForm;
+$('#c-name').oninput = syncForm;
+
+(async () => {
+  syncForm();
+  await Promise.all([loadStatus(), loadInstances(), loadReleases(false)]);
+  const j = await get('api/jobs');
+  const running = (j.jobs || []).find(x => x.state === 'running');
+  if (running) watch(running.id);
+  setInterval(() => { if (!$('#confirm').open) loadInstances(); }, 15000);
+})();

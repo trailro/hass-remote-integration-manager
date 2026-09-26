@@ -1,0 +1,61 @@
+"""Entry point: ``python -m hrimgr`` in the app's container."""
+
+from __future__ import annotations
+
+import logging
+import sys
+
+from aiohttp import web
+
+from . import VERSION, children
+from .github import GitHub
+from .instances import Manager
+from .jobs import Jobs
+from .settings import Redact, SettingsError, from_environment
+from .supervisor import SupervisorClient
+from .web import create_app
+
+
+def main() -> int:
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s", stream=sys.stdout)
+    try:
+        settings = from_environment()
+    except SettingsError as err:
+        logging.getLogger("hrimgr").error("not started: %s", err)
+        return 1
+    root = logging.getLogger()
+    for handler in root.handlers:
+        handler.addFilter(Redact(settings.secrets))
+    if settings.debug:
+        root.setLevel(logging.DEBUG)
+    log = logging.getLogger("hrimgr")
+    if settings.dev:
+        log.warning("DEVELOPMENT MODE: peers %s, Supervisor %s", ", ".join(sorted(settings.peers)), settings.supervisor_url)
+    for note in children.cleanup_stale(settings.local_apps):
+        log.info("local apps folder: %s", note)
+
+    async def build() -> web.Application:
+        sv = SupervisorClient(settings.supervisor_url, settings.supervisor_token)
+        gh = GitHub(f"{settings.data_dir}/releases.json", settings.github_token, settings.github_api, settings.codeload)
+        jobs = Jobs()
+        manager = Manager(settings.local_apps, sv, gh, jobs, dev=settings.dev)
+        app = create_app(settings, manager)
+
+        async def close(_app: web.Application) -> None:
+            for job in jobs.recent():
+                if job.task and not job.task.done():
+                    job.task.cancel()
+            await jobs.wait_all()
+            await sv.close()
+            await gh.close()
+
+        app.on_cleanup.append(close)
+        return app
+
+    log.info("HRI Manager %s listening on port %d", VERSION, settings.port)
+    web.run_app(build(), host="0.0.0.0", port=settings.port, access_log=None, print=None)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
