@@ -55,7 +55,12 @@ WRITE_ERRORS = (stamp.TemplateError, children.UnsafePath, children.NotManaged, R
 
 
 REGISTRY_FIELDS = ("name", "slug", "channel", "version", "ref_kind", "ref", "sha", "instance_id", "created_at", "updated_at",
-                   "stamp_version", "created_by", "updated_by", "history")
+                   "stamp_version", "created_by", "updated_by", "history", "bluetooth")
+# the Supervisor applies an installed app's definition only when the app's version changes (an update at the same
+# version is refused, AppNoUpdateAvailableError; apps/data.py copies the store's definition at install and update)
+BLUETOOTH_NEEDS_VERSION = ("the Supervisor applies Bluetooth (the host's D-Bus) only when the app's version changes: "
+                           "turn it {state} with an Update to a newer release, or a Rebuild once its branch or tag has a "
+                           "new commit; or Delete the instance keeping its data and create it again with Bluetooth {state}")
 HISTORY_KEYS = ("channel", "version", "ref_kind", "ref", "sha", "updated_at", "event", "by")
 
 
@@ -140,6 +145,7 @@ class Manager:
                 # holds it: a detached app the manager did not create is not its to repair (Repair would adopt it)
                 if app.get("url") == names.HRI_URL and app.get("detached") is True and known:
                     entry.update({k: known.get(k) for k in ("channel", "ref_kind", "ref", "sha")})
+                    entry["bluetooth"] = known.get("bluetooth") is True
                     attention = known.get("needs_attention")
                     if isinstance(attention, dict):
                         rebuild = ("Rebuild writes the current commit of its branch or tag (when that is the installed "
@@ -283,8 +289,10 @@ class Manager:
             if marker is None or os.path.lexists(copies.folder(self.copies_root, name)):
                 continue
             try:
-                copies.save(self.copies_root, name, children.child_path(self.root, name), marker)
-            except (copies.CopyError, children.UnsafePath, OSError) as err:
+                entry = self.registry.get(name) or {}
+                copies.save(self.copies_root, name, children.child_path(self.root, name), marker,
+                            entry.get("bluetooth") is True)
+            except (copies.CopyError, children.UnsafePath, OSError, RegistryError) as err:
                 _LOGGER.warning("the copy of %s's definition was not saved: %s", name, err)
                 continue
             done.append(name)
@@ -332,6 +340,7 @@ class Manager:
             "sha": marker.get("sha") if marker else None,
             "newer_release": None, "problem": None, "ingress_url": None, "ingress_panel": False,
             "job": job.summary() if job else None, "actions": [], "auto_repair": None,
+            "bluetooth": bool(known and known.get("bluetooth") is True),
         }
         if marker is None:
             return entry
@@ -378,18 +387,26 @@ class Manager:
         except ValueError as err:
             raise InvalidRequest(str(err)) from None
 
-    def check_create(self, body: dict) -> tuple[str, str, str | None, tuple[str, str] | None]:
+    @staticmethod
+    def check_bluetooth(body: dict, default: bool | None) -> bool | None:
+        value = body.get("bluetooth", default)
+        if value is not None and not isinstance(value, bool):
+            raise InvalidRequest("bluetooth is true or false.")
+        return value
+
+    def check_create(self, body: dict) -> tuple[str, str, str | None, tuple[str, str] | None, bool]:
         name = self.check_name(body.get("name"))
         channel = body.get("channel", "release")
+        bluetooth = self.check_bluetooth(body, False)
         if channel == "release":
             version = body.get("version")
             if not isinstance(version, str) or not names.parse_version(version):
                 raise InvalidRequest("Choose an HRI release.")
             if not names.supported_version(version):
                 raise InvalidRequest("Instances need HRI 0.25.0 or newer (the first release that runs as an app).")
-            return name, channel, version, None
+            return name, channel, version, None, bluetooth
         if channel == "git":
-            return name, channel, None, self.check_ref(body.get("ref_kind"), body.get("ref"))
+            return name, channel, None, self.check_ref(body.get("ref_kind"), body.get("ref")), bluetooth
         raise InvalidRequest("The channel is 'release' or 'git'.")
 
     def managed(self, name: str) -> children.Managed:
@@ -401,8 +418,9 @@ class Manager:
     # ------------------------------------------------------------------ jobs
 
     def create(self, body: dict, user: str) -> Job:
-        name, channel, version, ref = self.check_create(body)
-        return self.jobs.start(name, "create", user, lambda job: self._create(job, name, channel, version, ref, user))
+        name, channel, version, ref, bluetooth = self.check_create(body)
+        return self.jobs.start(name, "create", user,
+                               lambda job: self._create(job, name, channel, version, ref, user, bluetooth))
 
     def action(self, name: str, action: str, user: str) -> Job:
         managed = self.managed(name)
@@ -425,6 +443,7 @@ class Manager:
             managed = self.managed(name)
             channel = managed.marker["channel"]
         version, ref = body.get("version"), None
+        bluetooth = self.check_bluetooth(body, None)  # None: as it is
         if channel == "release":
             if version is not None and (not isinstance(version, str) or not names.parse_version(version)):
                 raise InvalidRequest("Choose an HRI release.")
@@ -434,8 +453,9 @@ class Manager:
                 ref = self.check_ref(body.get("ref_kind"), body.get("ref"))
         if detached is not None:
             # an instance Repair could not rewrite at its installed version: a newer one, written and installed at once
-            return self.jobs.start(name, "update", user, lambda job: self._update_detached(job, name, version, ref, user))
-        return self.jobs.start(name, "update", user, lambda job: self._update(job, managed, version, ref, user))
+            return self.jobs.start(name, "update", user,
+                                   lambda job: self._update_detached(job, name, version, ref, user, bluetooth))
+        return self.jobs.start(name, "update", user, lambda job: self._update(job, managed, version, ref, user, bluetooth))
 
     def delete(self, name: str, body: dict, user: str) -> Job:
         detached = self._detached_entry(name)
@@ -618,11 +638,11 @@ class Manager:
             raise JobFailed(f"hass-remote-integration {version} is not a published release (0.25.0 or newer)")
 
     def _marker(self, name: str, channel: str, version: str, ref: tuple[str, str], sha: str | None, source: str, user: str,
-                previous: dict | None = None, instance_id: str | None = None) -> dict:
+                previous: dict | None = None, instance_id: str | None = None, bluetooth: bool = False) -> dict:
         now = children.now_iso()
         marker = {
             "manager": children.MANAGER_ID, "manager_version": VERSION, "name": name, "slug": names.supervisor_slug(name),
-            "channel": channel, "version": version, "ref_kind": ref[0], "ref": ref[1], "sha": sha,
+            "channel": channel, "version": version, "ref_kind": ref[0], "ref": ref[1], "sha": sha, "bluetooth": bluetooth,
             "instance_id": (previous or {}).get("instance_id") or instance_id or secrets.token_hex(16),
             "stamp_version": stamp.STAMP_VERSION,
             "template_source": source, "created_at": now, "created_by": user, "updated_at": now, "history": [],
@@ -667,12 +687,12 @@ class Manager:
             except OSError as err:
                 _LOGGER.warning("the copy of %s's definition was not removed: %s", name, err)
 
-    async def _save_copy(self, job: Job, managed: children.Managed) -> None:
+    async def _save_copy(self, job: Job, managed: children.Managed, bluetooth: bool) -> None:
         """Keep a copy of the definition just written in /data (copies.py).  A failure costs only the offline Repair:
-        the job goes on."""
+        the job goes on.  ``bluetooth``: the instance's choice, as the registry records it."""
         try:
             saved = await asyncio.to_thread(copies.save, self.copies_root, managed.name,
-                                            children.child_path(self.root, managed.name), managed.marker)
+                                            children.child_path(self.root, managed.name), managed.marker, bluetooth)
         except (copies.CopyError, children.UnsafePath, names.InvalidName, OSError) as err:
             job.log(f"no copy of the definition kept in the manager's /data ({err}): a Repair would download it")
             _LOGGER.warning("the copy of %s's definition was not saved: %s", managed.name, err)
@@ -687,7 +707,7 @@ class Manager:
             return None
 
     def _builder(self, job: Job, archive, channel: str, name: str, version: str, sha: str | None, marker: dict, source: str,
-                 copy: copies.Copy | None = None, built: dict | None = None):
+                 copy: copies.Copy | None = None, built: dict | None = None, bluetooth: bool = False):
         """``copy``: Repair from the manager's copy, of a release (its files as they are: no archive) or of a git
         instance (its stamped config over the archive of its commit).  ``built``: gets the stamped config written, as
         "config" (what the Supervisor is then checked to report)."""
@@ -707,10 +727,10 @@ class Manager:
                     if rel != "config.yaml":
                         children.write_file(tmp, rel, data)
             elif channel == "release":
-                config = stamp.build_release(archive, tmp, name, version, source)
+                config = stamp.build_release(archive, tmp, name, version, source, bluetooth)
             else:
                 config, notes = stamp.build_git(archive, tmp, name, version, sha, source,
-                                                config=copy.config if copy is not None else None)
+                                                config=copy.config if copy is not None else None, bluetooth=bluetooth)
                 for note in notes:
                     job.log(note)
             if built is not None:
@@ -722,7 +742,7 @@ class Manager:
         return build
 
     async def _create(self, job: Job, name: str, channel: str, version: str | None, ref: tuple[str, str] | None,
-                      user: str) -> dict:
+                      user: str, bluetooth: bool = False) -> dict:
         slug = names.supervisor_slug(name)
         job.log(f"checking that {slug} is free")
         apps = await self.sv.list_apps()
@@ -744,19 +764,22 @@ class Manager:
         if channel == "git":
             version = names.git_version(sha)
             job.log(f"commit {sha[:12]}: version {version} (testing build)")
-        marker = self._marker(name, channel, version, ("tag", f"v{version}") if channel == "release" else ref, sha, source, user)
+        marker = self._marker(name, channel, version, ("tag", f"v{version}") if channel == "release" else ref, sha, source, user,
+                              bluetooth=bluetooth)
+        if bluetooth:
+            job.log("with Bluetooth: the instance gets the host's D-Bus (host_dbus)")
         job.log(f"writing {names.folder_name(name)}")
         built: dict = {}
         try:
             await asyncio.to_thread(self.registry.put, name, self._registry_entry(marker))
             managed = await asyncio.to_thread(children.write_new, self.root, name,
                                               self._builder(job, archive, channel, name, version, sha, marker, source,
-                                                            built=built),
+                                                            built=built, bluetooth=bluetooth),
                                               self.registry)
         except WRITE_ERRORS as err:
             await asyncio.to_thread(self._forget, name, marker["instance_id"])
             raise JobFailed(f"the definition was not written: {err}") from None
-        await self._save_copy(job, managed)
+        await self._save_copy(job, managed, bluetooth)
         expected = stamp.expected_view(built["config"], slug)
         installing = False
         try:
@@ -900,10 +923,12 @@ class Manager:
         return {"state": info.get("state")}
 
     async def _update(self, job: Job, managed: children.Managed, version: str | None, ref: tuple[str, str] | None,
-                      user: str) -> dict:
+                      user: str, bluetooth: bool | None = None) -> dict:
         marker = managed.marker
         channel = marker["channel"]
         restamp = False
+        had_bluetooth = managed.entry.get("bluetooth") is True  # the registry's, never the marker's
+        bluetooth = had_bluetooth if bluetooth is None else bluetooth
         try:
             info = await self._installed(managed)
         except (SupervisorError, NotAllowed) as err:
@@ -923,6 +948,8 @@ class Manager:
             current = max((marker.get("version"), info.get("version")), key=lambda v: names.parse_version(v) or ())
             if (names.parse_version(version) or ()) < (names.parse_version(current) or ()):
                 raise JobFailed(f"{version} is older than {current}: the manager does not downgrade")
+            if bluetooth != had_bluetooth and info.get("version") == version:
+                raise JobFailed(BLUETOOTH_NEEDS_VERSION.format(state="on" if bluetooth else "off"))
             if version == marker.get("version") and info.get("version") == version:
                 if marker.get("stamp_version") == stamp.STAMP_VERSION:
                     job.log(f"already at {version}")
@@ -939,6 +966,8 @@ class Manager:
             raise
         sha = archive.sha
         if channel == "git":
+            if bluetooth != had_bluetooth and info.get("version") == names.git_version(sha):
+                raise JobFailed(BLUETOOTH_NEEDS_VERSION.format(state="on" if bluetooth else "off"))
             if sha == marker.get("sha") and info.get("version") == marker.get("version"):
                 if marker.get("stamp_version") == stamp.STAMP_VERSION:
                     job.log(f"the {new_ref[0]} {new_ref[1]} is still {sha[:12]}: nothing to rebuild")
@@ -949,10 +978,14 @@ class Manager:
                 raise JobFailed(f"commit {sha[:12]} has the same version {version} as the installed {marker.get('sha', '')[:12]}: "
                                 "the Supervisor would not install it")
             job.log(f"commit {sha[:12]}: version {version}")
-        new_marker = self._marker(managed.name, channel, version, new_ref, sha, source, user, previous=marker)
+        new_marker = self._marker(managed.name, channel, version, new_ref, sha, source, user, previous=marker,
+                                  bluetooth=bluetooth)
         recorded = {"tag_moved": None, "tampered": None, "history": self._history(new_marker["history"]),
                     **{k: new_marker[k] for k in ("version", "ref_kind", "ref", "sha", "updated_at", "stamp_version",
-                                                  "created_by", "updated_by")}}
+                                                  "created_by", "updated_by", "bluetooth")}}
+        if bluetooth != had_bluetooth:
+            job.log(f"Bluetooth {'on' if bluetooth else 'off'}: {'with' if bluetooth else 'without'} the host's D-Bus "
+                    "(host_dbus), from this version on")
         # before the swap: a manager killed before the update is recorded finds the flag at its next start, and puts the
         # previous definition back (children.cleanup_stale)
         try:
@@ -965,7 +998,7 @@ class Manager:
         try:
             replacement = await asyncio.to_thread(
                 children.replace, managed, self._builder(job, archive, channel, managed.name, version, sha, new_marker, source,
-                                                         built=built))
+                                                         built=built, bluetooth=bluetooth))
         except WRITE_ERRORS as err:
             await self._clear_updating(managed.name)
             raise JobFailed(f"the definition was not written: {err}") from None
@@ -1009,7 +1042,7 @@ class Manager:
                        "the manager starts again")
             job.log(f"warning: {warning}")
             _LOGGER.warning("%s: %s", managed.name, warning)
-        await self._save_copy(job, managed)
+        await self._save_copy(job, managed, bluetooth)
         if restamp:
             job.log(f"the definition is stamped by this manager now (stamping {marker.get('stamp_version')} -> "
                     f"{stamp.STAMP_VERSION}); the Supervisor applies it to the running app at its next version change "
@@ -1042,7 +1075,7 @@ class Manager:
             if manifest.get("config.yaml") != "sha256:" + hashlib.sha256(raw).hexdigest():
                 raise copies.CopyError("its config.yaml changed while it was read")
             config = copies.check(yaml.safe_load(raw.decode("utf-8")), managed.name, str(managed.marker.get("version")),
-                                  managed.entry.get("channel"))
+                                  managed.entry.get("channel"), managed.entry.get("bluetooth") is True)
         except (copies.CopyError, OSError, UnicodeDecodeError, yaml.YAMLError) as err:
             raise JobFailed(f"{names.folder_name(managed.name)} is not a definition this manager writes ({err}): not "
                             "installed; Delete removes it") from None
@@ -1221,7 +1254,9 @@ class Manager:
                               sha: str | None, source: str, archive, copy: copies.Copy | None, user: str,
                               event: str = "repaired") -> dict:
         slug = names.supervisor_slug(name)
-        marker = self._marker(name, channel, version, ref, sha, source, user, instance_id=entry.get("instance_id"))
+        bluetooth = entry.get("bluetooth") is True
+        marker = self._marker(name, channel, version, ref, sha, source, user, instance_id=entry.get("instance_id"),
+                              bluetooth=bluetooth)
         if copy is not None and isinstance(copy.meta.get("stamp_version"), int):
             marker["stamp_version"] = copy.meta["stamp_version"]  # the copy's config, as that manager stamped it
         marker["repaired_at"] = marker["updated_at"]
@@ -1241,17 +1276,18 @@ class Manager:
             await asyncio.to_thread(self.registry.put, name, self._registry_entry(marker, setup_complete=setup_complete))
             managed = await asyncio.to_thread(
                 children.write_new, self.root, name,
-                self._builder(job, archive, channel, name, version, sha, marker, source, copy=copy), self.registry)
+                self._builder(job, archive, channel, name, version, sha, marker, source, copy=copy, bluetooth=bluetooth),
+                self.registry)
         except WRITE_ERRORS as err:
             await asyncio.to_thread(self._restore_entry, name, entry, marker["instance_id"])
             raise JobFailed(f"the definition was not written: {err}") from None
         self._clear_auto(name, keep_job=job.id)  # an automatic repair's own note stays: it succeeded
-        await self._save_copy(job, managed)
+        await self._save_copy(job, managed, bluetooth)
         await self._wait_store(job, slug, version)
         return {"slug": slug, "version": version}
 
     async def _update_detached(self, job: Job, name: str, version: str | None, ref: tuple[str, str] | None,
-                               user: str) -> dict:
+                               user: str, bluetooth: bool | None = None) -> dict:
         """Update (release) or Rebuild (git) of an instance whose definition is gone and could not be written again at
         its installed version: the definition of a NEWER version, written and installed in one job the user asked
         for.  If the update does not succeed the definition is removed again (the instance stays detached)."""
@@ -1259,6 +1295,8 @@ class Manager:
         entry, info = await self._detached(job, name, "update")
         installed = str(info.get("version") or "")
         channel = entry.get("channel")
+        had_bluetooth = entry.get("bluetooth") is True
+        bluetooth = had_bluetooth if bluetooth is None else bluetooth
         if channel == "release":
             if version is None:
                 try:
@@ -1284,12 +1322,14 @@ class Manager:
             if version == installed:
                 if not isinstance(entry.get("needs_attention"), dict):
                     raise JobFailed(f"the {new_ref[0]} {new_ref[1]} is at the installed commit: Repair writes its definition")
+                if bluetooth != had_bluetooth:
+                    raise JobFailed(BLUETOOTH_NEEDS_VERSION.format(state="on" if bluetooth else "off"))
                 return await self._adopt_installed_commit(job, name, entry, info, new_ref, archive, source, user)
         sha = archive.sha
         # the registry's entry as the previous marker (the folder is gone): who created it, its history, this update
         marker = self._marker(name, channel, version, new_ref, sha, source, user,
                               previous={**entry, "history": self._history(entry.get("history"))},
-                              instance_id=entry.get("instance_id"))
+                              instance_id=entry.get("instance_id"), bluetooth=bluetooth)
         marker["created_at"] = entry.get("created_at") or marker["created_at"]
         job.log(f"writing {names.folder_name(name)} for {version} (installed: {installed}), then updating")
         built: dict = {}
@@ -1298,7 +1338,8 @@ class Manager:
                                     self._registry_entry(marker, setup_complete=entry.get("setup_complete", True)))
             managed = await asyncio.to_thread(
                 children.write_new, self.root, name,
-                self._builder(job, archive, channel, name, version, sha, marker, source, built=built), self.registry)
+                self._builder(job, archive, channel, name, version, sha, marker, source, built=built, bluetooth=bluetooth),
+                self.registry)
         except WRITE_ERRORS as err:
             await asyncio.to_thread(self._restore_entry, name, entry, marker["instance_id"])
             raise JobFailed(f"the definition was not written: {err}") from None
@@ -1329,7 +1370,7 @@ class Manager:
                 raise JobFailed(str(err)) from None
             raise
         self._clear_auto(name)
-        await self._save_copy(job, managed)
+        await self._save_copy(job, managed, bluetooth)
         return {"version": version, "state": after.get("state")}
 
     async def _adopt_installed_commit(self, job: Job, name: str, entry: dict, info: dict, ref: tuple[str, str], archive,

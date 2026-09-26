@@ -10,7 +10,8 @@ supervisord) and runs what the Supervisor runs when it reads an app:
   - SCHEMA_APP_CONFIG on hri_manager/config.yaml, SCHEMA_APP_TRANSLATIONS on its translations, AppOptions on its
     default options.  Any warning logged fails, and so does a key the schema drops (it drops unknown keys silently);
   - the same for an instance stamped (hrimgr.stamp) from HRI's app template, the fixture of v0.25.0, on both
-    channels (a release keeps the image, a git build has none and a 0.0.0-<sha> version);
+    channels (a release keeps the image, a git build has none and a 0.0.0-<sha> version), and for one with Bluetooth
+    (host_dbus kept, and no other access to the host);
   - App._is_excluded_by_filter over the instance's folder as the Supervisor names it (local_hri_<name>): every path
     HRI's own backup_exclude leaves out of its folder (<repo>_hass_remote_integration) is left out of the
     instance's, and what HRI keeps is kept;
@@ -248,6 +249,16 @@ class Check:
             self.translations(f"{label}: HRI's translations", tr, stamped)
             self.options(f"{label}: default options (AppOptions)", stamped)
             self.backup_filter(f"{label}: backup_exclude under {CONFIG_PARENT / 'local_hri_garage'}", template, stamped, "local_hri_garage")
+        import yaml
+
+        with_bt = self.validate("instance 'garage' with Bluetooth against SCHEMA_APP_CONFIG",
+                                yaml.safe_load(stamp.dump(stamp.stamp(template, "garage", "0.25.0", "release", bluetooth=True), "check")))
+        if with_bt is not None:
+            without = self.validate("instance 'garage' without Bluetooth (for comparison)",
+                                    yaml.safe_load(stamp.dump(stamp.stamp(template, "garage", "0.25.0", "release"), "check")))
+            changed = sorted(k for k in set(with_bt) | set(without or {}) if with_bt.get(k) != (without or {}).get(k))
+            self.section("with Bluetooth: host_dbus true, and nothing else changes",
+                         [] if with_bt.get("host_dbus") is True and changed == ["host_dbus"] else [f"differs in {changed}"])
         self.instances_side_by_side(template)
         return 1 if self.failed else 0
 
