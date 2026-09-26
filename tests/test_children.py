@@ -400,6 +400,64 @@ class WriteTest(unittest.TestCase):
         children.cleanup_stale(self.root, self.reg)
         self.assertEqual((self.entries(), self.read()), (["hri_garage"], b"new"))
 
+    def test_the_update_flag_matrix(self):
+        """R2-12, R2-15: what the next start does with an update killed between its swap and its record, for every
+        case of the registry, the definition in place and the version the Supervisor reports.  The previous
+        definition goes only when it cannot be the one to keep; nothing is decided that is not known."""
+        cases = [
+            # (what, installed, break the registry, break the new marker) -> (config in place, .hri-old kept)
+            ("the Supervisor has the new version", {"garage": "0.25.1"}, False, False, b"new", False),
+            ("the Supervisor has the previous version", {"garage": "0.25.0"}, False, False, b"old", False),
+            ("the Supervisor could not be asked", None, False, False, b"new", True),
+            ("the registry cannot be read", {"garage": "0.25.1"}, True, False, b"new", True),
+            ("the registry cannot be read, the Supervisor has the previous", {"garage": "0.25.0"}, True, False, b"new", True),
+            ("the new marker is broken, the Supervisor has the new version", {"garage": "0.25.1"}, False, True, b"new", True),
+            ("the new marker is broken, the Supervisor has the previous", {"garage": "0.25.0"}, False, True, b"old", False),
+            ("the new marker is broken, the Supervisor could not be asked", None, False, True, b"new", True),
+        ]
+        for what, installed, bad_registry, bad_marker, config, kept in cases:
+            with self.subTest(what=what):
+                self.setUp()
+                self.killed_mid_update()
+                if bad_marker:
+                    with open(os.path.join(self.root, "hri_garage", children.MARKER), "w") as fh:
+                        fh.write("{broken")
+                if bad_registry:
+                    good = open(self.reg.path, "rb").read()
+                    with open(self.reg.path, "w") as fh:
+                        fh.write("not json")
+                children.cleanup_stale(self.root, self.reg, installed)
+                self.assertEqual(self.read(), config)
+                self.assertEqual(any(e.startswith(children.OLD_PREFIX) for e in self.entries()), kept, self.entries())
+                if bad_registry:
+                    with open(self.reg.path, "wb") as fh:
+                        fh.write(good)
+                    self.assertIsInstance(self.reg.get("garage")["updating"], dict)  # still to settle
+
+    def test_a_previous_definition_left_aside_is_settled_by_the_next_update(self):
+        """R2-14: a start that could not ask the Supervisor leaves both definitions; an Update later settles them
+        first, as the start would have, instead of clearing the flag and leaving the previous one to be deleted."""
+        for installed, config in (("0.25.0", b"old"), ("0.25.1", b"new")):
+            with self.subTest(installed=installed):
+                self.setUp()
+                self.killed_mid_update()
+                children.cleanup_stale(self.root, self.reg, None)  # "leave"
+                notes = children.settle_instance(self.root, self.reg, "garage", installed)
+                self.assertTrue(notes)
+                self.assertEqual((self.entries(), self.read()), (["hri_garage"], config))
+                self.assertIsNone(self.reg.get("garage")["updating"])
+                self.assertEqual(self.reg.get("garage")["version"], installed)
+
+    def test_a_registry_that_cannot_be_written_raises_its_own_error(self):
+        """R2-13: callers catch RegistryError; an OSError of the write is one."""
+        from hrimgr.registry import RegistryError
+        for call in (lambda: self.reg.put("cellar", {"name": "cellar"}), lambda: self.reg.update("garage", x=1),
+                     lambda: self.reg.remove("garage")):
+            with self.subTest(call=call), mock.patch("os.replace", side_effect=OSError(28, "No space left on device")):
+                with self.assertRaises(RegistryError) as ctx:
+                    call()
+                self.assertIn("No space left on device", str(ctx.exception))
+
     def test_a_rename_that_fails_does_not_stop_the_start(self):
         os.makedirs(os.path.join(self.root, ".hri-old-cellar-0123abcd"))
         os.makedirs(os.path.join(self.root, ".hri-tmp-garage-0123abcd"))

@@ -364,6 +364,51 @@ class FlowTest(unittest.IsolatedAsyncioTestCase):
         entry = env.registry.get("garage")
         self.assertEqual((entry["version"], entry["updating"]), ("0.25.0", None))
 
+    async def test_a_previous_definition_a_start_left_aside_is_settled_before_the_next_update(self):
+        """R2-14: a start that could not ask the Supervisor leaves both definitions and the flag; an Update later settles
+        them first (the Supervisor has 0.25.0: 0.25.0's comes back), so a failure of that Update puts back what the
+        Supervisor has, and nothing is left aside to be deleted."""
+        env = self.env
+        await self.create()
+        never = asyncio.Event()
+
+        async def hangs(managed):
+            await never.wait()
+
+        with mock.patch.object(type(env.manager), "_rollback_update", new=mock.AsyncMock()), \
+                mock.patch.object(env.sv, "update", side_effect=hangs):
+            status, body = await env.send("POST", "/api/instances/garage/update", {"version": "0.25.1"})
+            await self._cancel_when(body["job"]["id"], "updating")
+        with mock.patch.object(env.sv, "list_apps", side_effect=SupervisorError("GET /addons: no answer")):
+            done = await env.manager.startup()
+        self.assertIn("left .hri-old-garage-", " ".join(done))
+        env.stub.releases.append("0.25.3")
+        env.stub.fail[("POST", "/store/addons/local_hri_garage/update")] = "pull failed"
+        job = await env.job(await env.send("POST", "/api/instances/garage/update", {"version": "0.25.3"}))
+        self.assertEqual(job["state"], "failed", job)
+        self.assertTrue(any("restored .hri-old-garage-" in l["msg"] for l in job["lines"]), job["lines"])
+        self.assertEqual(sorted(os.listdir(env.local_apps)), ["hri_garage"])
+        self.assertEqual(self.config("garage")["version"], "0.25.0")  # what the Supervisor has
+        entry = env.registry.get("garage")
+        self.assertEqual((entry["version"], entry["updating"]), ("0.25.0", None))
+
+    async def test_a_registry_that_cannot_be_written_never_hides_why_a_write_failed(self):
+        """R2-13: undoing the registry after a refused write is best effort; the job says why the write failed."""
+        env = self.env
+        remove = env.registry.remove
+
+        def full_disk(name):
+            raise RegistryError("the manager's registry cannot be written: No space left on device")
+
+        with mock.patch.object(stamp, "parse_template", side_effect=stamp.TemplateError("refused template")), \
+                mock.patch.object(env.registry, "remove", side_effect=full_disk):
+            job = await env.job(await env.send("POST", "/api/instances",
+                                               {"name": "garage", "channel": "release", "version": "0.25.0"}))
+        self.assertEqual(job["state"], "failed", job)
+        self.assertIn("the definition was not written: refused template", job["error"])
+        self.assertTrue(any("registry was not put back" in l["msg"] for l in job["lines"]), job["lines"])
+        remove("garage")
+
     async def test_an_update_the_supervisor_finished_after_a_kill_is_kept_never_downgraded(self):
         """The kill came after the Supervisor had the call, and it finished the update: putting the previous definition
         back would make it offer 0.25.0 over the installed 0.25.1, and install it with auto-update on."""

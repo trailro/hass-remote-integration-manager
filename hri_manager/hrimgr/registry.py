@@ -57,20 +57,24 @@ class Registry:
         return instances
 
     def _write(self, instances: dict[str, dict]) -> None:
-        tmp = f"{self.path}.tmp"
-        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0), 0o600)
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            json.dump({"version": 1, "instances": instances}, fh, indent=2, sort_keys=True)
-            fh.flush()
-            os.fsync(fh.fileno())
-        os.replace(tmp, self.path)
-        # the rename itself is durable only once its folder is: without this a power loss can bring the previous
-        # registry back, without an instance whose folder and marker survive (not managed, then)
-        folder = os.open(os.path.dirname(self.path) or ".", os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        """RegistryError when it cannot be written (a full or read-only /data): the one error callers expect."""
         try:
-            os.fsync(folder)
-        finally:
-            os.close(folder)
+            tmp = f"{self.path}.tmp"
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0), 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                json.dump({"version": 1, "instances": instances}, fh, indent=2, sort_keys=True)
+                fh.flush()
+                os.fsync(fh.fileno())
+            os.replace(tmp, self.path)
+            # the rename itself is durable only once its folder is: without this a power loss can bring the previous
+            # registry back, without an instance whose folder and marker survive (not managed, then)
+            folder = os.open(os.path.dirname(self.path) or ".", os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+            try:
+                os.fsync(folder)
+            finally:
+                os.close(folder)
+        except OSError as err:
+            raise RegistryError(f"the manager's registry cannot be written: {err.strerror or err}") from None
 
     def all(self) -> dict[str, dict]:
         with self._lock:
