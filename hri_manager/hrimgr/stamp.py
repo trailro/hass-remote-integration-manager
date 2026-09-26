@@ -13,7 +13,13 @@ and the icons) from the HRI release or git ref and changes only what makes the c
 - ``webui`` dropped; ``image`` dropped for a git build (the Supervisor builds the folder instead);
 - ``host_dbus: true`` added for an instance created with Bluetooth (the manager's registry records the choice): the
   host's D-Bus, through which BlueZ offers the Bluetooth adapters.  The template itself can never add it: it is not a
-  key of ``TEMPLATE_KEYS``.
+  key of ``TEMPLATE_KEYS``;
+- ``host_network: true`` and ``ingress_port: 0`` for an instance with Host network (the registry's choice again): the
+  host's network namespace, for an integration that finds its devices by mDNS, SSDP or broadcast, and a port the
+  Supervisor picks for the app (apps/app.py ``_check_ingress_port``: one of 62000-65500, kept per slug by
+  ingress.py ``get_dynamic_port``), so that instances on the host's network never share one.  HRI reads that port
+  from the Supervisor from 0.26.0 on (``DYNAMIC_PORT_RE`` in its entrypoint.py).  ``host_network`` is not a key of
+  ``TEMPLATE_KEYS`` either, and the template's ``ingress_port`` must be a port (1-65535), never 0.
 
 Everything else (options, schema, ingress, map, homeassistant, image, arch, timeout, uart, backup_pre/backup_post...)
 is kept as HRI wrote
@@ -59,6 +65,13 @@ TRANSLATION_RE = re.compile(r"translations/[a-z]{2}(?:-[A-Za-z0-9]{1,8})?\.(?:ya
 # HRI's Dockerfile: the commit the image was built from.  The Supervisor passes only BUILD_VERSION and BUILD_ARCH
 # to a build without build.yaml (deprecated), so a git build gets its commit as the argument's default instead
 HRI_BUILD_ARG = re.compile(rb"^ARG HRI_BUILD=local$", re.M)
+# HRI's entrypoint.py from the first version that reads the ingress port the Supervisor gives it (names.
+# DYNAMIC_PORT_VERSION): a git build gets Host network only when its tree has this line.  Read, never run
+DYNAMIC_PORT_FILE = "entrypoint.py"
+DYNAMIC_PORT_RE = re.compile(rb"^APP_DYNAMIC_PORT = True[ \t]*(?:#[^\n]*)?\r?$", re.M)
+# the ports the Supervisor picks a dynamic ingress port from (const.py INGRESS_DYNAMIC_PORT_MIN / _MAX): an app with
+# ingress_port 0 must not declare one of them (apps/validate.py refuses the definition)
+DYNAMIC_PORTS = (62000, 65500)
 MAX_TEMPLATE = 256 * 1024
 
 
@@ -198,14 +211,18 @@ _SHOW = reprlib.Repr(maxlevel=2, maxlist=4, maxdict=4, maxstring=60, maxother=60
 
 def expected_view(config: dict, slug: str) -> dict:
     """What the Supervisor must report (STORE_VIEW, INSTALLED_VIEW) for ``config``, a definition the manager stamped:
-    its own values, and the Supervisor's default (apps/validate.py) for every key vet_template refuses in a template.
-    ``network``: the ports' names only (the user may map a port on the Network tab); ``apparmor``: "default", the
-    Supervisor's profile (an apparmor.txt in the folder would make it "profile")."""
+    its own values, and the Supervisor's default (apps/validate.py) for every key vet_template refuses in a template
+    (host_dbus and host_network: what stamp() added).  ``network``: the ports' names only (the user may map a port on
+    the Network tab; on the host's network the Supervisor still reports the declared ports, and publishes none:
+    docker/app.py ``ports``); ``apparmor``: "default", the Supervisor's profile (an apparmor.txt in the folder would
+    make it "profile").  ``ingress_port`` is in neither view: the store does not report it, and the app's info reports
+    the port the Supervisor picked for an ingress_port of 0."""
     return {
         "slug": slug, "name": config.get("name"), "url": config.get("url"), "version": str(config.get("version")),
         "build": "image" not in config, "ingress": config.get("ingress") is True,
         "hassio_role": "default", "hassio_api": False, "homeassistant_api": False, "auth_api": False,
-        "full_access": False, "docker_api": False, "host_network": False, "host_pid": False, "apparmor": "default",
+        "full_access": False, "docker_api": False, "host_network": config.get("host_network") is True,
+        "host_pid": False, "apparmor": "default",
         "host_ipc": False, "host_uts": False, "host_dbus": config.get("host_dbus") is True, "privileged": [],
         "devices": [], "uart": config.get("uart") is True, "usb": False, "gpio": False, "video": False,
         "audio": False, "kernel_modules": False, "devicetree": False, "udev": False,
@@ -255,8 +272,10 @@ def parse_template(raw: bytes) -> dict:
     return data
 
 
-def stamp(template: dict, name: str, version: str, channel: str, bluetooth: bool = False) -> dict:
-    """``bluetooth``: the instance's registry says Bluetooth (host_dbus), never the template."""
+def stamp(template: dict, name: str, version: str, channel: str, bluetooth: bool = False, *,
+          host_network: bool = False) -> dict:
+    """``bluetooth``: the instance's registry says Bluetooth (host_dbus), never the template; ``host_network``: it says
+    Host network (host_network, and ingress_port 0)."""
     names.validate_name(name)
     if channel not in children.CHANNELS:
         raise ValueError(f"unknown channel {channel!r}")
@@ -282,6 +301,13 @@ def stamp(template: dict, name: str, version: str, channel: str, bluetooth: bool
         raise TemplateError("a backup_exclude entry names HRI's slug elsewhere than at its start: not stamped")
     if bluetooth:
         out["host_dbus"] = True
+    if host_network:
+        low, high = DYNAMIC_PORTS
+        if any(low <= int(port.partition("/")[0]) <= high for port in out.get("ports") or {}):
+            raise TemplateError(f"HRI's app definition declares a port of {low}-{high}, where the Supervisor picks the "
+                                "port of an app on the host's network: not stamped with Host network")
+        out["host_network"] = True
+        out["ingress_port"] = 0
     return out
 
 
@@ -312,10 +338,15 @@ def app_extras(archive: tarsafe.Archive) -> dict[str, bytes]:
     return out
 
 
+def reads_dynamic_port(archive: tarsafe.Archive) -> bool:
+    """Whether the tree's HRI reads the ingress port the Supervisor gives it (DYNAMIC_PORT_RE in its entrypoint.py)."""
+    return DYNAMIC_PORT_FILE in archive.files and DYNAMIC_PORT_RE.search(archive.read(DYNAMIC_PORT_FILE)) is not None
+
+
 def build_release(archive: tarsafe.Archive, dest: str, name: str, version: str, source: str,
-                  bluetooth: bool = False) -> dict:
+                  bluetooth: bool = False, *, host_network: bool = False) -> dict:
     """Fill ``dest`` with a release instance's definition: the stamped config and HRI's app files."""
-    config = stamp(_template(archive), name, version, "release", bluetooth)
+    config = stamp(_template(archive), name, version, "release", bluetooth, host_network=host_network)
     children.write_file(dest, "config.yaml", dump(config, source))
     for sub, data in sorted(app_extras(archive).items()):
         children.write_file(dest, sub, data)
@@ -333,7 +364,8 @@ def is_app_config(rel: str) -> bool:
 
 
 def build_git(archive: tarsafe.Archive, dest: str, name: str, version: str, sha: str, source: str,
-              config: dict | None = None, bluetooth: bool = False) -> tuple[dict, list[str]]:
+              config: dict | None = None, bluetooth: bool = False, *,
+              host_network: bool = False) -> tuple[dict, list[str]]:
     """Fill ``dest`` with a git instance: HRI's whole tree, built by the Supervisor from its root Dockerfile.
     ``config``: the stamped config to write (Repair, from the manager's copy) instead of stamping the tree's own.
 
@@ -348,7 +380,7 @@ def build_git(archive: tarsafe.Archive, dest: str, name: str, version: str, sha:
     if build_files:
         raise TemplateError(f"the tree has {', '.join(tarsafe.show(r) for r in build_files)} at its root, which the "
                             "Supervisor would use to build or confine the app instead of HRI's Dockerfile: refused")
-    stamped = stamp(_template(archive), name, version, "git", bluetooth)
+    stamped = stamp(_template(archive), name, version, "git", bluetooth, host_network=host_network)
     config = stamped if config is None else config
     extras = app_extras(archive)
     tarsafe.extract(archive, dest)

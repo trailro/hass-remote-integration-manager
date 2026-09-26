@@ -70,21 +70,39 @@ WRITE_ERRORS = (stamp.TemplateError, children.UnsafePath, children.NotManaged, c
 
 
 REGISTRY_FIELDS = ("name", "slug", "channel", "version", "ref_kind", "ref", "sha", "instance_id", "created_at", "updated_at",
-                   "stamp_version", "created_by", "updated_by", "history", "bluetooth")
+                   "stamp_version", "created_by", "updated_by", "history", "bluetooth", "host_network")
+# the accesses to the host an instance may be given, each the admin's choice per instance, recorded in the registry
+# (and the marker) under its name: the key stamp() adds for it, which the Supervisor reports of the installed app too,
+# the name the manager shows, and what it gives
+ACCESS = {"bluetooth": ("host_dbus", "Bluetooth", "the host's D-Bus"),
+          "host_network": ("host_network", "Host network", "the host's network")}
 # an update applies an installed app's definition only when the app's version changes (an update at the same version
 # is refused, AppNoUpdateAvailableError; apps/data.py copies the store's definition at install, update and rebuild).
 # The Supervisor's own Rebuild applies it at the same version, but the manager's allow-list has no rebuild
-BLUETOOTH_NEEDS_VERSION = ("the Supervisor applies Bluetooth (the host's D-Bus) only when the app's version changes: "
-                           "turn it {state} with an Update to a newer release, or a Rebuild once its branch or tag has a "
-                           "new commit; or Delete the instance keeping its data and create it again with Bluetooth {state}")
-# the installed app's host_dbus differs from the registry's Bluetooth, and nothing says the manager made that change
-# (the Supervisor's own Update or Rebuild of a definition someone changed would): never recorded without the admin
-BLUETOOTH_NOT_CHOSEN = ("the installed {slug} {has} the host's D-Bus (Bluetooth), the manager's record says {record}, and "
-                        "the manager did not make that change (the Supervisor's own Update or Rebuild of a changed "
-                        "definition would): nothing was recorded. {what}")
-BLUETOOTH_CHOOSE = ("Update it at its installed version with Bluetooth {state} to keep that as your choice (the other "
-                    "needs a newer version), or Delete it")
-BLUETOOTH_CHOOSE_DETACHED = "Update it to a newer release (or Rebuild it) with Bluetooth chosen, or Delete it"
+NEEDS_VERSION = ("the Supervisor applies {label} ({what}) only when the app's version changes: "
+                 "turn it {state} with an Update to a newer release, or a Rebuild once its branch or tag has a "
+                 "new commit; or Delete the instance keeping its data and create it again with {label} {state}")
+# the installed app's host_dbus (host_network) differs from the registry's Bluetooth (Host network), and nothing says
+# the manager made that change (the Supervisor's own Update or Rebuild of a definition someone changed would): never
+# recorded without the admin
+NOT_CHOSEN = ("the installed {slug} {has} {what} ({label}), the manager's record says {record}, and "
+              "the manager did not make that change (the Supervisor's own Update or Rebuild of a changed "
+              "definition would): nothing was recorded. {choose}")
+CHOOSE = ("Update it at its installed version with {label} {state} to keep that as your choice (the other "
+          "needs a newer version), or Delete it")
+CHOOSE_DETACHED = "Update it to a newer release (or Rebuild it) with {label} chosen, or Delete it"
+# Host network only for an HRI that listens on the ingress port the Supervisor picks for it (stamp.stamp: ingress_port
+# 0): an older one would listen on its own port (8087) on every interface of the host, where a second instance, or
+# HRI's own app, would clash with it
+HOST_NETWORK_RELEASE = ("Host network needs HRI {min} or newer, the first release that listens on the port the "
+                        "Supervisor gives it: not {version}")
+HOST_NETWORK_GIT = ("Host network needs an HRI that listens on the port the Supervisor gives it (its entrypoint.py "
+                    "says APP_DYNAMIC_PORT = True, from 0.26.0 on), and commit {sha} of the {kind} {ref} does not: "
+                    "Rebuild with Host network off, or from a branch or tag that has it")
+# a definition follows the installed app in place (_follow_access) only where stamping can write it from the stamped
+# one: turning Host network off needs HRI's own ingress_port back, which only its template has
+FOLLOW_HOST_NETWORK_OFF = ("the installed {slug} does not have the host's network (Host network), the manager's record "
+                           "says on, and its definition cannot follow it in place: {choose}")
 HISTORY_KEYS = ("channel", "version", "ref_kind", "ref", "sha", "updated_at", "event", "by")
 
 
@@ -205,7 +223,7 @@ class Manager:
                 # holds it: a detached app the manager did not create is not its to repair (Repair would adopt it)
                 if app.get("url") == names.HRI_URL and app.get("detached") is True and known:
                     entry.update({k: known.get(k) for k in ("channel", "ref_kind", "ref", "sha")})
-                    entry["bluetooth"] = known.get("bluetooth") is True
+                    entry.update(self._access_of(known))
                     if isinstance(known.get("tampered"), dict):  # never repaired automatically; by hand when unverified
                         entry["problem"] = f"{str(known['tampered'].get('reason'))[:300]}: {self._mark_text(slug, known['tampered'])}"
                         entry["actions"] = (["repair"] if known["tampered"].get("unverified") else []) + ["delete"]
@@ -279,18 +297,21 @@ class Manager:
                 entry["ingress_panel"] = bool(info.get("ingress_panel"))
                 entry["watchdog"] = info.get("watchdog")
                 entry["boot"] = info.get("boot")
-                # the badge shows what the app has, not what the manager recorded; a difference is said
-                if isinstance(info.get("host_dbus"), bool) and info["host_dbus"] != entry["bluetooth"]:
+                # the badges show what the app has, not what the manager recorded; a difference is said
+                for access, (key, label, what) in ACCESS.items():
+                    has = info.get(key)
+                    if not isinstance(has, bool) or has == entry[access]:
+                        continue
                     known = registered.get(entry["name"])
-                    what = ("an update the manager made set it; its next Update or Repair records it"
-                            if self._bluetooth_confirmed(known, info["host_dbus"], None) else
-                            "the manager did not make that change: " + (
-                                BLUETOOTH_CHOOSE_DETACHED if entry.get("detached")
-                                else BLUETOOTH_CHOOSE.format(state="on" if info["host_dbus"] else "off")))
+                    choose = ("an update the manager made set it; its next Update or Repair records it"
+                              if self._access_confirmed(known, access, has, None) else
+                              "the manager did not make that change: " + (
+                                  CHOOSE_DETACHED.format(label=label) if entry.get("detached")
+                                  else CHOOSE.format(label=label, state="on" if has else "off")))
                     entry["problem"] = "; ".join(p for p in (entry.get("problem"), (
-                        f"Bluetooth: the installed app {'has' if info['host_dbus'] else 'does not have'} the host's "
-                        f"D-Bus, the manager's record says {'on' if entry['bluetooth'] else 'off'}; {what}")) if p)
-                    entry["bluetooth"] = info["host_dbus"]
+                        f"{label}: the installed app {'has' if has else 'does not have'} {what}, the manager's record "
+                        f"says {'on' if entry[access] else 'off'}; {choose}")) if p)
+                    entry[access] = has
         return {"instances": out, "others": others, "latest_release": latest["version"] if latest else None}
 
     def _auto_repair(self, names_: list[str]) -> dict[str, str]:
@@ -368,7 +389,7 @@ class Manager:
             try:
                 entry = self.registry.get(name) or {}
                 files = copies.read_definition(children.child_path(self.root, name), marker.get("channel"))
-                copies.save(self.copies_root, name, files, marker, entry.get("bluetooth") is True)
+                copies.save(self.copies_root, name, files, marker, **self._access_of(entry))
             except (copies.CopyError, children.UnsafePath, OSError, RegistryError) as err:
                 _LOGGER.warning("the copy of %s's definition was not saved: %s", name, err)
                 continue
@@ -545,7 +566,7 @@ class Manager:
             "sha": marker.get("sha") if marker else None,
             "newer_release": None, "problem": None, "ingress_url": None, "ingress_panel": False,
             "job": job.summary() if job else None, "actions": [], "auto_repair": None,
-            "bluetooth": bool(known and known.get("bluetooth") is True),
+            **self._access_of(known),
         }
         if marker is None:
             return entry
@@ -603,26 +624,56 @@ class Manager:
             raise InvalidRequest(str(err)) from None
 
     @staticmethod
-    def check_bluetooth(body: dict, default: bool | None) -> bool | None:
-        value = body.get("bluetooth", default)
-        if value is not None and not isinstance(value, bool):
-            raise InvalidRequest("bluetooth is true or false.")
-        return value
+    def check_access(body: dict, default: bool | None) -> dict[str, bool | None]:
+        """The request's choice of each access (ACCESS): true, false, or ``default`` when it names none."""
+        out = {}
+        for access in ACCESS:
+            value = body.get(access, default)
+            if value is not None and not isinstance(value, bool):
+                raise InvalidRequest(f"{access} is true or false.")
+            out[access] = value
+        return out
 
-    def check_create(self, body: dict) -> tuple[str, str, str | None, tuple[str, str] | None, bool]:
+    @staticmethod
+    def _access_of(entry: dict | None) -> dict[str, bool]:
+        """Each access as a registry entry (or a request's resolved choice) records it: on only when true."""
+        return {access: (entry or {}).get(access) is True for access in ACCESS}
+
+    def check_create(self, body: dict) -> tuple[str, str, str | None, tuple[str, str] | None, dict[str, bool]]:
         name = self.check_name(body.get("name"))
         channel = body.get("channel", "release")
-        bluetooth = self.check_bluetooth(body, False)
+        access = self.check_access(body, False)
         if channel == "release":
             version = body.get("version")
             if not isinstance(version, str) or not names.parse_version(version):
                 raise InvalidRequest("Choose an HRI release.")
             if not names.supported_version(version):
                 raise InvalidRequest("Instances need HRI 0.25.0 or newer (the first release that runs as an app).")
-            return name, channel, version, None, bluetooth
+            if access["host_network"] and not names.reads_dynamic_port(version):
+                raise InvalidRequest(HOST_NETWORK_RELEASE.format(min=self._dynamic_port_min(), version=version) + ".")
+            return name, channel, version, None, access
         if channel == "git":
-            return name, channel, None, self.check_ref(body.get("ref_kind"), body.get("ref")), bluetooth
+            return name, channel, None, self.check_ref(body.get("ref_kind"), body.get("ref")), access
         raise InvalidRequest("The channel is 'release' or 'git'.")
+
+    @staticmethod
+    def _dynamic_port_min() -> str:
+        return ".".join(str(n) for n in names.DYNAMIC_PORT_VERSION)
+
+    def _refuse_host_network(self, channel: str, version: str, archive, ref: tuple[str, str]) -> None:
+        """JobFailed unless the HRI being written listens on the port the Supervisor gives it: a release from
+        names.DYNAMIC_PORT_VERSION on, a git tree whose entrypoint.py says so (stamp.reads_dynamic_port, read from the
+        archive the manager downloaded, never run).  Only for a definition written with Host network."""
+        if channel == "release":
+            if not names.reads_dynamic_port(version):
+                raise JobFailed(HOST_NETWORK_RELEASE.format(min=self._dynamic_port_min(), version=version))
+            return
+        try:
+            supported = stamp.reads_dynamic_port(archive)
+        except tarsafe.UnsafeArchive as err:
+            raise JobFailed(f"the archive's {stamp.DYNAMIC_PORT_FILE}: {err}") from None
+        if not supported:
+            raise JobFailed(HOST_NETWORK_GIT.format(sha=(archive.sha or "")[:12], kind=ref[0], ref=ref[1]))
 
     async def managed(self, name: str) -> children.Managed:
         """The instance's Managed, for a request: its marker and the registry (up to 4 MB) are read off the event loop."""
@@ -635,7 +686,7 @@ class Manager:
     # ------------------------------------------------------------------ jobs
 
     async def create(self, body: dict, user: str) -> Job:
-        name, channel, version, ref, bluetooth = self.check_create(body)
+        name, channel, version, ref, access = self.check_create(body)
         try:
             pending = self._install_may_finish(await asyncio.to_thread(self.registry.get, name))
         except RegistryError as err:
@@ -644,7 +695,7 @@ class Manager:
             # a new entry would replace the one the install may still need: it would finish as an app of no instance
             raise InvalidRequest(f"{name}: {pending}")
         return self.jobs.start(name, "create", user,
-                               lambda job: self._create(job, name, channel, version, ref, user, bluetooth))
+                               lambda job: self._create(job, name, channel, version, ref, user, access))
 
     async def action(self, name: str, action: str, user: str) -> Job:
         managed = await self.managed(name)
@@ -677,7 +728,7 @@ class Manager:
         if detached is None:
             await self._refuse_foreign(managed)
         version, ref = body.get("version"), None
-        bluetooth = self.check_bluetooth(body, None)  # None: as it is
+        requested = self.check_access(body, None)  # None: as it is
         if channel == "release":
             if version is not None and (not isinstance(version, str) or not names.parse_version(version)):
                 raise InvalidRequest("Choose an HRI release.")
@@ -688,8 +739,8 @@ class Manager:
         if detached is not None:
             # an instance Repair could not rewrite at its installed version: a newer one, written and installed at once
             return self.jobs.start(name, "update", user,
-                                   lambda job: self._update_detached(job, name, version, ref, user, bluetooth))
-        return self.jobs.start(name, "update", user, lambda job: self._update(job, managed, version, ref, user, bluetooth))
+                                   lambda job: self._update_detached(job, name, version, ref, user, requested))
+        return self.jobs.start(name, "update", user, lambda job: self._update(job, managed, version, ref, user, requested))
 
     async def delete(self, name: str, body: dict, user: str) -> Job:
         detached = await self._detached_entry(name)
@@ -1048,11 +1099,11 @@ class Manager:
             raise JobFailed(f"hass-remote-integration {version} is not a published release (0.25.0 or newer)")
 
     def _marker(self, name: str, channel: str, version: str, ref: tuple[str, str], sha: str | None, source: str, user: str,
-                previous: dict | None = None, instance_id: str | None = None, bluetooth: bool = False) -> dict:
+                previous: dict | None = None, instance_id: str | None = None, access: dict | None = None) -> dict:
         now = children.now_iso()
         marker = {
             "manager": children.MANAGER_ID, "manager_version": VERSION, "name": name, "slug": names.supervisor_slug(name),
-            "channel": channel, "version": version, "ref_kind": ref[0], "ref": ref[1], "sha": sha, "bluetooth": bluetooth,
+            "channel": channel, "version": version, "ref_kind": ref[0], "ref": ref[1], "sha": sha, **self._access_of(access),
             "instance_id": (previous or {}).get("instance_id") or instance_id or secrets.token_hex(16),
             "stamp_version": stamp.STAMP_VERSION,
             "template_source": source, "created_at": now, "created_by": user, "updated_at": now, "history": [],
@@ -1107,12 +1158,13 @@ class Manager:
             except OSError as err:
                 _LOGGER.warning("the copy of %s's definition was not removed: %s", name, err)
 
-    async def _save_copy(self, job: Job, managed: children.Managed, bluetooth: bool, files: dict[str, bytes]) -> None:
+    async def _save_copy(self, job: Job, managed: children.Managed, access: dict, files: dict[str, bytes]) -> None:
         """Keep a copy of the definition just written in /data (copies.py), from ``files``, the bytes the build wrote
         (_builder's "files"): never read back from the folder, which others can write.  A failure costs only the
-        offline Repair: the job goes on.  ``bluetooth``: the instance's choice, as the registry records it."""
+        offline Repair: the job goes on.  ``access``: the instance's choices, as the registry records them."""
         try:
-            saved = await asyncio.to_thread(copies.save, self.copies_root, managed.name, files, managed.marker, bluetooth)
+            saved = await asyncio.to_thread(lambda: copies.save(self.copies_root, managed.name, files, managed.marker,
+                                                                **self._access_of(access)))
         except Exception as err:  # noqa: BLE001 - a copy that fails, however, costs only the offline Repair
             job.log(f"no copy of the definition kept in the manager's /data ({type(err).__name__}: {str(err)[:300]}): "
                     "a Repair would download it")
@@ -1129,13 +1181,15 @@ class Manager:
             return None
 
     def _builder(self, job: Job, archive, channel: str, name: str, version: str, sha: str | None, marker: dict, source: str,
-                 copy: copies.Copy | None = None, built: dict | None = None, bluetooth: bool = False,
+                 copy: copies.Copy | None = None, built: dict | None = None, access: dict | None = None,
                  on_built=None):
         """``copy``: Repair from the manager's copy, of a release (its files as they are: no archive) or of a git
         instance (its stamped config over the archive of its commit).  ``built``: gets the stamped config written, as
         "config" (what the Supervisor is then checked to report), and the bytes of the files a copy keeps, as "files".
         ``on_built(sha256 of config.yaml)``: called once the folder is built, before it is put in place (the registry
-        records it: _foreign_config)."""
+        records it: _foreign_config).  ``access``: the instance's choices (ACCESS) the definition is stamped with."""
+        chosen = self._access_of(access)
+
         def build(tmp: str) -> dict:
             try:
                 return fill(tmp)
@@ -1153,11 +1207,11 @@ class Manager:
                 for rel, data in sorted(extras.items()):
                     children.write_file(tmp, rel, data)
             elif channel == "release":
-                config = stamp.build_release(archive, tmp, name, version, source, bluetooth)
+                config = stamp.build_release(archive, tmp, name, version, source, **chosen)
                 extras = stamp.app_extras(archive)
             else:
                 config, notes = stamp.build_git(archive, tmp, name, version, sha, source,
-                                                config=copy.config if copy is not None else None, bluetooth=bluetooth)
+                                                config=copy.config if copy is not None else None, **chosen)
                 for note in notes:
                     job.log(note)
             data = stamp.dump(config, source)  # the bytes the builders wrote as config.yaml
@@ -1173,8 +1227,9 @@ class Manager:
         return build
 
     async def _create(self, job: Job, name: str, channel: str, version: str | None, ref: tuple[str, str] | None,
-                      user: str, bluetooth: bool = False) -> dict:
+                      user: str, access: dict | None = None) -> dict:
         slug = names.supervisor_slug(name)
+        access = self._access_of(access)
         job.log(f"checking that {slug} is free")
         apps = await self.sv.list_apps()
         if any(a.get("slug") == slug for a in apps):
@@ -1202,23 +1257,26 @@ class Manager:
         if channel == "git":
             version = names.git_version(sha)
             job.log(f"commit {sha[:12]}: version {version} (testing build)")
+        if access["host_network"]:
+            self._refuse_host_network(channel, version, archive, ref)
         marker = self._marker(name, channel, version, ("tag", f"v{version}") if channel == "release" else ref, sha, source, user,
-                              bluetooth=bluetooth)
-        if bluetooth:
-            job.log("with Bluetooth: the instance gets the host's D-Bus (host_dbus)")
+                              access=access)
+        for chosen, (key, label, what) in ACCESS.items():
+            if access[chosen]:
+                job.log(f"with {label}: the instance gets {what} ({key})")
         job.log(f"writing {names.folder_name(name)}")
         built: dict = {}
         try:
             await asyncio.to_thread(self.registry.put, name, self._registry_entry(marker))
             managed = await asyncio.to_thread(children.write_new, self.root, name,
                                               self._builder(job, archive, channel, name, version, sha, marker, source,
-                                                            built=built, bluetooth=bluetooth,
+                                                            built=built, access=access,
                                                             on_built=self._record_config(name)),
                                               self.registry)
         except WRITE_ERRORS as err:
             await self._undo_registry(job, self._forget, name, marker["instance_id"])
             raise JobFailed(f"the definition was not written: {err}") from None
-        await self._save_copy(job, managed, bluetooth, built["files"])
+        await self._save_copy(job, managed, access, built["files"])
         expected = stamp.expected_view(built["config"], slug)
         installing = False
         try:
@@ -1587,7 +1645,7 @@ class Manager:
         return {"state": info.get("state")}
 
     async def _update(self, job: Job, managed: children.Managed, version: str | None, ref: tuple[str, str] | None,
-                      user: str, bluetooth: bool | None = None) -> dict:
+                      user: str, requested: dict | None = None) -> dict:
         await self._refuse_marked_now(managed.name)
         try:
             info = await self._installed(managed)
@@ -1615,9 +1673,10 @@ class Manager:
         marker = managed.marker
         channel = marker["channel"]
         restamp = False
-        had_bluetooth = managed.entry.get("bluetooth") is True  # the registry's, never the marker's
-        recorded_bt = had_bluetooth
-        requested, bluetooth = bluetooth, had_bluetooth if bluetooth is None else bluetooth
+        recorded_access = self._access_of(managed.entry)  # the registry's, never the marker's
+        had = dict(recorded_access)
+        requested = {a: (requested or {}).get(a) for a in ACCESS}
+        access = {a: had[a] if requested[a] is None else requested[a] for a in ACCESS}
         if channel == "release":
             if version is None:
                 try:
@@ -1634,11 +1693,11 @@ class Manager:
             if (names.parse_version(version) or ()) < (names.parse_version(current) or ()):
                 raise JobFailed(f"{version} is older than {current}: the manager does not downgrade")
             if info.get("version") == version:
-                bluetooth, had_bluetooth = await self._bluetooth_at_same_version(managed.slug, requested, had_bluetooth,
-                                                                                 managed.entry)
+                had = await self._access_at_same_version(managed.slug, requested, had, managed.entry)
+                access = dict(had)
             if version == marker.get("version") and info.get("version") == version:
                 # unchanged only when the record says what the app has: otherwise rewritten to it, and recorded
-                if marker.get("stamp_version") == stamp.STAMP_VERSION and bluetooth == recorded_bt:
+                if marker.get("stamp_version") == stamp.STAMP_VERSION and access == recorded_access:
                     job.log(f"already at {version}")
                     return {"version": version, "unchanged": True}
                 restamp = True
@@ -1654,10 +1713,10 @@ class Manager:
         sha = archive.sha
         if channel == "git":
             if info.get("version") == names.git_version(sha):
-                bluetooth, had_bluetooth = await self._bluetooth_at_same_version(managed.slug, requested, had_bluetooth,
-                                                                                 managed.entry)
+                had = await self._access_at_same_version(managed.slug, requested, had, managed.entry)
+                access = dict(had)
             if sha == marker.get("sha") and info.get("version") == marker.get("version"):
-                if marker.get("stamp_version") == stamp.STAMP_VERSION and bluetooth == recorded_bt:
+                if marker.get("stamp_version") == stamp.STAMP_VERSION and access == recorded_access:
                     job.log(f"the {new_ref[0]} {new_ref[1]} is still {sha[:12]}: nothing to rebuild")
                     return {"version": marker.get("version"), "unchanged": True}
                 restamp = True
@@ -1666,16 +1725,20 @@ class Manager:
                 raise JobFailed(f"commit {sha[:12]} has the same version {version} as the installed {marker.get('sha', '')[:12]}: "
                                 "the Supervisor would not install it")
             job.log(f"commit {sha[:12]}: version {version}")
+        if access["host_network"]:
+            # the version written: the same one again (a restamp) as much as a new one
+            self._refuse_host_network(channel, version, archive, new_ref)
         # before the flag, the new definition and its rollback's store reload: not while a decoy is there
         await self._refuse_decoys()
         new_marker = self._marker(managed.name, channel, version, new_ref, sha, source, user, previous=marker,
-                                  bluetooth=bluetooth)
+                                  access=access)
         recorded = {"tag_moved": None, "tampered": None, "history": self._history(new_marker["history"]),
                     **{k: new_marker[k] for k in ("version", "ref_kind", "ref", "sha", "updated_at", "stamp_version",
-                                                  "created_by", "updated_by", "bluetooth")}}
-        if bluetooth != had_bluetooth:
-            job.log(f"Bluetooth {'on' if bluetooth else 'off'}: {'with' if bluetooth else 'without'} the host's D-Bus "
-                    "(host_dbus), from this version on")
+                                                  "created_by", "updated_by", *ACCESS)}}
+        for chosen, (key, label, what) in ACCESS.items():
+            if access[chosen] != had[chosen]:
+                job.log(f"{label} {'on' if access[chosen] else 'off'}: {'with' if access[chosen] else 'without'} "
+                        f"{what} ({key}), from this version on")
         # before the swap: a manager killed before the update is recorded finds the flag at its next start, and puts the
         # previous definition back (children.cleanup_stale)
         try:
@@ -1694,7 +1757,7 @@ class Manager:
         try:
             replacement = await asyncio.to_thread(
                 children.replace, managed, self._builder(job, archive, channel, managed.name, version, sha, new_marker, source,
-                                                         built=built, bluetooth=bluetooth, on_built=record_config))
+                                                         built=built, access=access, on_built=record_config))
         except WRITE_ERRORS as err:
             await self._clear_updating(managed.name)
             raise JobFailed(f"the definition was not written: {err}") from None
@@ -1739,7 +1802,7 @@ class Manager:
         except Exception as err:
             if sent:
                 await self._after_failed_update(job, managed, replacement, version, recorded, err, verified,
-                                                built["files"], bluetooth)
+                                                built["files"], access)
             job.log(f"{err}: putting the previous definition back")
             await self._rollback_update(job, replacement)
             if isinstance(err, (SupervisorError, NotAllowed)):
@@ -1763,7 +1826,7 @@ class Manager:
         if warning:
             job.log(f"warning: {warning}")
             _LOGGER.warning("%s: %s", managed.name, warning)
-        await self._save_copy(job, managed, bluetooth, built["files"])
+        await self._save_copy(job, managed, access, built["files"])
         if missing or unsearched:  # updated and recorded, as far as the manager can tell: stopped and marked, kept
             raise await self._hold(job, managed, missing, reason=unsearched)
         if restamp:
@@ -1776,7 +1839,7 @@ class Manager:
 
     async def _after_failed_update(self, job: Job, managed: children.Managed, replacement: children.Replacement,
                                    version: str, recorded: dict, err: Exception, verified: bool,
-                                   files: dict[str, bytes], bluetooth: bool) -> None:
+                                   files: dict[str, bytes], access: dict) -> None:
         """An update call that failed after it was sent: what the Supervisor has now decides.  Installed all the same:
         the new definition stays and is recorded (marked to be checked unless it was), never the previous one put
         back (the Supervisor would offer a downgrade).  Not known yet (no answer, or no clean refusal): both stay for
@@ -1795,7 +1858,7 @@ class Manager:
                 await asyncio.to_thread(replacement.commit)
             except (RegistryError, OSError) as err2:
                 job.log(f"warning: {err2}; the next start records it")
-            await self._save_copy(job, managed, bluetooth, files)
+            await self._save_copy(job, managed, access, files)
             raise JobFailed(f"{err}. The Supervisor has installed {version} all the same: its new definition stays and "
                             "is recorded" + ("" if verified else "; the manager has not checked it yet: Check again "
                                                                "on its row")) from None
@@ -1804,45 +1867,52 @@ class Manager:
                             "stay, and the manager's next start keeps the new one if it did, or puts the previous one "
                             "back") from None
 
-    async def _installed_bluetooth(self, slug: str, recorded: bool) -> bool:
-        """Whether the installed app has the host's D-Bus, as the Supervisor reports it (``recorded``, the registry's,
-        when it does not): what a definition of the installed version must say, the registry's record lagging or not."""
+    async def _installed_access(self, slug: str, recorded: dict[str, bool]) -> dict[str, bool]:
+        """Each access (ACCESS) the installed app has, as the Supervisor reports it (its host_dbus, host_network; the
+        registry's ``recorded`` when it does not): what a definition of the installed version must say, the registry's
+        record lagging or not."""
         try:
-            installed = (await self.sv.app_definition(slug)).get("host_dbus")
+            definition = await self.sv.app_definition(slug)
         except (SupervisorError, NotAllowed) as err:
             raise JobFailed(str(err)) from None
-        return installed if isinstance(installed, bool) else recorded
+        return {access: definition[key] if isinstance(definition.get(key), bool) else recorded[access]
+                for access, (key, _, _) in ACCESS.items()}
 
     @staticmethod
-    def _bluetooth_confirmed(entry: dict | None, installed: bool, requested: bool | None) -> bool:
-        """Whether ``installed`` (the app's host_dbus) may be recorded as the instance's Bluetooth where the registry
-        says the other: the admin chose it (``requested``), or the manager made that change itself, in an update whose
-        record is late (the registry's ``updating`` flag names it)."""
+    def _access_confirmed(entry: dict | None, access: str, installed: bool, requested: bool | None) -> bool:
+        """Whether ``installed`` (what the app has of ``access``) may be recorded as the instance's choice where the
+        registry says the other: the admin chose it (``requested``), or the manager made that change itself, in an
+        update whose record is late (the registry's ``updating`` flag names it)."""
         if requested is not None:
             return requested is installed
         flag = (entry or {}).get("updating")
         fields = flag.get("fields") if isinstance(flag, dict) and isinstance(flag.get("fields"), dict) else {}
-        return fields.get("bluetooth") is installed
+        return fields.get(access) is installed
 
     @staticmethod
-    def _bluetooth_not_chosen(slug: str, installed: bool, detached: bool = False) -> str:
-        return BLUETOOTH_NOT_CHOSEN.format(
-            slug=slug, has="has" if installed else "does not have", record="off" if installed else "on",
-            what=BLUETOOTH_CHOOSE_DETACHED if detached else BLUETOOTH_CHOOSE.format(state="on" if installed else "off"))
+    def _access_not_chosen(slug: str, access: str, installed: bool, detached: bool = False) -> str:
+        _, label, what = ACCESS[access]
+        return NOT_CHOSEN.format(
+            slug=slug, has="has" if installed else "does not have", what=what, label=label,
+            record="off" if installed else "on",
+            choose=CHOOSE_DETACHED.format(label=label) if detached
+            else CHOOSE.format(label=label, state="on" if installed else "off"))
 
-    async def _bluetooth_at_same_version(self, slug: str, requested: bool | None, recorded: bool,
-                                         entry: dict | None) -> tuple[bool, bool]:
-        """(Bluetooth to write, Bluetooth the app has) when the installed app is already at the version being written
-        (a catch-up after an update the manager stopped waiting for, or a restamp): the Supervisor applies nothing then,
-        so the definition takes what the app has (its host_dbus, as it reports it), and a request for the other is
-        refused (BLUETOOTH_NEEDS_VERSION).  What the app has, when the registry says otherwise, only as the admin's
-        choice or the manager's own change (_bluetooth_confirmed)."""
-        installed = await self._installed_bluetooth(slug, recorded)
-        if requested is not None and requested != installed:
-            raise JobFailed(BLUETOOTH_NEEDS_VERSION.format(state="on" if requested else "off"))
-        if installed != recorded and not self._bluetooth_confirmed(entry, installed, requested):
-            raise JobFailed(self._bluetooth_not_chosen(slug, installed))
-        return installed, installed
+    async def _access_at_same_version(self, slug: str, requested: dict[str, bool | None], recorded: dict[str, bool],
+                                      entry: dict | None) -> dict[str, bool]:
+        """Each access to write when the installed app is already at the version being written (a catch-up after an
+        update the manager stopped waiting for, or a restamp): the Supervisor applies nothing then, so the definition
+        takes what the app has (its host_dbus and host_network, as it reports them), and a request for the other is
+        refused (NEEDS_VERSION).  What the app has, when the registry says otherwise, only as the admin's choice or
+        the manager's own change (_access_confirmed)."""
+        installed = await self._installed_access(slug, recorded)
+        for access, (_, label, what) in ACCESS.items():
+            want = requested.get(access)
+            if want is not None and want != installed[access]:
+                raise JobFailed(NEEDS_VERSION.format(label=label, what=what, state="on" if want else "off"))
+            if installed[access] != recorded[access] and not self._access_confirmed(entry, access, installed[access], want):
+                raise JobFailed(self._access_not_chosen(slug, access, installed[access]))
+        return installed
 
     async def _clear_updating(self, name: str) -> None:
         try:
@@ -1875,43 +1945,51 @@ class Manager:
             if manifest.get("config.yaml", "").split(" ")[0] != "sha256:" + hashlib.sha256(raw).hexdigest():
                 raise copies.CopyError("its config.yaml changed while it was read")
             config = copies.check(yaml.safe_load(raw.decode("utf-8")), managed.name, str(managed.marker.get("version")),
-                                  managed.entry.get("channel"), managed.entry.get("bluetooth") is True)
+                                  managed.entry.get("channel"), **self._access_of(managed.entry))
         except (copies.CopyError, OSError, UnicodeDecodeError, yaml.YAMLError, RecursionError) as err:
             raise JobFailed(f"{names.folder_name(managed.name)} is not a definition this manager writes ({str(err)[:300]}): not "
                             "installed; Delete removes it") from None
         return stamp.expected_view(config, managed.slug), manifest
 
-    async def _follow_bluetooth(self, job: Job, managed: children.Managed, bluetooth: bool) -> children.Managed:
-        """The installed app has ``bluetooth`` (host_dbus), the registry's record and the definition the other: the
-        definition's config.yaml is stamped again with it (checked first as this manager writes it, then replaced at
-        once), and the marker, the registry and the copy in /data record it.  The Managed read again."""
-        job.log(f"Bluetooth: the installed app {'has' if bluetooth else 'does not have'} the host's D-Bus, the manager's "
-                "record said otherwise: the definition follows the app, and the record too")
-        recorded = not bluetooth
+    async def _follow_access(self, job: Job, managed: children.Managed, installed: dict[str, bool]) -> children.Managed:
+        """The installed app has ``installed`` (host_dbus, host_network), the registry's record and the definition
+        something else: the definition's config.yaml is stamped again with it (checked first as this manager writes
+        it, then replaced at once), and the marker, the registry and the copy in /data record it.  The Managed read
+        again.  Never to Host network off (FOLLOW_HOST_NETWORK_OFF): HRI's own ingress_port is not in the stamped
+        definition."""
+        recorded = self._access_of(managed.entry)
+        if recorded["host_network"] and not installed["host_network"]:
+            raise JobFailed(FOLLOW_HOST_NETWORK_OFF.format(slug=managed.slug, choose=CHOOSE.format(
+                label=ACCESS["host_network"][1], state="off")))
+        for access, (_, label, what) in ACCESS.items():
+            if installed[access] != recorded[access]:
+                job.log(f"{label}: the installed app {'has' if installed[access] else 'does not have'} {what}, the "
+                        "manager's record said otherwise: the definition follows the app, and the record too")
         folder = children.child_path(self.root, managed.name)
         channel, version = managed.entry.get("channel"), str(managed.marker.get("version"))
 
         def rewrite() -> dict[str, bytes]:
             raw = children.read_file(folder, "config.yaml")
-            config = copies.check(yaml.safe_load(raw.decode("utf-8")), managed.name, version, channel, recorded)
-            template = {k: v for k, v in config.items() if k != "host_dbus"}
-            new = stamp.stamp({**template, "slug": names.HRI_SLUG}, managed.name, version, channel, bluetooth)
+            config = copies.check(yaml.safe_load(raw.decode("utf-8")), managed.name, version, channel, **recorded)
+            # the keys stamping adds for an access; ingress_port stays (stamping writes 0 again for Host network)
+            template = {k: v for k, v in config.items() if k not in ("host_dbus", "host_network")}
+            new = stamp.stamp({**template, "slug": names.HRI_SLUG}, managed.name, version, channel, **installed)
             data = stamp.dump(new, managed.marker["template_source"])
-            previous = {k: managed.entry.get(k) for k in ("bluetooth", "config_sha256")}
+            previous = {k: managed.entry.get(k) for k in (*ACCESS, "config_sha256")}
             # the record first: when the registry cannot be written, the definition stays as it was (a definition and
             # a record that disagree refuse every later check of it)
-            self.registry.update(managed.name, bluetooth=bluetooth, config_sha256=hashlib.sha256(data).hexdigest())
+            self.registry.update(managed.name, **installed, config_sha256=hashlib.sha256(data).hexdigest())
             try:
                 children.replace_file(folder, "config.yaml", data)
-                children.replace_file(folder, children.MARKER,
-                                      children.marker_bytes({**managed.marker, "bluetooth": bluetooth}))
+                children.replace_file(folder, children.MARKER, children.marker_bytes({**managed.marker, **installed}))
             except BaseException:
                 try:  # both back as they were
                     children.replace_file(folder, "config.yaml", raw)
                     children.replace_file(folder, children.MARKER, children.marker_bytes(managed.marker))
                     self.registry.update(managed.name, **previous)
                 except (OSError, children.UnsafePath, RegistryError) as err:
-                    _LOGGER.error("%s: its definition and its record of Bluetooth may disagree now: %s", managed.name, err)
+                    _LOGGER.error("%s: its definition and its record of its access to the host may disagree now: %s",
+                                  managed.name, err)
                 raise
             try:
                 kept = copies.read_definition(copies.folder(self.copies_root, managed.name), channel)
@@ -1924,8 +2002,9 @@ class Manager:
             managed = await asyncio.to_thread(children.load_managed, self.root, managed.name, self.registry)
         except (copies.CopyError, children.UnsafePath, children.NotManaged, stamp.TemplateError, RegistryError, OSError,
                 UnicodeDecodeError, yaml.YAMLError, RecursionError) as err:
-            raise JobFailed(f"{names.folder_name(managed.name)} could not follow the installed app's Bluetooth: {err}") from None
-        await self._save_copy(job, managed, bluetooth, files)
+            raise JobFailed(f"{names.folder_name(managed.name)} could not follow the installed app's access to the host: "
+                            f"{err}") from None
+        await self._save_copy(job, managed, installed, files)
         return managed
 
     async def _setup(self, job: Job, managed: children.Managed, install: bool) -> dict:
@@ -1953,11 +2032,14 @@ class Manager:
                 # installed by a create the manager did not finish: taken over only once checked against its folder,
                 # and never started while a decoy the store may take is there
                 await self._refuse_decoys()
-                recorded = managed.entry.get("bluetooth") is True
-                if await self._installed_bluetooth(managed.slug, recorded) != recorded:
-                    if not self._bluetooth_confirmed(managed.entry, not recorded, None):
-                        raise JobFailed(self._bluetooth_not_chosen(managed.slug, not recorded))
-                    managed = await self._follow_bluetooth(job, managed, not recorded)
+                recorded = self._access_of(managed.entry)
+                installed_access = await self._installed_access(managed.slug, recorded)
+                if installed_access != recorded:
+                    for access in ACCESS:
+                        if (installed_access[access] != recorded[access]
+                                and not self._access_confirmed(managed.entry, access, installed_access[access], None)):
+                            raise JobFailed(self._access_not_chosen(managed.slug, access, installed_access[access]))
+                    managed = await self._follow_access(job, managed, installed_access)
                 expected, manifest = await asyncio.to_thread(self._definition_on_disk, managed)
                 await self._check_tree(managed.slug, manifest)
                 missing = await self._verify_installed(job, managed, expected)
@@ -2076,16 +2158,20 @@ class Manager:
                 raise NeedsAttention(f"the manager's registry has no usable branch or tag for {name}: {err}") from None
         else:
             ref = ("tag", f"v{version}")
-        # the definition of the installed version says what the installed app has: its host_dbus, when the registry's
-        # Bluetooth record lags behind a change the manager made (an update recorded late); any other difference is
-        # not recorded without the admin (an older /data restored, or the Supervisor's own Update of a changed folder)
-        bluetooth = await self._installed_bluetooth(slug, entry.get("bluetooth") is True)
-        if bluetooth != (entry.get("bluetooth") is True):
-            if not self._bluetooth_confirmed(entry, bluetooth, None):
-                raise NeedsAttention(self._bluetooth_not_chosen(slug, bluetooth, detached=True))
-            job.log(f"Bluetooth: the installed app {'has' if bluetooth else 'does not have'} the host's D-Bus, the "
+        # the definition of the installed version says what the installed app has: its host_dbus and host_network,
+        # when the registry's record lags behind a change the manager made (an update recorded late); any other
+        # difference is not recorded without the admin (an older /data restored, or the Supervisor's own Update of a
+        # changed folder).  Written from HRI's template (or a copy stamped alike), so Host network off gets HRI's port
+        recorded_access = self._access_of(entry)
+        installed_access = await self._installed_access(slug, recorded_access)
+        for access, (_, label, what) in ACCESS.items():
+            if installed_access[access] == recorded_access[access]:
+                continue
+            if not self._access_confirmed(entry, access, installed_access[access], None):
+                raise NeedsAttention(self._access_not_chosen(slug, access, installed_access[access], detached=True))
+            job.log(f"{label}: the installed app {'has' if installed_access[access] else 'does not have'} {what}, the "
                     "manager's record said otherwise: the definition follows the app, and the record too")
-            entry = {**entry, "bluetooth": bluetooth}
+        entry = {**entry, **installed_access}
         # the manager's own copy of the definition first: a release needs nothing from GitHub, a git instance only the
         # source of its installed commit
         copy = await self._usable_copy(job, name, entry, version)
@@ -2135,9 +2221,9 @@ class Manager:
                               sha: str | None, source: str, archive, copy: copies.Copy | None, user: str,
                               event: str = "repaired") -> dict:
         slug = names.supervisor_slug(name)
-        bluetooth = entry.get("bluetooth") is True
+        access = self._access_of(entry)
         marker = self._marker(name, channel, version, ref, sha, source, user, instance_id=entry.get("instance_id"),
-                              bluetooth=bluetooth)
+                              access=access)
         if copy is not None and isinstance(copy.meta.get("stamp_version"), int):
             marker["stamp_version"] = copy.meta["stamp_version"]  # the copy's config, as that manager stamped it
         marker["repaired_at"] = marker["updated_at"]
@@ -2161,13 +2247,13 @@ class Manager:
             managed = await asyncio.to_thread(
                 children.write_new, self.root, name,
                 self._builder(job, archive, channel, name, version, sha, marker, source, copy=copy, built=built,
-                              bluetooth=bluetooth, on_built=self._record_config(name)),
+                              access=access, on_built=self._record_config(name)),
                 self.registry)
         except WRITE_ERRORS as err:
             await self._undo_registry(job, self._restore_entry, name, entry, marker["instance_id"])
             raise JobFailed(f"the definition was not written: {err}") from None
         self._clear_auto(name, keep_job=job.id)  # an automatic repair's own note stays: it succeeded
-        await self._save_copy(job, managed, bluetooth, built["files"])
+        await self._save_copy(job, managed, access, built["files"])
         await self._wait_store(job, slug, version, managed.manifest)
         # the app keeps running as the Supervisor installed it: taken over only once it reports the definition written
         try:
@@ -2186,7 +2272,7 @@ class Manager:
         return {"slug": slug, "version": version}
 
     async def _update_detached(self, job: Job, name: str, version: str | None, ref: tuple[str, str] | None,
-                               user: str, bluetooth: bool | None = None) -> dict:
+                               user: str, requested: dict | None = None) -> dict:
         """Update (release) or Rebuild (git) of an instance whose definition is gone and could not be written again at
         its installed version: the definition of a NEWER version, written and installed in one job the user asked
         for.  If the update does not succeed the definition is removed again (the instance stays detached)."""
@@ -2197,10 +2283,11 @@ class Manager:
         entry, info = await self._detached(job, name, "update")
         installed = str(info.get("version") or "")
         channel = entry.get("channel")
-        # the registry's choice: the default for a newer version (never what the installed app has, which the manager
-        # may not have made); at the installed version only the app's, as the admin's choice (_bluetooth_at_same_version)
-        recorded_bt = entry.get("bluetooth") is True
-        requested, bluetooth = bluetooth, recorded_bt if bluetooth is None else bluetooth
+        # the registry's choices: the default for a newer version (never what the installed app has, which the manager
+        # may not have made); at the installed version only the app's, as the admin's choice (_access_at_same_version)
+        recorded = self._access_of(entry)
+        requested = {a: (requested or {}).get(a) for a in ACCESS}
+        access = {a: recorded[a] if requested[a] is None else requested[a] for a in ACCESS}
         if channel == "release":
             if version is None:
                 try:
@@ -2226,14 +2313,16 @@ class Manager:
             if version == installed:
                 if not isinstance(entry.get("needs_attention"), dict):
                     raise JobFailed(f"the {new_ref[0]} {new_ref[1]} is at the installed commit: Repair writes its definition")
-                bluetooth, _ = await self._bluetooth_at_same_version(slug, requested, recorded_bt, entry)
-                return await self._adopt_installed_commit(job, name, {**entry, "bluetooth": bluetooth}, info, new_ref,
+                access = await self._access_at_same_version(slug, requested, recorded, entry)
+                return await self._adopt_installed_commit(job, name, {**entry, **access}, info, new_ref,
                                                           archive, source, user)
+        if access["host_network"]:
+            self._refuse_host_network(channel, version, archive, new_ref)
         sha = archive.sha
         # the registry's entry as the previous marker (the folder is gone): who created it, its history, this update
         marker = self._marker(name, channel, version, new_ref, sha, source, user,
                               previous={**entry, "history": self._history(entry.get("history"))},
-                              instance_id=entry.get("instance_id"), bluetooth=bluetooth)
+                              instance_id=entry.get("instance_id"), access=access)
         marker["created_at"] = entry.get("created_at") or marker["created_at"]
         job.log(f"writing {names.folder_name(name)} for {version} (installed: {installed}), then updating")
         built: dict = {}
@@ -2242,7 +2331,7 @@ class Manager:
                                     self._registry_entry(marker, setup_complete=entry.get("setup_complete", True)))
             managed = await asyncio.to_thread(
                 children.write_new, self.root, name,
-                self._builder(job, archive, channel, name, version, sha, marker, source, built=built, bluetooth=bluetooth,
+                self._builder(job, archive, channel, name, version, sha, marker, source, built=built, access=access,
                               on_built=self._record_config(name)),
                 self.registry)
         except WRITE_ERRORS as err:
@@ -2276,7 +2365,7 @@ class Manager:
                 raise JobFailed(str(err)) from None
             raise
         self._clear_auto(name)
-        await self._save_copy(job, managed, bluetooth, built["files"])
+        await self._save_copy(job, managed, access, built["files"])
         if missing or unsearched:
             raise await self._hold(job, managed, missing, reason=unsearched)
         return {"version": version, "state": after.get("state")}

@@ -11,7 +11,8 @@ supervisord) and runs what the Supervisor runs when it reads an app:
     default options.  Any warning logged fails, and so does a key the schema drops (it drops unknown keys silently);
   - the same for an instance stamped (hrimgr.stamp) from HRI's app template, the fixtures of v0.25.0 and v0.25.2
     (backup_pre / backup_post, and HRI's own backups kept in a Home Assistant backup), on both channels (a release keeps the image, a git build has none and a 0.0.0-<sha> version), and for one with Bluetooth
-    (host_dbus kept, and no other access to the host);
+    (host_dbus kept, and no other access to the host) and one with Host network (host_network kept, ingress_port 0,
+    the Supervisor's dynamic port, accepted by its schema, and nothing else changed);
   - App._is_excluded_by_filter over the instance's folder as the Supervisor names it (local_hri_<name>): every path
     HRI's own backup_exclude leaves out of its folder (<repo>_hass_remote_integration) is left out of the
     instance's, and what HRI keeps is kept;
@@ -243,6 +244,19 @@ class Check:
             changed = sorted(k for k in set(with_bt) | set(without or {}) if with_bt.get(k) != (without or {}).get(k))
             self.section("with Bluetooth: host_dbus true, and nothing else changes",
                          [] if with_bt.get("host_dbus") is True and changed == ["host_dbus"] else [f"differs in {changed}"])
+        for fixture in ("hri_v0.25.0", "hri_v0.25.2"):
+            template = stamp.parse_template((FIXTURES / fixture / "app_config.yaml").read_bytes())
+            base = f"instance 'garage' from {fixture}"
+            label = f"{base} with Host network"
+            with_hn = self.validate(f"{label} against SCHEMA_APP_CONFIG", yaml.safe_load(stamp.dump(
+                stamp.stamp(template, "garage", "0.26.0", "release", host_network=True), "check")))
+            without = self.validate(f"{base} without Host network (for comparison)", yaml.safe_load(stamp.dump(
+                stamp.stamp(template, "garage", "0.26.0", "release"), "check")))
+            if with_hn is not None and without is not None:
+                changed = sorted(k for k in set(with_hn) | set(without) if with_hn.get(k) != without.get(k))
+                self.section(f"{label}: host_network true, ingress_port 0, and nothing else changes",
+                             [] if (with_hn.get("host_network"), with_hn.get("ingress_port")) == (True, 0)
+                             and changed == ["host_network", "ingress_port"] else [f"differs in {changed}"])
         return 1 if self.failed else 0
 
     def template_sections(self, fixture_label: str, fixture: pathlib.Path, disposable: tuple[str, ...],
