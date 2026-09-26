@@ -1,5 +1,7 @@
-# pinned by digest: a rebuild gets the same base; Dependabot proposes the updates.  The Supervisor builds this on the
-# device (no image: in config.yaml) and passes BUILD_ARCH and BUILD_VERSION, which this file does not need
+# pinned by digest (a multi-arch index: amd64 and arm64 among its platforms): a rebuild gets the same base;
+# Dependabot proposes the updates.  Built for amd64 and arm64 by the Image workflow and pushed to ghcr.io; the
+# Supervisor builds it on the device instead while config.yaml has no image: line, and passes BUILD_ARCH and
+# BUILD_VERSION, which this file does not need
 FROM python:3.14-alpine@sha256:9e9fde4d32eedce0b661d9ab91e826b62dddf28e928c230ec55f1866cac66b01
 
 ENV PYTHONUNBUFFERED=1 \

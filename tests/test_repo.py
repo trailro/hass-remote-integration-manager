@@ -8,7 +8,7 @@ import unittest
 
 import yaml
 
-from hrimgr import VERSION, settings, stamp
+from hrimgr import VERSION, names, settings, stamp
 
 from . import APP_DIR, ROOT
 
@@ -29,8 +29,10 @@ class AppConfigTest(unittest.TestCase):
 
     def test_config(self):
         self.assertEqual(CONFIG["slug"], "hri_manager")
-        self.assertEqual(CONFIG["version"], VERSION)
-        self.assertNotIn("image", CONFIG)  # built on the device in 0.1.0
+        # the version, and the image: line, are the Image workflow's app-version job's to write, after the image of
+        # that version is pushed (tests/test_image_workflow.py): never ahead of the code, and only this image
+        self.assertLessEqual(names.parse_version(CONFIG["version"]), names.parse_version(VERSION))
+        self.assertIn(CONFIG.get("image"), (None, "ghcr.io/trailro/hass-remote-integration-manager"))
         self.assertEqual((CONFIG["hassio_api"], CONFIG["hassio_role"]), (True, "manager"))
         self.assertEqual(CONFIG["map"], [{"type": "local_apps", "read_only": False}])
         self.assertTrue(CONFIG["ingress"])

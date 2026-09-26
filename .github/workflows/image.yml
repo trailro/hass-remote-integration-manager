@@ -1,0 +1,189 @@
+name: Image
+
+# Publishes the manager's image for amd64 and arm64 to GitHub Container Registry, ghcr.io/<owner>/<repo>:
+# :<version>, :<major>.<minor> when it is the highest stable release of that series, and :latest when a published,
+# non-prerelease release carries the highest stable tag.  Runs when a release is published; "Run workflow" publishes
+# an existing tag again (after a registry cleanup, say) and never moves :latest.
+#
+# Home Assistant offers an app's update as soon as hri_manager/config.yaml on the default branch names a new
+# version, and then pulls that version's image.  So the version, and the image: line itself, are written by the
+# app-version job below and only there: after this run pushed the image and an anonymous pull of it works.  A release
+# never touches them (CLAUDE.md, Release checklist).  Until the first image exists the file has no image: line and
+# the Supervisor builds the folder on the device, as 0.1.0 did.
+on:
+  release:
+    types: [published, released]  # released: a pre-release promoted to a full release
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to publish (e.g. v0.1.1)"
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: image-${{ github.event.release.tag_name || inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  image:
+    name: Build and push
+    # a stable release fires both published and released: it is built once, on released; a pre-release is built on
+    # published, and again (then possibly as :latest) on released when it is promoted
+    if: github.event_name != 'release' || github.event.action == 'released' || github.event.release.prerelease
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+    env:
+      TAG: ${{ github.event.release.tag_name || inputs.tag }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          ref: ${{ env.TAG }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: The tag's code is that version
+        # the image of vX.Y.Z runs the manager X.Y.Z: its page and log say so
+        run: |
+          code=$(sed -nE 's/^VERSION = "([^"]*)"$/\1/p' hri_manager/hrimgr/__init__.py)
+          if [ "v$code" != "$TAG" ]; then
+            echo "::error::$TAG, but hri_manager/hrimgr/__init__.py says $code"
+            exit 1
+          fi
+      - id: latest
+        name: Is this the newest stable release, and the newest of its X.Y series?
+        # from the releases, not from the event or the tags: a manual run knows nothing of the release it builds, and a
+        # pre-release can carry a plain vX.Y.Z tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          stable=$(gh release list --repo "$GITHUB_REPOSITORY" --limit 1000 --json tagName,isPrerelease,isDraft \
+            | python3 -c 'import json, re, sys; print("\n".join(r["tagName"] for r in json.load(sys.stdin) if not r["isPrerelease"] and not r["isDraft"] and re.fullmatch(r"v\d+\.\d+\.\d+", r["tagName"])))' \
+            | sort -V)
+          newest=$(printf '%s\n' "$stable" | tail -n1)
+          series=$(printf '%s\n' "$stable" | { grep -F "${TAG%.*}." || true; } | tail -n1)
+          if [ "$GITHUB_EVENT_NAME" = release ] && [ "$TAG" = "$newest" ]; then
+            echo "enable=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enable=false" >> "$GITHUB_OUTPUT"
+          fi
+          if [ -n "$series" ] && [ "$TAG" = "$series" ]; then
+            echo "minor=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "minor=false" >> "$GITHUB_OUTPUT"
+          fi
+          echo "tag $TAG, newest stable $newest, newest of ${TAG%.*}: ${series:-none}"
+          cat "$GITHUB_OUTPUT"
+      - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1  # v4.4.0
+      - uses: docker/setup-buildx-action@594f3bf4285d9ea8dc53c9a0c9c4092420091003  # v4.4.0
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f  # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302  # v6.2.0
+        with:
+          images: ghcr.io/${{ github.repository }}
+          context: git   # labels from the checked-out tag, not from the default branch of a manual run
+          flavor: latest=false
+          tags: |
+            type=semver,pattern={{version}},value=${{ env.TAG }}
+            type=semver,pattern={{major}}.{{minor}},value=${{ env.TAG }},enable=${{ steps.latest.outputs.minor }}
+            type=raw,value=latest,enable=${{ steps.latest.outputs.enable }}
+      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc  # v7.4.0
+        with:
+          # the app's folder, as the Supervisor builds it on the device
+          context: hri_manager
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=image
+          cache-to: type=gha,mode=max,scope=image
+
+  app-version:
+    # the version and the image: line move here, after the image is pushed and pullable, never in the release PR (the
+    # update would be offered before the image could be pulled).  Newest stable releases only
+    name: App version on the default branch
+    needs: image
+    if: needs.image.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write   # the one commit below
+    env:
+      TAG: ${{ github.event.release.tag_name || inputs.tag }}
+      BRANCH: ${{ github.event.repository.default_branch }}
+      IMAGE: ghcr.io/${{ github.repository }}
+    steps:
+      - name: Anyone can pull the image, for both architectures
+        # as a Supervisor pulls it: anonymously.  A new package on ghcr.io is private until it is made public
+        # (Package settings > Change visibility); until then this fails and the version does not move
+        run: |
+          export DOCKER_CONFIG="$(mktemp -d)"   # no credentials
+          docker manifest inspect "$IMAGE:${TAG#v}" > "$RUNNER_TEMP/manifest.json" || {
+            echo "::error::$IMAGE:${TAG#v} cannot be pulled anonymously: make the package public, then re-run this job"
+            exit 1
+          }
+          python3 - "$RUNNER_TEMP/manifest.json" <<'PY'
+          import json, sys
+          index = json.load(open(sys.argv[1]))
+          found = {f"{m['platform']['os']}/{m['platform']['architecture']}" for m in index.get("manifests", []) if "platform" in m}
+          print("platforms:", ", ".join(sorted(found)))
+          missing = {"linux/amd64", "linux/arm64"} - found
+          if missing:
+              sys.exit(f"::error::no {', '.join(sorted(missing))} image in the pushed index")
+          PY
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          fetch-depth: 0
+      - name: Set hri_manager/config.yaml version and image
+        # the newest stable release from the releases (see the image job); the version is never lowered, and the
+        # image: line is added with the first version that has an image
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          newest=$(gh release list --repo "$GITHUB_REPOSITORY" --limit 1000 --json tagName,isPrerelease,isDraft \
+            | python3 -c 'import json, re, sys; tags = [r["tagName"] for r in json.load(sys.stdin) if not r["isPrerelease"] and not r["isDraft"] and re.fullmatch(r"v\d+\.\d+\.\d+", r["tagName"])]; print(max(tags, key=lambda t: tuple(int(x) for x in t[1:].split("."))) if tags else "")')
+          if [ "$TAG" != "$newest" ]; then
+            echo "tag $TAG is not the newest stable release (${newest:-none}): the app version stays as it is"
+            exit 0
+          fi
+          python3 - "${TAG#v}" "$IMAGE" hri_manager/config.yaml <<'PY'
+          import re, sys
+          version, image, path = sys.argv[1:]
+          with open(path, encoding="utf-8") as fh:
+              text = fh.read()
+          line = re.search(r'^version: "?([^"\n]*)"?$', text, re.M)
+          current = line.group(1)
+          has_image = re.search(r"^image: ", text, re.M) is not None
+          def key(v):
+              m = re.fullmatch(r"(\d+)\.(\d+)\.(\d+)", v)
+              return tuple(int(x) for x in m.groups()) if m else (-1,)
+          if current == version and has_image:
+              print(f"{path} already names {version} and its image")
+              sys.exit(0)
+          if key(current) > key(version):
+              print(f"{path} names {current}, newer than {version}: the app version stays as it is")
+              sys.exit(0)
+          text = text[:line.start()] + f'version: "{version}"' + ("" if has_image else f"\nimage: {image}") + text[line.end():]
+          if has_image:
+              text = re.sub(r"^image: .*$", f"image: {image}", text, count=1, flags=re.M)
+          with open(path, "w", encoding="utf-8") as fh:
+              fh.write(text)
+          print(f"{path}: version {current} -> {version}" + ("" if has_image else f", image {image}"))
+          PY
+          if git diff --quiet -- hri_manager/config.yaml; then
+            exit 0
+          fi
+          git diff --stat
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -q -m "hri_manager: version ${TAG#v}, the image of $TAG is published" -- hri_manager/config.yaml
+          git pull -q --rebase origin "$BRANCH"   # a merge since the checkout
+          git push origin "HEAD:$BRANCH"
