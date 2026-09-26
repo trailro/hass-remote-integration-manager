@@ -292,7 +292,8 @@ update / delete through the page's API and takes screenshots; see its header.
 
 CI runs the unit tests on Python 3.13 and 3.14, the app linter on the manager and on an instance stamped from HRI's
 template, the Supervisor's own schema checks of both (`.github/app_supervisor_check.py`, against a pinned Supervisor
-release) and a build of the image for amd64 and arm64. A published release runs the Image workflow
+release; with its own backup filter over three instances side by side: no venv, HRI backups or logs in any of them,
+their state kept) and a build of the image for amd64 and arm64. A published release runs the Image workflow
 (`.github/workflows/image.yml`): it pushes the image for both architectures to ghcr.io and only then moves the app's
 version on `main` (see `CLAUDE.md`, Release checklist).
 
