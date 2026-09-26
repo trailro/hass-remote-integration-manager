@@ -184,7 +184,8 @@ class Manager:
                        or self._foreign_config(registered.get(name), configs.get(name)))
             if foreign and not entry.get("job"):
                 entry["problem"] = "; ".join(p for p in (entry.get("problem"), foreign) if p)
-                entry["actions"] = ["repair"] + (["stop"] if entry["state"] == "started" else []) + ["delete"]
+                if not isinstance((registered.get(name) or {}).get("tampered"), dict):  # a marked row keeps its own
+                    entry["actions"] = ["repair"] + (["stop"] if entry["state"] == "started" else []) + ["delete"]
                 entry["foreign"] = True
             decoyed = self._decoys_of(found, slug)
             if decoyed and not entry.get("job"):
@@ -391,6 +392,8 @@ class Manager:
             notes = [f"could not ask the Supervisor which apps are installed ({err}): an update that stopped midway is "
                      "left as it is until the next start"]
         notes += await asyncio.to_thread(children.cleanup_stale, self.root, self.registry, installed)
+        notes += [n if n.startswith("could not") else f"the copies in /data: {n}"
+                  for n in await asyncio.to_thread(copies.tidy, self.copies_root)]
         if installed is not None:
             follow, more = await asyncio.to_thread(self._marked_installed, installed)
             notes += more
@@ -1885,6 +1888,7 @@ class Manager:
         no folder, installed, detached after a store reload, no store entry, HRI's url.  JobFailed otherwise, in the
         words of ``action`` (repair, update, delete)."""
         slug = names.supervisor_slug(name)
+        done = {"repair": "repaired", "update": "updated", "delete": "deleted"}.get(action, action)
         try:
             entry = await asyncio.to_thread(self.registry.get, name)
         except RegistryError as err:
@@ -1893,7 +1897,7 @@ class Manager:
             raise JobFailed(f"{name} is not in the manager's registry: not created by this manager, left alone")
         if os.path.lexists(os.path.join(self.root, names.folder_name(name))):
             raise JobFailed(f"{names.folder_name(name)} exists: {name} is not an instance without its definition, so "
-                            f"it is not {action}d this way")
+                            f"it is not {done} this way")
         try:
             if not any(a.get("slug") == slug for a in await self.sv.list_apps()):
                 raise JobFailed(f"{slug} is not installed: nothing to {action}"
@@ -1906,7 +1910,7 @@ class Manager:
                 raise JobFailed(f"{slug} is not detached: a definition of it is in the local apps folder (in another "
                                 f"folder than {names.folder_name(name)}?), so it is not the manager's to {action}: left alone")
             if await self.sv.store_app(slug) is not None:
-                raise JobFailed(f"the Supervisor's store has a definition of {slug}: not {action}d, left alone")
+                raise JobFailed(f"the Supervisor's store has a definition of {slug}: not {done}, left alone")
         except (SupervisorError, NotAllowed) as err:
             raise JobFailed(str(err)) from None
         if info.get("url") != names.HRI_URL:

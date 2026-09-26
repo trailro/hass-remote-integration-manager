@@ -342,6 +342,17 @@ class FlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(os.listdir(env.local_apps), [])
         self.assertTrue(env.registry.get("garage")["interrupted"])
 
+    async def test_the_detached_checks_say_repaired_updated_deleted(self):
+        """C-3: the refusals of an action on a detached instance name the action in plain words."""
+        env = self.env
+        await self.create()
+        for action, word in (("repair", "repaired"), ("update", "updated"), ("delete", "deleted")):
+            with self.subTest(action=action):
+                with self.assertRaises(JobFailed) as ctx:
+                    await env.manager._detached(Job("garage", action, "alice"), "garage", action)
+                self.assertIn(f"so it is not {word} this way", str(ctx.exception))
+                self.assertNotIn(f"{action}d", str(ctx.exception).replace(word, ""))
+
     async def test_a_build_the_builder_refuses_leaves_no_registry_entry(self):
         env = self.env
         for what, patch in (("a second app", mock.patch.object(stamp, "find_configs", return_value=["config.yaml", "docs/config.yaml"])),

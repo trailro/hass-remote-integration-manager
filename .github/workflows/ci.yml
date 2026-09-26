@@ -82,7 +82,9 @@ jobs:
         # its requirements only: "pip install supervisor" would install supervisord
         run: |
           rm -rf _stamped
-          # PyYAML, which the stamping code needs too, at the manager's own pin: a constraint taken from its lock
+          # PyYAML, which the stamping code needs too, at the manager's own pin: a constraint taken from its lock.
+          # Coupled: a Dependabot bump of PyYAML in the lock that the pinned Supervisor's requirements do not allow
+          # fails this install, loudly, until SUPERVISOR_SHA moves to a Supervisor that allows it: move both together
           grep -iE '^pyyaml==' hri_manager/requirements.txt | sed 's/ *\\$//' > "$RUNNER_TEMP/constraints.txt"
           python -m pip install --quiet -r .supervisor/requirements.txt PyYAML -c "$RUNNER_TEMP/constraints.txt"
           python .github/app_supervisor_check.py .supervisor

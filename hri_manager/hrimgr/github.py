@@ -208,6 +208,7 @@ class GitHub:
             raise GitHubError(f"commit {sha[:12]}: {err}") from None
         archive = await asyncio.to_thread(tarsafe.open_archive, data)
         if archive.sha != sha:
+            archive.close()
             raise GitHubError(f"the archive of commit {sha[:12]} names another commit")
         return archive, url
 

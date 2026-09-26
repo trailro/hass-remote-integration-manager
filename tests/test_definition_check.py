@@ -500,6 +500,23 @@ class FlowCheckTest(FlowBase):
                 self.assertIn("is marked", job["error"])
                 self.assertEqual([c for c in env.stub.calls[since:] if c[0] == "POST" and c[1] != "/store/reload"], [])
 
+    async def test_a_marked_row_never_offers_a_repair_it_would_refuse(self):
+        """C-4: a marked instance whose folder also holds a definition the manager did not write keeps the marked
+        row's actions: Repair of a marked instance is refused."""
+        env = self.env
+        self.assertEqual((await self.create())["state"], "succeeded")
+        env.registry.update("garage", tampered={"reason": "contained", "uninstalled": False, "stopped": True,
+                                                "failure": "x"})
+        with open(os.path.join(self.folder(), "config.yaml"), "a", encoding="utf-8") as fh:
+            fh.write("version: 0.25.9\n")
+        await env.sv.reload_store()
+        _, data = await env.get("/api/instances")
+        (row,) = data["instances"]
+        self.assertIn("did not write", row["problem"])
+        self.assertNotIn("repair", row["actions"])
+        status, answer = await env.send("POST", "/api/instances/garage/repair")
+        self.assertEqual(status, 400, answer)
+
     def installed_as(self, **fields):
         """What the Supervisor holds of the installed app, changed behind the manager's back."""
         self.env.stub.installed["local_hri_garage"]["definition"].update(fields)

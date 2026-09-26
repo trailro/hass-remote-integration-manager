@@ -45,6 +45,16 @@ class SettingsTest(unittest.TestCase):
         with open(os.path.join(data, "options.json"), "w") as fh:
             json.dump({"allowed_users": []}, fh)
         self.assertFalse(from_environment(env).allowed_users_unusable)  # empty: every administrator
+        # C-2: the same user twice (or in two spellings of case) is not "blank or not text"
+        with open(os.path.join(data, "options.json"), "w") as fh:
+            json.dump({"allowed_users": ["alice", "Alice ", "", 3]}, fh)
+        with self.assertLogs("hrimgr.settings", "WARNING") as logs:
+            self.assertEqual(from_environment(env).allowed_users, frozenset({"alice"}))
+        self.assertIn("2 of its 4 entries are blank or not text", logs.output[0])
+        with open(os.path.join(data, "options.json"), "w") as fh:
+            json.dump({"allowed_users": ["alice", "alice"]}, fh)
+        with self.assertNoLogs("hrimgr.settings", "WARNING"):
+            from_environment(env)
 
     def test_development_mode_needs_both_variables_and_a_fake_supervisor(self):
         base = {"SUPERVISOR_TOKEN": "t" * 10}

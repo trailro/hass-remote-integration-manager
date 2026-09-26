@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import secrets
 import shutil
 from dataclasses import dataclass, field
@@ -36,9 +35,6 @@ PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
 TMP_PREFIX = ".tmp-"
 OLD_PREFIX = ".old-"
 META_FIELDS = ("name", "instance_id", "channel", "version", "ref_kind", "ref", "sha", "stamp_version", "template_source")
-# a language's translation only (en.yaml, pt-BR.yaml): never translations/config.* (the store would read it as a
-# second app), never another name a writer could plant (options.json)
-_TRANSLATION_RE = re.compile(r"translations/[a-z]{2}(?:-[A-Za-z0-9]{1,8})?\.(?:yaml|yml|json)", re.ASCII)
 
 
 class CopyError(Exception):
@@ -49,7 +45,7 @@ def is_copied(rel: str, channel: str) -> bool:
     """The files a copy holds, by their path in the instance's folder."""
     if rel == "config.yaml":
         return True
-    return channel == "release" and (rel in stamp.APP_FILES or _TRANSLATION_RE.fullmatch(rel) is not None)
+    return channel == "release" and (rel in stamp.APP_FILES or stamp.TRANSLATION_RE.fullmatch(rel) is not None)
 
 
 @dataclass
@@ -158,6 +154,33 @@ def save(root: str, name: str, files: dict[str, bytes], marker: dict, bluetooth:
     if old:
         shutil.rmtree(old, ignore_errors=True)
     return sorted(files)
+
+
+def tidy(root: str) -> list[str]:
+    """What a save stopped midway left in ``root``: a copy being written goes; a previous copy goes too, unless it is
+    the only copy of its instance left (save renames it aside before it renames the new one into place): then it is
+    put back.  What was done."""
+    try:
+        entries = sorted(os.listdir(root))
+    except OSError:
+        return []
+    done = []
+    for entry in entries:
+        prefix = TMP_PREFIX if entry.startswith(TMP_PREFIX) else OLD_PREFIX if entry.startswith(OLD_PREFIX) else None
+        path = os.path.join(root, entry)
+        if prefix is None or os.path.islink(path) or not os.path.isdir(path):
+            continue
+        name = entry[len(prefix):].rpartition("-")[0]
+        try:
+            if prefix == OLD_PREFIX and names.NAME_RE.fullmatch(name) and not os.path.lexists(os.path.join(root, name)):
+                os.rename(path, os.path.join(root, name))
+                done.append(f"put back {entry} as the copy of {name}")
+            else:
+                shutil.rmtree(path)
+                done.append(f"removed {entry}")
+        except OSError as err:
+            done.append(f"could not tidy {entry} in the copies of /data: {err}")
+    return done
 
 
 def names_kept(root: str) -> list[str]:

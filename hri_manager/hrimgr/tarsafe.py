@@ -131,6 +131,17 @@ def open_archive(data: bytes) -> Archive:
 def _open(fileobj) -> Archive:
     try:
         tar = tarfile.open(fileobj=fileobj, mode="r:")
+    except (tarfile.TarError, EOFError, OSError) as err:
+        raise UnsafeArchive(f"not a readable .tar.gz: {err}") from None
+    try:
+        return _checked(tar)
+    except BaseException:
+        tar.close()  # refused: closed now, not left to the garbage collector
+        raise
+
+
+def _checked(tar: tarfile.TarFile) -> Archive:
+    try:
         members = []
         for info in tar:
             members.append(info)

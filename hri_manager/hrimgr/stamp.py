@@ -53,6 +53,10 @@ CONFIG_SUFFIXES = (".yaml", ".yml", ".json")  # what the Supervisor's store read
 # Dockerfile, so without the HRI_BUILD line the manager patches).  A git tree with one at its root is refused
 BUILD_FILES_RE = re.compile(r"apparmor\.txt|build\.(?:yaml|yml|json)|Dockerfile\..+")
 APP_FILES = ("DOCS.md", "CHANGELOG.md", "README.md", "icon.png", "logo.png")
+# a language's translation only (en.yaml, pt-BR.yaml), taken from HRI's app/ and kept in a copy: never
+# translations/config.* (the store would read it as a second app), never another name a writer could plant
+# (options.json)
+TRANSLATION_RE = re.compile(r"translations/[a-z]{2}(?:-[A-Za-z0-9]{1,8})?\.(?:yaml|yml|json)", re.ASCII)
 # HRI's Dockerfile: the commit the image was built from.  The Supervisor passes only BUILD_VERSION and BUILD_ARCH
 # to a build without build.yaml (deprecated), so a git build gets its commit as the argument's default instead
 HRI_BUILD_ARG = re.compile(rb"^ARG HRI_BUILD=local$", re.M)
@@ -304,8 +308,7 @@ def app_extras(archive: tarsafe.Archive) -> dict[str, bytes]:
         if not rel.startswith("app/"):
             continue
         sub = rel[len("app/"):]
-        if sub in APP_FILES or (sub.startswith("translations/") and sub.count("/") == 1
-                                and os.path.splitext(sub)[1] in CONFIG_SUFFIXES):
+        if sub in APP_FILES or TRANSLATION_RE.fullmatch(sub):
             out[sub] = archive.read(rel)
     return out
 

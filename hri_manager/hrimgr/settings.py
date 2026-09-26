@@ -93,8 +93,9 @@ def from_environment(env: dict[str, str] | None = None) -> Settings:
     if not isinstance(users, list):
         users = [users]
     allowed = frozenset(u.strip().casefold() for u in users if isinstance(u, str) and u.strip())
-    if len(allowed) < len(users):
-        _LOGGER.warning("allowed_users: %d of its %d entries are blank or not text and are ignored%s", len(users) - len(allowed),
+    blank = sum(1 for u in users if not (isinstance(u, str) and u.strip()))  # a name given twice is not one
+    if blank:
+        _LOGGER.warning("allowed_users: %d of its %d entries are blank or not text and are ignored%s", blank,
                         len(users), "; none is left, so nobody may use the manager until it is corrected" if not allowed else "")
     gh_token = str(options.get("github_token") or "")
     settings = Settings(
