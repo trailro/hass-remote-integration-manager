@@ -272,6 +272,67 @@ class HostNetworkFlowTest(unittest.IsolatedAsyncioTestCase):
         self.assert_off()
         self.assertIs(self.installed_host_network(), False)
 
+    def snapshot(self, name="garage"):
+        folder = os.path.join(self.env.local_apps, f"hri_{name}")
+        with open(os.path.join(folder, ".hri-manager.json"), "rb") as fh:
+            marker = fh.read()
+        with open(os.path.join(self.env.data, "definitions", name, "config.yaml"), "rb") as fh:
+            copy = fh.read()
+        return self.config(name), marker, copy
+
+    async def test_a_failed_update_that_turns_it_on_or_off_puts_everything_back(self):
+        env = self.env
+        for turn_on in (True, False):
+            with self.subTest(turn_on=turn_on):
+                name = "garage" if turn_on else "attic"
+                await self.create(name, host_network=not turn_on)
+                before = self.snapshot(name)
+                env.stub.fail[("POST", f"/store/addons/local_hri_{name}/update")] = "pull failed"
+                job = await self.update(name, version="0.26.1", host_network=turn_on)
+                self.assertEqual(job["state"], "failed", job)
+                self.assertIn("pull failed", job["error"])
+                self.assertEqual(self.snapshot(name), before)
+                (self.assert_off if turn_on else self.assert_on)(name)
+                entry = env.registry.get(name)
+                self.assertEqual((entry["version"], entry.get("updating")), ("0.26.0", None))
+                self.assertIs(self.installed_host_network(f"local_hri_{name}"), not turn_on)
+                self.assertEqual(sorted(e for e in os.listdir(env.local_apps) if name in e), [f"hri_{name}"])
+
+    async def test_after_a_killed_update_that_was_not_installed_the_next_start_puts_the_previous_one_back(self):
+        """cleanup_stale's "restore": the update that turned Host network on (off) set the flag and swapped the
+        definitions, then the manager was killed while the Supervisor had not installed it."""
+        env = self.env
+        never = asyncio.Event()
+
+        async def hangs(managed):
+            await never.wait()
+
+        for turn_on in (True, False):
+            with self.subTest(turn_on=turn_on):
+                name = "garage" if turn_on else "attic"
+                await self.create(name, host_network=not turn_on)
+                before = self.snapshot(name)
+                with mock.patch.object(type(env.manager), "_rollback_update", new=mock.AsyncMock()), \
+                        mock.patch.object(env.sv, "update", side_effect=hangs):
+                    _, answer = await env.send("POST", f"/api/instances/{name}/update",
+                                               {"version": "0.26.1", "host_network": turn_on})
+                    job = env.manager.jobs.get(answer["job"]["id"])
+                    for _ in range(500):
+                        if any(line["msg"].startswith("updating ") for line in job.lines):
+                            break
+                        await asyncio.sleep(0.01)
+                    job.task.cancel()
+                    await asyncio.gather(job.task, return_exceptions=True)
+                self.assertIs(self.config(name).get("host_network", False), turn_on)  # as the kill left it
+                self.assertIsInstance(env.registry.get(name)["updating"], dict)
+                done = await env.manager.startup()
+                self.assertIn(f"the update of {name} stopped before it was recorded", " ".join(done))
+                self.assertEqual(self.snapshot(name), before)
+                (self.assert_off if turn_on else self.assert_on)(name)
+                entry = env.registry.get(name)
+                self.assertEqual((entry["version"], entry.get("updating")), ("0.26.0", None))
+                self.assertEqual(sorted(e for e in os.listdir(env.local_apps) if name in e), [f"hri_{name}"])
+
     async def test_kept_on_by_an_update_that_does_not_name_it(self):
         await self.create(host_network=True)
         job = await self.update(version="0.26.1", bluetooth=True)
