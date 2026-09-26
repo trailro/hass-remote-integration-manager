@@ -586,8 +586,15 @@ class Manager:
 
     # ------------------------------------------------------------------ jobs
 
-    def create(self, body: dict, user: str) -> Job:
+    async def create(self, body: dict, user: str) -> Job:
         name, channel, version, ref, bluetooth = self.check_create(body)
+        try:
+            pending = self._install_may_finish(await asyncio.to_thread(self.registry.get, name))
+        except RegistryError as err:
+            raise InvalidRequest(str(err)) from None
+        if pending:
+            # a new entry would replace the one the install may still need: it would finish as an app of no instance
+            raise InvalidRequest(f"{name}: {pending}")
         return self.jobs.start(name, "create", user,
                                lambda job: self._create(job, name, channel, version, ref, user, bluetooth))
 
@@ -1092,6 +1099,12 @@ class Manager:
         if os.path.lexists(os.path.join(self.root, names.folder_name(name))):
             raise JobFailed(f"the local apps folder already has {names.folder_name(name)}")
         await self._refuse_decoys()
+        try:
+            pending = self._install_may_finish(await asyncio.to_thread(self.registry.get, name))
+        except RegistryError as err:
+            raise JobFailed(str(err)) from None
+        if pending:
+            raise JobFailed(f"{name}: {pending}")
         await self.sv.reload_store()
         if await self.sv.store_app(slug) is not None:
             raise JobFailed(f"the store already has an app {slug} (another local app uses the slug {names.config_slug(name)})")
@@ -1152,7 +1165,9 @@ class Manager:
             job.log(f"{err}: rolling back")
             # no clean refusal (a timeout, a lost connection, a server error): the Supervisor may be installing still
             unsure = installing and isinstance(err, SupervisorError) and not (err.status and 400 <= err.status < 500)
-            await self._rollback_create(job, managed, interrupted=unsure)
+            left = await self._rollback_create(job, managed, interrupted=unsure)
+            if left:
+                raise JobFailed(f"{err}. {left}") from None
             if unsure:
                 raise JobFailed(f"{err}. The Supervisor may still be installing it: if it finishes, the list shows "
                                 f"{slug} as install interrupted, with Repair") from None
@@ -1376,9 +1391,16 @@ class Manager:
                                  "it (its /config folder is kept) and create it again once you know who changed its "
                                  "definition")
 
-    async def _rollback_create(self, job: Job, managed: children.Managed, interrupted: bool = False) -> None:
+    async def _rollback_create(self, job: Job, managed: children.Managed, interrupted: bool = False) -> str | None:
+        """Undo a create: uninstall it if the Supervisor has it, remove its definition, and forget it, or keep it as
+        install interrupted when the Supervisor may still install it (``interrupted``) or cannot be asked.  None when
+        that was done as it should; otherwise what is left, for the job's message."""
         try:
-            installed = any(a.get("slug") == managed.slug for a in await self.sv.list_apps())
+            installed: bool | None = any(a.get("slug") == managed.slug for a in await self.sv.list_apps())
+        except (SupervisorError, NotAllowed) as err:
+            installed = None
+            job.log(f"whether the Supervisor installed it could not be asked ({err})")
+        try:
             if installed:
                 # remove_config False: a folder of an earlier instance of the same name (deleted with its data kept)
                 # was reused by this install, and a failed create must not take it
@@ -1386,9 +1408,9 @@ class Manager:
                 await self.sv.uninstall(managed, remove_config=False)
             job.log("removing the definition")
             await asyncio.to_thread(children.remove, managed)
-            if interrupted and not installed:
-                # the Supervisor may still be installing what it was asked to: if it finishes, the list shows a
-                # detached app, and the registry says why
+            if installed is None or (interrupted and not installed):
+                # the Supervisor may still be installing what it was asked to (or has, unknown): if it finishes, the
+                # list shows a detached app, and the registry says why
                 await asyncio.to_thread(self.registry.update, managed.name, interrupted=True, setup_complete=False,
                                         interrupted_at=children.now_iso())
             else:
@@ -1397,6 +1419,12 @@ class Manager:
         except Exception as err:  # noqa: BLE001 - the original failure is what the job reports
             job.log(f"rollback incomplete: {err}")
             _LOGGER.error("rollback of %s incomplete: %s", managed.slug, err)
+            return (f"The rollback is incomplete ({err}): {names.folder_name(managed.name)} may still be in the local "
+                    f"apps folder and {managed.slug} installed; the page lists what is left")
+        if installed is None:
+            return (f"The Supervisor could not be asked whether it installed {managed.slug}: its definition was removed, "
+                    "and if the Supervisor installed it, the list shows it as install interrupted, with Repair")
+        return None
 
     async def _installed(self, managed: children.Managed) -> dict:
         info = await self.sv.app_info(managed.slug)
