@@ -257,13 +257,23 @@ class AutoRepairTest(unittest.IsolatedAsyncioTestCase):
         env.stub.refs["main"] = "f" * 40
         await self.restore_without_the_local_apps_folder()
         env.manager.auto_repair_interval = instances.AUTO_REPAIR_INTERVAL
-        await env.get("/api/instances")
-        await self.wait_jobs()
+        with self.assertLogs("hrimgr.instances", level="DEBUG") as logs:
+            await env.get("/api/instances")
+            await self.wait_jobs()
         self.assertFalse(os.path.lexists(self.folder("lab")))
         self.assertNotIn("local_hri_lab", env.stub.store)
         self.assertNotIn("refs/heads/main", env.stub.codeload_paths[-1:])
+        # no retry is promised: not in the log, not as a back-off, not on the row, which shows the reason and actions
+        failed = [r for r in logs.records if "lab" in r.getMessage() and "needs attention" in r.getMessage()]
+        self.assertEqual([r.levelname for r in failed], ["WARNING"], [r.getMessage() for r in logs.records])
+        self.assertFalse([r for r in logs.records if "next try" in r.getMessage()], [r.getMessage() for r in logs.records])
+        self.assertNotIn("lab", env.manager.auto_backoff)
         _, data = await env.get("/api/instances")
-        self.assertTrue(data["instances"][0]["needs_attention"])
+        row = data["instances"][0]
+        self.assertTrue(row["needs_attention"])
+        self.assertIsNone(row["auto_repair"])
+        self.assertIn("cannot be downloaded", row["problem"])
+        self.assertEqual(row["actions"], ["update", "delete", "repair"])
         env.manager._auto_checked -= instances.AUTO_REPAIR_INTERVAL + 1
         await env.get("/api/instances")
         self.assertEqual(len([j for j in env.manager.jobs.recent() if j.action == "repair"]), 1)

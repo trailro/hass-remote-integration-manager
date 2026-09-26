@@ -76,8 +76,9 @@ function channelCell(i) {
 }
 function autoNote(i) {
   // the instance's last automatic repair (a restore left it detached): running, done, or failed and retried
+  // needs attention: never retried automatically; its problem line gives the reason and the actions
   const a = i.auto_repair;
-  if (!a) return '';
+  if (!a || i.needs_attention) return '';
   if (a.state === 'running') return '<span class="problem">installed but detached (a restore without the local apps folder?): its definition is being written again automatically</span>';
   if (a.state === 'succeeded') return `<span class="sub">definition written again automatically at ${esc(a.at)}</span>`;
   const next = a.next_try_in ? `, next try in about ${Math.max(1, Math.round(a.next_try_in / 60))} min` : '';
