@@ -128,6 +128,16 @@ def save(root: str, name: str, instance_folder: str, marker: dict) -> list[str]:
     return sorted(files)
 
 
+def names_kept(root: str) -> list[str]:
+    """The instance names the manager keeps a copy of."""
+    try:
+        entries = os.listdir(root)
+    except OSError:
+        return []
+    return sorted(e for e in entries if not e.startswith(".") and names.NAME_RE.fullmatch(e)
+                  and e not in names.RESERVED and os.path.isdir(os.path.join(root, e)))
+
+
 def remove(root: str, name: str) -> None:
     path = folder(root, name)
     if os.path.islink(path):

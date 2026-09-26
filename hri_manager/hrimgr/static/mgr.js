@@ -111,8 +111,10 @@ async function loadInstances() {
     const note = o.kind === 'published' ? 'the published single app' : o.kind === 'local_build' ? 'a local build of HRI' : o.problem || '';
     const link = o.kind === 'published' || o.kind === 'local_build' ? panelHref({slug: o.slug, ingress_panel: true}) : null;
     return `<tr><td><b>${esc(o.name || o.slug)}</b><span class="sub">${esc(o.slug)}</span></td><td>${o.installed ? stateCell(o) : '—'}</td>`
-      + `<td>${esc(o.version || '')}${o.update_available ? ' <span class="tag acc">update</span>' : ''}</td><td class="mut">${esc(note)}</td><td class="act">${link ? `<a class="btn" href="${esc(link.href)}" target="${link.target}" rel="noopener">Open</a>` : ''}</td></tr>`;
+      + `<td>${esc(o.version || '')}${o.update_available ? ' <span class="tag acc">update</span>' : ''}</td><td class="mut">${esc(note)}</td><td class="act">${link ? `<a class="btn" href="${esc(link.href)}" target="${link.target}" rel="noopener">Open</a>` : ''}`
+      + `${(o.actions || []).includes('forget') ? `<button data-forget="${esc(o.instance)}" class="danger">Forget</button>` : ''}</td></tr>`;
   }).join('');
+  $('#others tbody').querySelectorAll('button[data-forget]').forEach(b => { b.onclick = () => forget(b.dataset.forget); });
   body.querySelectorAll('button[data-act]').forEach(b => { b.onclick = () => act(b.dataset.act, b.dataset.name); });
   body.querySelectorAll('button[data-job]').forEach(b => { b.onclick = () => watch(b.dataset.job); });
 }
@@ -165,6 +167,15 @@ async function act(action, name) {
   } else {
     r = await send('POST', `api/instances/${encodeURIComponent(name)}/${action}`, {});
   }
+  if (!r.ok) { flash(r.error, 'err'); return; }
+  watch(r.job.id);
+  loadInstances();
+}
+
+async function forget(name) {
+  const c = await dialog({title: `Forget ${name}`, text: `${name} is neither installed nor defined. Forget drops the manager's registry entry and its copy of the definition; nothing else is touched.`, ok: 'Forget', danger: true, name});
+  if (!c) return;
+  const r = await send('POST', `api/instances/${encodeURIComponent(name)}/forget`, {confirm: c.confirm});
   if (!r.ok) { flash(r.error, 'err'); return; }
   watch(r.job.id);
   loadInstances();
