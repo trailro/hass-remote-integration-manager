@@ -201,7 +201,10 @@ has moved it to `apps/local` (an upstream issue of the Supervisor, not of this a
   written: the instance is marked **needs attention**, with the reason, and automatic repair leaves it alone. You
   choose: **Update** (a release: a newer release) or **Rebuild** (git: the current commit of its branch or tag),
   which writes that definition and installs it in one step (and removes it again if the update fails); **Delete**; or
-  **Repair** again once the cause is gone. GitHub being unreachable is not such a case: automatic repair tries again.
+  **Repair** again once the cause is gone. A Rebuild onto a branch or tag whose current commit **is** the installed one
+  (a restore brought back another commit than the recorded one) writes that commit's definition, installs nothing,
+  and records that branch or tag and commit, after the same checks as Repair (the commit is on HRI's branch or tag,
+  and is the installed version). GitHub being unreachable is not such a case: automatic repair tries again.
 
 **If the manager's `/data` is lost** (the manager uninstalled with its data, or a restore without the manager's
 backup), its registry and its copies are gone. By design the manager then takes no instance for its own (anyone who

@@ -129,7 +129,8 @@ class Manager:
                     entry.update({k: known.get(k) for k in ("channel", "ref_kind", "ref", "sha")})
                     attention = known.get("needs_attention")
                     if isinstance(attention, dict):
-                        rebuild = "Rebuild writes the current commit of its branch or tag" if known.get("channel") == "git" \
+                        rebuild = ("Rebuild writes the current commit of its branch or tag (when that is the installed "
+                                   "commit, it only writes its definition)") if known.get("channel") == "git" \
                             else "Update writes a newer release"
                         entry["problem"] = (f"needs attention: {str(attention.get('reason'))[:300]}. Nothing was written. "
                                             f"{rebuild} and installs it; Delete uninstalls it; Repair tries again")
@@ -1040,7 +1041,9 @@ class Manager:
             archive, source = await self._fetch(job, "git", None, new_ref)
             version = names.git_version(archive.sha)
             if version == installed:
-                raise JobFailed(f"the {new_ref[0]} {new_ref[1]} is at the installed commit: Repair writes its definition")
+                if not isinstance(entry.get("needs_attention"), dict):
+                    raise JobFailed(f"the {new_ref[0]} {new_ref[1]} is at the installed commit: Repair writes its definition")
+                return await self._adopt_installed_commit(job, name, entry, info, new_ref, archive, source, user)
         sha = archive.sha
         marker = self._marker(name, channel, version, new_ref, sha, source, user, instance_id=entry.get("instance_id"))
         marker["created_at"] = entry.get("created_at") or marker["created_at"]
@@ -1074,6 +1077,27 @@ class Manager:
         self._clear_auto(name)
         await self._save_copy(job, managed)
         return {"version": version, "state": after.get("state")}
+
+    async def _adopt_installed_commit(self, job: Job, name: str, entry: dict, info: dict, ref: tuple[str, str], archive,
+                                      source: str, user: str) -> dict:
+        """Rebuild of an instance that needs attention onto a branch or tag whose head IS the installed commit (a
+        restore brought back another commit than the recorded one, so Repair refuses): the definition of that commit,
+        the installed version, so the Supervisor has nothing to update; the registry then records that ref and commit.
+        Repair's provenance rules hold: the installed app is a git build of that commit's version, and HRI's compare
+        puts the commit on the ref."""
+        sha, version = archive.sha, str(info.get("version") or "")
+        if self.installed_channel(info) != "git" or names.git_version(sha) != version:
+            raise JobFailed(f"the installed {names.supervisor_slug(name)} ({version}) is not a git build of commit "
+                            f"{sha[:12]}")
+        job.log(f"the {ref[0]} {ref[1]} is at {sha[:12]}, the installed commit: checking that it is on HRI's {ref[0]} "
+                f"{ref[1]}, then writing its definition (nothing to update)")
+        try:
+            await self.gh.commit_on_ref(sha, *ref)
+        except NotHRICommit as err:
+            raise JobFailed(f"{err}: not a commit of HRI's {ref[0]} {ref[1]}") from None
+        except GitHubError as err:
+            raise JobFailed(str(err)) from None
+        return await self._write_repaired(job, name, entry, "git", version, ref, sha, source, archive, None, user)
 
     async def _undo_detached(self, job: Job, managed: children.Managed, entry: dict) -> None:
         try:
