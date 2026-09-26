@@ -125,7 +125,10 @@ Before stamping, the manager checks HRI's template against the keys it knows fro
 only HRI's repository, option types without `device`, and so on. A template with any other key (`hassio_role`,
 `full_access`, `docker_api`, `privileged`, `host_network`, `devices`, `apparmor`, `environment`...) or a value
 outside its range is refused, on both channels, with "HRI's app definition has &lt;key&gt;, which this manager version
-does not accept; update the manager". `uart: true` is kept: HRI uses it for serial sticks.
+does not accept; update the manager". `uart: true` is kept: HRI uses it for serial sticks. `backup_pre` and
+`backup_post` (from HRI 0.25.2 on) are kept as HRI wrote them, one line of at most 512 characters each: the Supervisor
+runs them only inside the instance's own container around a backup (`docker exec`), so they can do nothing the
+instance's own image cannot.
 
 ### Bluetooth
 
@@ -221,7 +224,10 @@ What goes and what stays:
 ## Backups
 
 Each instance is an app, so Home Assistant backups include it like any other app: its `/config` folder, minus what
-HRI's `backup_exclude` leaves out (stamped for the instance), and its options.
+HRI's `backup_exclude` leaves out (stamped for the instance), and its options. Instances created from (or updated to)
+HRI 0.25.2 or newer keep HRI's own backups in their Home Assistant backup (earlier templates left them out); the
+instance's `backup_pre` and `backup_post`, HRI's, flag the backup to HRI inside the instance's own container while the
+Supervisor copies the folder.
 
 The instance's **definition** (`hri_<name>/` in the local apps folder) is another matter. On current Supervisors a full
 backup **leaves the local apps folder out**: the backup still names the folder `addons/local`, while the Supervisor

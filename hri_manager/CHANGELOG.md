@@ -13,6 +13,10 @@ Fixes from an external review of 0.1.1, and Bluetooth per instance. Still **expe
 - **Bluetooth, per instance.** A box of the New instance form (and of the Update and Rebuild dialogs, applied with the
   new version) gives the instance the host's D-Bus (`host_dbus: true`) for an integration that talks to Bluetooth
   devices. Off unless chosen; HRI's template can never turn it on. See the README's Bluetooth section.
+- **Ready for HRI 0.25.2.** Its template adds `backup_pre` and `backup_post` (run by the Supervisor inside the
+  instance's own container around a backup), which the manager now accepts as HRI wrote them (one line, at most 512
+  characters); 0.1.1 refused them, so no instance could update to 0.25.2. Instances created from, or updated to, HRI
+  0.25.2 or newer keep HRI's own backups in their Home Assistant backup.
 - **An update killed midway is put back** at the manager's next start (the registry marks an update in progress
   before the swap); only the manager's records failing after a successful update is a warning, not a failure, and the
   next start records it.

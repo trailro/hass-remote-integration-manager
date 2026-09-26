@@ -68,6 +68,10 @@ jobs:
         uses: frenck/action-app-linter@b9cfd1bc62ba60d2c4fc96317b5f7ada5923f4a7  # v2.21.1
         with:
           path: _stamped/git
+      - name: App linter on an instance stamped from HRI 0.25.2's template (backup_pre, backup_post)
+        uses: frenck/action-app-linter@b9cfd1bc62ba60d2c4fc96317b5f7ada5923f4a7  # v2.21.1
+        with:
+          path: _stamped/release-0.25.2
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           repository: home-assistant/supervisor

@@ -1,4 +1,5 @@
-"""Write instances stamped from the HRI fixture, for the app linter: <out>/release and <out>/git.
+"""Write instances stamped from the HRI fixtures, for the app linter: <out>/release and <out>/git (v0.25.0), and
+<out>/release-0.25.2 (v0.25.2: backup_pre / backup_post).
 
     python .github/stamp_children.py <out>
 
@@ -13,18 +14,20 @@ sys.path.insert(0, str(ROOT / "hri_manager"))
 
 from hrimgr import names, stamp  # noqa: E402
 
-FIXTURE = ROOT / "tests" / "fixtures" / "hri_v0.25.0"
+FIXTURES = ROOT / "tests" / "fixtures"
 
 
 def main(out: pathlib.Path) -> int:
-    template = stamp.parse_template((FIXTURE / "app_config.yaml").read_bytes())
-    for channel, version in (("release", "0.25.0"), ("git", names.git_version("0123456789abcdef0123456789abcdef01234567"))):
-        folder = out / channel
+    git = names.git_version("0123456789abcdef0123456789abcdef01234567")
+    for name, fixture, channel, version in (("release", "hri_v0.25.0", "release", "0.25.0"), ("git", "hri_v0.25.0", "git", git),
+                                            ("release-0.25.2", "hri_v0.25.2", "release", "0.25.2")):
+        template = stamp.parse_template((FIXTURES / fixture / "app_config.yaml").read_bytes())
+        folder = out / name
         (folder / "translations").mkdir(parents=True, exist_ok=False)
-        (folder / "config.yaml").write_bytes(stamp.dump(stamp.stamp(template, "garage", version, channel), "the v0.25.0 fixture"))
-        (folder / "translations" / "en.yaml").write_bytes((FIXTURE / "app_translations_en.yaml").read_bytes())
-        (folder / "DOCS.md").write_bytes((FIXTURE / "app_DOCS.md").read_bytes())
-        print(f"{folder}: {channel} {version}")
+        (folder / "config.yaml").write_bytes(stamp.dump(stamp.stamp(template, "garage", version, channel), f"the {fixture} fixture"))
+        (folder / "translations" / "en.yaml").write_bytes((FIXTURES / fixture / "app_translations_en.yaml").read_bytes())
+        (folder / "DOCS.md").write_bytes((FIXTURES / fixture / "app_DOCS.md").read_bytes())
+        print(f"{folder}: {channel} {version} from {fixture}")
     return 0
 
 

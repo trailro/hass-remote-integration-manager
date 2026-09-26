@@ -10,7 +10,7 @@ import yaml
 from hrimgr import copies, names, stamp, tarsafe
 
 from .fakes.tarballs import hri_files, make_tarball, sha_of
-from .helpers import FIXTURE_CONFIG, tmpdir
+from .helpers import FIXTURE_0252, FIXTURE_CONFIG, tmpdir
 
 
 def template() -> dict:
@@ -145,6 +145,49 @@ class StampTest(unittest.TestCase):
         self.assertEqual(yaml.safe_load(raw), out)
         self.assertEqual(yaml.safe_load(stamp.dump({"version": "1.0", "x": "yes", "n": "null"}, "t")),
                          {"version": "1.0", "x": "yes", "n": "null"})  # strings stay strings
+
+
+class Hri0252Test(unittest.TestCase):
+    """HRI 0.25.2's template: backup_pre / backup_post around a hot backup, and HRI's own backups kept in it."""
+
+    def template(self) -> dict:
+        return stamp.parse_template((FIXTURE_0252 / "app_config.yaml").read_bytes())
+
+    def test_it_is_stamped_with_its_backup_commands_as_they_are(self):
+        t = self.template()
+        for channel, version in (("release", "0.25.2"), ("git", "0.0.0-0123456789ab")):
+            with self.subTest(channel=channel):
+                out = yaml.safe_load(stamp.dump(stamp.stamp(t, "garage", version, channel), "t"))
+                self.assertEqual(out["backup_pre"], 'sh -c "mkdir -p /config/integration_manager && touch '
+                                                    '/config/integration_manager/ha-backup-running; exit 0"')
+                self.assertEqual(out["backup_post"], 'sh -c "rm -f /config/integration_manager/ha-backup-running; exit 0"')
+                self.assertNotIn("backup", out)  # a hot backup: the commands run in the running app
+                excluded = out["backup_exclude"]
+                self.assertIn("*_hri_garage/backups/.*.tmp", excluded)
+                self.assertIn("*_hri_garage/integration_manager/ha-backup-running", excluded)
+                self.assertNotIn("*_hri_garage/backups", excluded)  # HRI's own backups are kept
+                self.assertNotIn("*_hri_garage/integration_manager/backups", excluded)
+                self.assertFalse(any(names.HRI_SLUG in e for e in excluded))
+                # the copy check is a fixed point: stamping it again changes nothing
+                self.assertEqual(copies.check(out, "garage", version, channel), out)
+
+    def test_the_supervisor_is_expected_to_report_the_same(self):
+        new = stamp.expected_view(stamp.stamp(self.template(), "garage", "0.25.2", "release"), "local_hri_garage")
+        old = stamp.expected_view(stamp.stamp(template(), "garage", "0.25.2", "release"), "local_hri_garage")
+        self.assertEqual(new, old)  # backup_pre/post are in neither the store's nor the app's info
+
+    def test_only_one_short_line(self):
+        for key in ("backup_pre", "backup_post"):
+            for value in ("touch /a\ntouch /b", "touch /a\r", "x" * 513, "", " touch /a", "touch /a\0", ["sh", "-c", "x"],
+                          None, True):
+                t = self.template()
+                t[key] = value
+                with self.subTest(key=key, value=str(value)[:20]), self.assertRaises(stamp.TemplateError) as ctx:
+                    stamp.parse_template(yaml.safe_dump(t).encode())
+                self.assertIn(f"has {key}: a {type(value).__name__} value", str(ctx.exception))
+        t = self.template()
+        t["backup_pre"] = "x" * 512
+        stamp.vet_template(t)
 
 
 def alias_bomb(levels: int) -> str:

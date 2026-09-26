@@ -20,7 +20,7 @@ from hrimgr.supervisor import SupervisorError
 
 from .env import Env
 from .fakes.tarballs import sha_of
-from .helpers import marker, register, tmpdir
+from .helpers import FIXTURE_0252, marker, register, tmpdir
 
 
 class FlowTest(unittest.IsolatedAsyncioTestCase):
@@ -431,6 +431,22 @@ class FlowTest(unittest.IsolatedAsyncioTestCase):
             await env.send("DELETE", "/api/instances/garage", {"remove_data": False, "confirm": "garage"})
         self.assertTrue(on_loop)
         self.assertEqual([name for name, main in on_loop if main], [])
+
+    async def test_an_update_onto_hri_0_25_2_s_template(self):
+        """HRI 0.25.2 adds backup_pre / backup_post and keeps its own backups: an instance updates onto it."""
+        env = self.env
+        self.assertEqual((await self.create())["state"], "succeeded")
+        env.stub.hri_fixture = FIXTURE_0252
+        job = await env.job(await env.send("POST", "/api/instances/garage/update", {"version": "0.25.1"}))
+        self.assertEqual(job["state"], "succeeded", job)
+        config = self.config("garage")
+        self.assertIn("ha-backup-running", config["backup_pre"])
+        self.assertIn("*_hri_garage/backups/.*.tmp", config["backup_exclude"])
+        with open(os.path.join(self.copy_dir("garage"), "config.yaml"), encoding="utf-8") as fh:
+            self.assertEqual(yaml.safe_load(fh), config)  # the copy in /data is kept, and checked
+        job = await self.create("attic", version="0.25.1")
+        self.assertEqual(job["state"], "succeeded", job)
+        self.assertIn("backup_post", self.config("attic"))
 
     async def test_finish_setup_and_install(self):
         env = self.env

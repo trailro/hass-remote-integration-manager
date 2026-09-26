@@ -24,7 +24,7 @@ import secrets
 import yaml
 from aiohttp import web
 
-from .tarballs import hri_files, make_tarball, sha_of
+from .tarballs import FIXTURES, hri_files, make_tarball, sha_of
 
 SUPERVISOR_FIXTURES = pathlib.Path(__file__).resolve().parent.parent / "fixtures" / "supervisor"
 
@@ -123,6 +123,7 @@ class Stub:
         self.ws_connections = 0
         # what the store reports of a definition over what its config.yaml says (a definition changed between the
         # manager's last look and the Supervisor's reading of it), and what an install or update then installs
+        self.hri_fixture = FIXTURES  # the app/ template HRI's archives carry (tests/fixtures/hri_v*)
         self.store_override: dict[str, dict] = {}
         self.install_override: dict[str, dict] = {}
 
@@ -362,7 +363,7 @@ class Stub:
         """Full refs, and a commit served before by one (the manager asks for a commit only in a Repair, the one it
         recorded); never a short name or a pull request."""
         if ref in self.commits:
-            return make_tarball(f"hass-remote-integration-{ref[:7]}", hri_files("0.25.0"), ref)
+            return make_tarball(f"hass-remote-integration-{ref[:7]}", hri_files("0.25.0", self.hri_fixture), ref)
         sha = self.ref_sha(ref)
         if sha is None:
             return None
@@ -370,8 +371,8 @@ class Stub:
         if ref.startswith("refs/tags/v"):
             version = ref[len("refs/tags/v"):]
             # at a release tag HRI's app/config.yaml still names the previous version
-            return make_tarball(f"hass-remote-integration-{version}", hri_files("0.24.0"), sha)
-        return make_tarball(f"hass-remote-integration-{ref.rsplit('/', 1)[-1]}", hri_files("0.25.0"), sha)
+            return make_tarball(f"hass-remote-integration-{version}", hri_files("0.24.0", self.hri_fixture), sha)
+        return make_tarball(f"hass-remote-integration-{ref.rsplit('/', 1)[-1]}", hri_files("0.25.0", self.hri_fixture), sha)
 
     async def codeload(self, request):
         self.codeload_paths.append(request.match_info["ref"])
