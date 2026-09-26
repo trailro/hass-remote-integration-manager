@@ -861,14 +861,26 @@ class DecoyScanTest(unittest.TestCase):
             write(os.path.join(self.root, *rel.split("/")), data)
         self.assertEqual(self.found(), {})
 
-    def test_links_folders_are_not_walked_but_a_linked_config_is_read(self):
+    def test_a_linked_folder_is_not_walked_and_every_linked_config_is_a_decoy(self):
+        """F1: the Supervisor resolves a link from its own mount of the folder (/data/apps/local), not the manager's
+        (/local_apps): an absolute link can reach a file only the Supervisor sees.  So a config.* that is a link is a
+        decoy whatever it points to (nothing, a file the manager cannot reach, a harmless file), never followed."""
         outside = tmpdir(self)
         write(os.path.join(outside, "config.yaml"), b"slug: hri_garage\n")
         os.symlink(outside, os.path.join(self.root, "linked"))  # the Supervisor's glob does not follow it either
         self.assertEqual(self.found(), {})
-        os.makedirs(os.path.join(self.root, "x"))
-        os.symlink(os.path.join(outside, "config.yaml"), os.path.join(self.root, "x", "config.yaml"))
-        self.assertEqual(self.found(), {"x/config.yaml": "hri_garage"})
+        links = {"a/config.yaml": "/data/apps/local/.hidden/config.yaml",  # only the Supervisor's mount has it
+                 "b/config.json": "/nonexistent-hri-mgr-test/config.json",
+                 "c/config.yml": "../my_app/config.yaml",  # harmless today, anything tomorrow
+                 "d/config.yaml": os.path.join(outside, "config.yaml")}
+        for rel, target in links.items():
+            os.makedirs(os.path.join(self.root, os.path.dirname(rel)), exist_ok=True)
+            os.symlink(target, os.path.join(self.root, *rel.split("/")))
+        found = stamp.decoys(self.root)
+        self.assertEqual({d.path: d.slug for d in found}, {rel: None for rel in links})
+        for decoy in found:
+            self.assertIn("is a link", decoy.problem)
+            self.assertIn("remove it", decoy.problem)
 
     def test_what_the_manager_cannot_read_is_a_decoy(self):
         os.makedirs(os.path.join(self.root, "f"))
