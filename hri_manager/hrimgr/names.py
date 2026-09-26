@@ -22,9 +22,10 @@ HRI_SLUG = "hass_remote_integration"
 # the first HRI release that runs as an app with ingress and reads its options
 MIN_VERSION = (0, 25, 0)
 
-# HRI's release tags: v0.25.0, and pre-releases the way Home Assistant writes them (v0.26.0b1, v0.26.0rc1)
-TAG_RE = re.compile(r"v(\d{1,4})\.(\d{1,4})\.(\d{1,4})(?:(a|b|rc)(\d{1,4}))?")
-VERSION_RE = re.compile(r"(\d{1,4})\.(\d{1,4})\.(\d{1,4})(?:(a|b|rc)(\d{1,4}))?")
+# HRI's release tags: v0.25.0, and pre-releases the way Home Assistant writes them (v0.26.0b1, v0.26.0rc1).  ASCII:
+# \d would take any Unicode digit ("٠.٢٥.١"), which int() reads and GitHub has no tag of
+TAG_RE = re.compile(r"v(\d{1,4})\.(\d{1,4})\.(\d{1,4})(?:(a|b|rc)(\d{1,4}))?", re.ASCII)
+VERSION_RE = re.compile(r"(\d{1,4})\.(\d{1,4})\.(\d{1,4})(?:(a|b|rc)(\d{1,4}))?", re.ASCII)
 # the git channel builds a branch or a tag of HRI's own repository, named without refs/: never a commit, a pull
 # request (refs/pull/N/head: anyone can open one) or a fork's commit, which codeload serves under HRI's name too
 REF_KINDS = ("branch", "tag")

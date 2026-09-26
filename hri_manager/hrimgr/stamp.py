@@ -78,7 +78,8 @@ ARCHES = frozenset({"aarch64", "amd64", "armhf", "armv7", "i386"})
 # the Supervisor's option types (apps/options.py RE_SCHEMA_ELEMENT) without device(...): an option of that type maps
 # the host device it names into the container
 SCHEMA_ELEMENT = re.compile(r"(?:bool|email|url|port|str(?:\(\d*,\d*\))?|password(?:\(\d*,\d*\))?"
-                            r"|int(?:\(-?\d*,-?\d*\))?|float(?:\(-?[\d.]*,-?[\d.]*\))?|match\([^\n]{1,200}\)|list\([^\n]{1,200}\))\??")
+                            r"|int(?:\(-?\d*,-?\d*\))?|float(?:\(-?[\d.]*,-?[\d.]*\))?|match\([^\n]{1,200}\)|list\([^\n]{1,200}\))\??",
+                            re.ASCII)
 
 
 def _schema(value: Any) -> bool:

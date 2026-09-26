@@ -63,7 +63,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           stable=$(gh release list --repo "$GITHUB_REPOSITORY" --limit 1000 --json tagName,isPrerelease,isDraft \
-            | python3 -c 'import json, re, sys; print("\n".join(r["tagName"] for r in json.load(sys.stdin) if not r["isPrerelease"] and not r["isDraft"] and re.fullmatch(r"v\d+\.\d+\.\d+", r["tagName"])))' \
+            | python3 -c 'import json, re, sys; print("\n".join(r["tagName"] for r in json.load(sys.stdin) if not r["isPrerelease"] and not r["isDraft"] and re.fullmatch(r"v\d+\.\d+\.\d+", r["tagName"], re.A)))' \
             | sort -V)
           newest=$(printf '%s\n' "$stable" | tail -n1)
           series=$(printf '%s\n' "$stable" | { grep -F "${TAG%.*}." || true; } | tail -n1)
