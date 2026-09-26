@@ -38,6 +38,14 @@ Home Assistant keeps using the same adapter (BlueZ serves several clients); the 
 raw HCI sockets are not available in the instance. It changes only with a new version (the box in **Update** or
 **Rebuild**); otherwise delete the instance keeping its data and create it again. See the README's Bluetooth section.
 
+**Host network** (a box of the **New instance** form) puts the instance on the host's network (`host_network`), for
+an integration that finds its devices on your LAN by mDNS, SSDP or broadcast. The instance then shares the host's
+network namespace, and its own web port (one the Supervisor picks for it, `ingress_port: 0`) is on your LAN: HRI
+refuses it there unless the instance's app has a password (its **Configuration** tab); the sidebar panel keeps
+working. It needs HRI 0.26.0 or newer (for a git build, a branch or tag whose `entrypoint.py` has
+`APP_DYNAMIC_PORT = True`), and changes only with a new version, like Bluetooth. See the README's Host network
+section.
+
 **One integration per instance.** Two instances running the *same* integration cannot share an MQTT broker: HRI's
 base topic and client id are `hass_<domain>`, named after the integration and not a setting, so they would take each
 other's connection and retained data. Give each instance a different integration (two config entries of one
@@ -45,7 +53,8 @@ integration go in one instance), or give each its own broker; per-instance base 
 feature.
 
 Each instance's options (password, `ingress_users`, ...) are set on that app's own **Configuration** tab, as for the
-single hass-remote-integration app. Its port 8087 is off; map one on its **Network** tab if you want it.
+single hass-remote-integration app. Its port 8087 is off; map one on its **Network** tab if you want it (not with
+Host network: its port is then on the host already).
 
 **Backups.** On current Supervisors a full backup leaves out the local apps folder, where each instance's definition
 lives (an upstream issue). After a full restore the instances come back detached; the manager writes their

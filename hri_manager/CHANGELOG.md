@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.2.0
+
+Still **experimental**.
+
+- **Host network, per instance.** A box of the New instance form (and of the Update and Rebuild dialogs, applied with
+  the new version) puts the instance on the host's network, for an integration that finds its devices by mDNS, SSDP or
+  broadcast. The manager adds `host_network: true` and `ingress_port: 0` (a port the Supervisor picks per app, so
+  instances never clash on the host); off unless chosen, and HRI's template can never turn it on. The instance's web
+  port is then on the LAN, which HRI refuses without the app's password; the sidebar panel keeps working. Only for an
+  HRI that reads that port: a release from 0.26.0 on, or a git branch or tag whose `entrypoint.py` has
+  `APP_DYNAMIC_PORT = True` (a Rebuild onto one without it is refused unless it turns Host network off). The installed
+  app's `host_network` is recorded as your choice only as Bluetooth's is. See the README's Host network section.
+- **`hrimgr.stamp` is a contract with HRI's CI**: it imports with only PyYAML installed, and `vet_template` and
+  `stamp(..., bluetooth=..., host_network=...)` keep their shape (a test pins both), so HRI can check its app template
+  against the latest released manager before it releases.
+
 ## 0.1.4
 
 Still **experimental**.

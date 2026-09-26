@@ -1,3 +1,3 @@
 """HRI Manager: creates, updates and removes instances of hass-remote-integration as local Home Assistant apps."""
 
-VERSION = "0.1.4"
+VERSION = "0.2.0"

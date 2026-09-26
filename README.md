@@ -13,7 +13,7 @@ sidebar panel, **Configuration** tab, data folder, logs and backups.
 HRI itself is unchanged and stays the source of truth: the manager takes each instance's definition from the HRI
 release you choose. On a plain Docker install you do not need this: run one HRI container per integration.
 
-**Status: 0.1.4, experimental.** Home Assistant OS only (the Supervisor's local apps folder is required).
+**Status: 0.2.0, experimental.** Home Assistant OS only (the Supervisor's local apps folder is required).
 
 ## What it looks like
 
@@ -33,7 +33,8 @@ and its integration's devices mirrored into Home Assistant over MQTT:
 
 - Home Assistant OS with Supervisor **2026.07.1 or newer** (the `local_apps` folder mapping), Core 2025.10 or newer
   (HRI's own floor).
-- HRI **0.25.0 or newer** for instances: the first HRI release that runs as an app with a sidebar panel.
+- HRI **0.25.0 or newer** for instances: the first HRI release that runs as an app with a sidebar panel; **0.26.0
+  or newer** for an instance on the host's network ([Host network](#host-network)).
 - Internet access to GitHub (the release list and the source of the release you install) and to ghcr.io (the
   manager's and HRI's images, pulled by the Supervisor).
 
@@ -121,12 +122,13 @@ Only what makes the copy a separate app; everything else is HRI's, as released:
 | `backup_exclude` | `*_hass_remote_integration/…` becomes `*_hri_garage/…`, so the instance's backups leave out its installed Home Assistant (about 800 MB) as HRI's do |
 | `webui` | dropped |
 | `host_dbus` | `true`, only for an instance created (or updated) with **Bluetooth**, below |
+| `host_network` / `ingress_port` | `true` / `0`, only for an instance created (or updated) with **Host network**, below; otherwise no `host_network`, and HRI's own `ingress_port` (8087) |
 
 Before stamping, the manager checks HRI's template against the keys it knows from HRI's own app (`hrimgr/stamp.py`,
 `TEMPLATE_KEYS`) and a vetted range for each: `map` only the instance's own `app_config`, `image` only HRI's, `url`
 only HRI's repository, option types without `device`, and so on. A template with any other key (`hassio_role`,
 `full_access`, `docker_api`, `privileged`, `host_network`, `devices`, `apparmor`, `environment`...) or a value
-outside its range is refused, on both channels, with "HRI's app definition has &lt;key&gt;, which this manager version
+outside its range (an `ingress_port` of 0, say) is refused, on both channels, with "HRI's app definition has &lt;key&gt;, which this manager version
 does not accept; update the manager". `uart: true` is kept: HRI uses it for serial sticks. `backup_pre` and
 `backup_post` (from HRI 0.25.2 on) are kept as HRI wrote them, one line of at most 512 characters each: the Supervisor
 runs them only inside the instance's own container around a backup (`docker exec`), so they can do nothing the
@@ -166,6 +168,45 @@ you choose it: an **Update** at the installed version with that Bluetooth choice
 why: the Supervisor's own Update of a definition someone changed would give the app the host's D-Bus too, and that is
 not your choice. A Repair then stops at **needs attention** (an Update to a newer release, with Bluetooth chosen, or
 Delete).
+
+### Host network
+
+In an app's own network (bridge networking, the default) the container does not see the LAN's multicast and
+broadcast, so an integration that finds its devices by mDNS (zeroconf), SSDP or UDP broadcast finds nothing. Such an
+integration needs the host's network, which the Supervisor gives an app with `host_network: true`. HRI's published app
+does not ask for it, and neither does an instance unless you tick **Host network** when you create it. The manager then
+adds `host_network: true` and `ingress_port: 0` to that instance's definition and records the choice in its registry.
+HRI's template can never add either: `host_network` is not one of the keys the manager accepts from it, and its
+`ingress_port` must be a port. The instance's row shows a **Host network** badge.
+
+- **Its own port.** On the host's network every instance would listen on HRI's port 8087 of the host, and two
+  instances (or HRI's own app with its port published) would clash. With `ingress_port: 0` the Supervisor picks a free
+  port for the app from 62000-65500 when it installs or updates it, keeps it for that app, and sends the sidebar
+  panel's requests there; HRI reads that port from the Supervisor when it starts. HRI does so from **0.26.0** on, so
+  Host network is refused for an older release ("Host network needs HRI 0.26.0 or newer"), and for a git build whose
+  branch or tag lacks it: the manager reads the downloaded tree's `entrypoint.py` for the line
+  `APP_DYNAMIC_PORT = True` (it reads it, it never runs it).
+- **What it enables:** the integration in that instance can find and reach devices on your LAN by mDNS, SSDP and
+  broadcast, as Home Assistant Core does on the host.
+- **Security:** the instance shares the host's network namespace: it sees and can use every network interface of the
+  host, and whatever it listens on is on your LAN. That includes its own web port (the one the Supervisor picked):
+  HRI refuses a request there that does not come through the sidebar panel unless the instance's app has a password
+  (set it on its **Configuration** tab), and then asks for it as on a published port. The sidebar panel keeps working
+  either way. A port mapped on the instance's **Network** tab does nothing on the host's network (the Supervisor
+  publishes none). Home Assistant shows the app's security rating one lower, and the Supervisor does not start a
+  host-network app at boot while its firewall rules for the Docker gateway are not active. Turn it on only for an
+  integration that needs it, and only with code you trust.
+- **Changing it later** is part of **Update** or **Rebuild**, as for Bluetooth: their dialogs have the same box, and
+  the change is applied with the new version, never at the same one. A Rebuild of an instance with Host network onto a
+  branch or tag without `APP_DYNAMIC_PORT = True` is refused, and says so: untick Host network in that Rebuild to
+  build it without.
+
+When the installed app's `host_network` differs from the registry's choice, the manager follows the same rules as for
+Bluetooth: it records what the app has only when the manager made that change itself (an update of its own recorded
+late) or when you choose it (an **Update** at the installed version with that choice); otherwise it writes nothing and
+says why, and a Repair stops at **needs attention**. One case differs: **Finish setup** cannot turn Host network off in
+place (the definition it would rewrite no longer holds HRI's own port); an **Update** at the installed version with
+Host network off writes it from HRI's template, and so does a Repair.
 
 ### Git channel (testing)
 
@@ -435,12 +476,15 @@ registry, the administrator check, the secrets kept out of answers and logs.
   version the store offers and the sha256 of `hri_<name>/config.yaml` with what it recorded, and searches the folder
   for decoys; a definition it did not write is flagged, and it refuses to start, update or finish the instance until
   **Repair** writes its own definition again (or **Delete** removes the instance). It does not record what such an
-  install gave the app as your choice (see [Bluetooth](#bluetooth)).
-- **Bluetooth (`host_dbus`).** The one access to the host the manager itself adds to a definition: `host_dbus: true`,
-  the host's D-Bus, only for an instance you created or updated with **Bluetooth**, recorded in the registry; HRI's
-  template can never add it. D-Bus reaches many of the host's system services, not only BlueZ (see
-  [Bluetooth](#bluetooth)). Around its installs and updates the manager compares what the Supervisor reports with the
-  registry's choice.
+  install gave the app as your choice (see [Bluetooth](#bluetooth) and [Host network](#host-network)).
+- **Bluetooth (`host_dbus`) and Host network (`host_network`).** The only accesses to the host the manager itself adds
+  to a definition, each only for an instance you created or updated with it, recorded in the registry; HRI's template
+  can never add either. `host_dbus: true` gives the host's D-Bus, which reaches many of the host's system services,
+  not only BlueZ (see [Bluetooth](#bluetooth)). `host_network: true` (with `ingress_port: 0`) puts the instance in the
+  host's network namespace, its web port on the LAN, which HRI 0.26.0 and newer refuses there without the app's
+  password; the manager allows it only for an HRI that listens on the port the Supervisor picks (see
+  [Host network](#host-network)). Around its installs and updates the manager compares what the Supervisor reports
+  with the registry's choices.
 - **What the folder checks cannot do.** They see the local apps folder only when they look, and the Supervisor
   reports only part of a definition and not which file it read: a writer with root on the folder can change it between
   two looks (a decoy written and removed again, a file swapped after the last look), point a link at what only the
@@ -497,7 +541,7 @@ address there (ARP spoofing), a risk of the platform that every ingress app shar
 ## Limitations
 
 - Home Assistant OS only; one manager per system.
-- Instances need HRI 0.25.0 or newer; the manager does not downgrade.
+- Instances need HRI 0.25.0 or newer, and 0.26.0 or newer on the host's network; the manager does not downgrade.
 - Instances created by hand, and the single published HRI app, are not managed.
 
 ## Roadmap
@@ -525,7 +569,7 @@ manager in its development mode, which only environment variables the app cannot
 update / delete through the page's API and takes screenshots; see its header.
 
 CI runs the unit tests on Python 3.13 and 3.14, the app linter on the manager and on an instance stamped from HRI's
-template, the Supervisor's own schema checks of both and of an instance with Bluetooth
+template, the Supervisor's own schema checks of both and of an instance with Bluetooth or Host network
 (`.github/app_supervisor_check.py`, against a Supervisor release pinned by its commit; with its own backup filter over
 three instances side by side: no venv or logs in any of them, their state kept, and HRI's own backups left out for an
 instance of HRI 0.25.0's template and kept from HRI 0.25.2 on), a build of the image for amd64 and arm64, and, once `config.yaml` names an image, an anonymous
