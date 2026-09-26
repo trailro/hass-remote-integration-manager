@@ -53,7 +53,9 @@ def main() -> int:
 
         async def stop_jobs(_app: web.Application) -> None:
             # on_shutdown: before aiohttp waits for open connections (SHUTDOWN_TIMEOUT), so a job's rollback runs
-            # within the Supervisor's stop timeout (config.yaml timeout) even while a request is still being served
+            # within the Supervisor's stop timeout (config.yaml timeout) even while a request is still being served.
+            # No job starts from here on: a request past the guard gets 503 (jobs.ShuttingDown)
+            jobs.close()
             for task in background:
                 task.cancel()
             await asyncio.gather(*background, return_exceptions=True)
@@ -63,6 +65,13 @@ def main() -> int:
             await jobs.wait_all()
 
         async def close(_app: web.Application) -> None:
+            # a job that started all the same (after stop_jobs looked) ends before the sessions it uses are closed;
+            # it is let begin first, or its cancellation would skip its own rollback
+            await asyncio.sleep(0)
+            for job in jobs.recent():
+                if job.task and not job.task.done():
+                    job.task.cancel()
+            await jobs.wait_all()
             await sv.close()
             await gh.close()
             await users.close()

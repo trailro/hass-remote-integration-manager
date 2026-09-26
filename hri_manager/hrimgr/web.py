@@ -35,7 +35,7 @@ from . import VERSION, names
 from .corews import CoreError, CoreUsers
 from .github import GitHubError
 from .instances import InvalidRequest, Manager
-from .jobs import Busy
+from .jobs import Busy, ShuttingDown
 from .settings import Settings
 from .supervisor import NotAllowed, SupervisorError
 
@@ -199,6 +199,8 @@ def _handled(fn):
             return await fn(request)
         except InvalidRequest as err:
             return _error(400, str(err))
+        except ShuttingDown as err:
+            return _error(503, str(err))
         except Busy as err:
             return _error(409, str(err))
         except (SupervisorError, GitHubError) as err:
