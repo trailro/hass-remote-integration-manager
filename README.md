@@ -124,16 +124,24 @@ What goes and what stays:
 
 ## Backups
 
-Each instance is an app, so Home Assistant backups include it like any other app: its data folder, minus what HRI's
-`backup_exclude` leaves out (stamped for the instance). The instance's **definition** is in the local apps folder,
-which a full backup includes too.
+Each instance is an app, so Home Assistant backups include it like any other app: its `/config` folder, minus what
+HRI's `backup_exclude` leaves out (stamped for the instance), and its options.
 
-- **Full backup restore**: instances, their definitions and the manager come back together.
-- **Partial restore of an instance without the local apps folder**: the app comes back and runs, but its definition
-  is missing, so the Supervisor calls it *detached* and it cannot be updated. The manager lists it with **Repair**,
-  which writes the definition again for the installed version (for a release instance; for a git instance, when its
-  commit can still be downloaded).
-- The manager's own data (`/data`: the release list cache) needs no backup.
+The instance's **definition** (`hri_<name>/` in the local apps folder) is another matter. On current Supervisors a full
+backup **leaves the local apps folder out**: the backup still names the folder `addons/local`, while the Supervisor
+has moved it to `apps/local` (an upstream issue of the Supervisor, not of this app). So:
+
+- **After a full restore**, instances come back **detached**: installed and running, but without a definition, so they
+  cannot be updated. The manager lists each with **Repair**, which writes its definition again: a release instance
+  from that release on GitHub; a git instance from its branch or tag, which must still exist (when the branch has
+  moved on, the definition is written for its current commit and **Rebuild** installs it).
+- **After a partial restore of an instance without the local apps folder**: the same.
+- The manager's own **registry** of the instances it created (`/data/instances.json`: each instance's channel, branch
+  or tag, commit and id) is in the manager's `/data`, which **is** in the manager's own backup. Restore the manager
+  with the instances and Repair works from the registry, for the git channel too.
+
+Repair is offered only for an app the Supervisor reports as detached, and runs only if, after a store reload, the
+store still has no definition of its slug.
 
 ## Other HRI apps
 

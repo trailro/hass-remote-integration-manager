@@ -12,7 +12,8 @@ First release, **experimental**.
   previous definition back.
 - Starts, stops, restarts and deletes instances; deleting needs the instance's name typed, always removes its
   options (the Supervisor does) and keeps its `/config` folder unless you ask.
-- Repairs an instance whose definition folder went missing after a partial backup restore.
+- Repairs an instance whose definition folder is missing (on current Supervisors, a full backup leaves the local
+  apps folder out): only a detached app the store does not define, from the manager's own registry of instances.
 - A git channel, for testing: builds HRI from a branch or tag of its own repository on the device (checked to exist
   there first; never a commit, a pull request or a fork). That branch's code and Dockerfile run on the device.
 - Lists the published hass-remote-integration app, and other local apps named like instances, without touching

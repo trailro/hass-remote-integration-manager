@@ -22,6 +22,11 @@ Open **HRI Manager** in the sidebar:
 Each instance's options (password, `ingress_users`, ...) are set on that app's own **Configuration** tab, as for the
 single hass-remote-integration app. Its port 8087 is off; map one on its **Network** tab if you want it.
 
+**Backups.** On current Supervisors a full backup leaves out the local apps folder, where each instance's definition
+lives (an upstream issue). After a full restore the instances come back detached; **Repair** in the manager writes
+their definitions again (a release from GitHub; a git instance from its branch or tag, which must still exist). Keep
+the manager in the same backups: its `/data` holds the registry that Repair works from.
+
 ## Options
 
 - `allowed_users`: narrows who may use the manager, by Home Assistant user name or user id (either, compared
