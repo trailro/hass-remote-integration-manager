@@ -385,6 +385,9 @@ class FlowTest(unittest.IsolatedAsyncioTestCase):
     async def test_repair_after_a_partial_restore(self):
         env = self.env
         await self.create()
+        job = await env.job(await env.send("POST", "/api/instances/garage/update", {"version": "0.25.1"}))
+        self.assertEqual(job["state"], "succeeded", job)
+        before = self.marker("garage")
         shutil.rmtree(self.folder("garage"))
         await env.sv.reload_store()
         _, data = await env.get("/api/instances")
@@ -394,8 +397,16 @@ class FlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(status, 400)
         job = await env.job(await env.send("POST", "/api/instances/garage/repair"))
         self.assertEqual(job["state"], "succeeded", job)
-        self.assertEqual(self.marker("garage")["version"], "0.25.0")
-        self.assertIn("repaired_at", self.marker("garage"))
+        m = self.marker("garage")
+        self.assertEqual(m["version"], "0.25.1")
+        self.assertIn("repaired_at", m)
+        # the marker keeps its history (from the registry: the folder is gone), and the repair is added to it
+        self.assertEqual((m["created_at"], m["created_by"], m["updated_by"]),
+                         (before["created_at"], "alice", "alice"))
+        self.assertEqual(m["history"][:-1], before["history"])
+        self.assertEqual(m["history"][-1], {"channel": "release", "version": "0.25.1", "ref_kind": "tag", "ref": "v0.25.1",
+                                            "sha": before["sha"], "updated_at": before["updated_at"],
+                                            "event": f"repaired (manual) at {m['repaired_at']}", "by": "alice"})
         _, data = await env.get("/api/instances")
         self.assertTrue(data["instances"][0]["managed"])
 
@@ -529,6 +540,8 @@ class FlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(env.stub.store["local_hri_lab"]["version"], version)
         m = self.marker("lab")
         self.assertEqual((m["sha"], m["version"], m["ref_kind"], m["ref"]), (head, version, "branch", "main"))
+        self.assertEqual({k: m["history"][-1][k] for k in ("ref", "sha", "event")},
+                         {"ref": "v0.25.1", "sha": recorded, "event": f"rebuilt at the installed commit (manual) at {m['repaired_at']}"})
         with open(os.path.join(self.folder("lab"), "Dockerfile"), encoding="utf-8") as fh:
             self.assertIn(f"ARG HRI_BUILD={head}", fh.read())
         entry = env.registry.get("lab")

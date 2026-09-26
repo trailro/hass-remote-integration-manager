@@ -4,12 +4,13 @@ and on a list at most every few minutes, each instance of the registry in that s
 again; nothing outside the registry is touched."""
 
 import asyncio
+import json
 import os
 import shutil
 import unittest
 from unittest import mock
 
-from hrimgr import instances
+from hrimgr import children, instances
 from hrimgr.github import GitHubError
 
 manager_clock = instances.time.monotonic
@@ -77,6 +78,10 @@ class AutoRepairTest(unittest.IsolatedAsyncioTestCase):
             self.assertIn("started automatically", job.lines[0]["msg"])
         for name in ("garage", "lab"):
             self.assertTrue(os.path.isfile(os.path.join(self.folder(name), "config.yaml")))
+            with open(os.path.join(self.folder(name), children.MARKER), encoding="utf-8") as fh:
+                m = json.load(fh)
+            self.assertEqual(m["created_by"], "alice")  # who created it, not the repair
+            self.assertEqual([h["event"] for h in m["history"]], [f"repaired (automatic) at {m['repaired_at']}"])
         _, data = await env.get("/api/instances")
         rows = {i["name"]: i for i in data["instances"]}
         for name in ("garage", "lab"):

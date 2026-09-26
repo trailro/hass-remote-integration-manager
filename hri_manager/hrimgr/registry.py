@@ -11,7 +11,8 @@ restore the registry still knows each instance's channel, branch or tag and comm
 
 An entry: name, slug, channel, version, ref_kind, ref, sha, instance_id, created_at, updated_at, setup_complete (the
 create got as far as starting the app), stamp_version (stamp.STAMP_VERSION of the definition written), interrupted
-(a create stopped by the manager's own stop)."""
+(a create stopped by the manager's own stop); created_by, updated_by and history, the marker's, which a Repair writes
+back into the marker."""
 
 from __future__ import annotations
 
