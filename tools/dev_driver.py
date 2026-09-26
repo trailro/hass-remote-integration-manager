@@ -104,6 +104,8 @@ def main() -> int:
 
     status, body = api("DELETE", "api/instances/attic", {"remove_data": True, "confirm": "nope"})
     check("delete with data needs the typed name", status == 400, (status, body))
+    status, body = api("DELETE", "api/instances/attic", {"remove_data": False})
+    check("delete without data needs the typed name too", status == 400, (status, body))
     status, _ = call("POST", f"{MGR}/api/instances/garage/stop", {}, {"Content-Type": "application/json"})
     check("a POST without X-Requested-With is refused", status == 403, status)
     status, _ = call("POST", f"{MGR}/api/instances/garage/stop", {}, {"X-Requested-With": "fetch", "Content-Type": "text/plain"})

@@ -218,8 +218,10 @@ class Manager:
         remove_data = body.get("remove_data", False)
         if not isinstance(remove_data, bool):
             raise InvalidRequest("remove_data is true or false.")
-        if remove_data and body.get("confirm") != name:
-            raise InvalidRequest(f"Deleting the data too needs the instance's name typed: {name}.")
+        # every delete: the uninstall removes the instance's options (its password, ingress_users) with or without
+        # its data folder, and a new instance of the same name would get that folder without them
+        if body.get("confirm") != name:
+            raise InvalidRequest(f"Deleting an instance needs its name typed: {name}.")
         return self.jobs.start(name, "delete", user, lambda job: self._delete(job, managed, remove_data))
 
     def repair(self, name: str, user: str) -> Job:

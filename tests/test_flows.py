@@ -84,7 +84,7 @@ class FlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(job["state"], "failed")
         self.assertIn("does not downgrade", job["error"])
 
-        job = await env.job(await env.send("DELETE", "/api/instances/garage", {"remove_data": False}))
+        job = await env.job(await env.send("DELETE", "/api/instances/garage", {"remove_data": False, "confirm": "garage"}))
         self.assertEqual(job["state"], "succeeded", job)
         self.assertNotIn("local_hri_garage", env.stub.installed)
         self.assertIn("local_hri_garage", env.stub.kept_data)
@@ -350,9 +350,17 @@ class FlowTest(unittest.IsolatedAsyncioTestCase):
         await self.create()
         status, data = await env.send("DELETE", "/api/instances/garage", {"remove_data": True, "confirm": "wrong"})
         self.assertEqual(status, 400)
-        status, data = await env.send("DELETE", "/api/instances/garage", {"remove_data": "yes"})
+        status, data = await env.send("DELETE", "/api/instances/garage", {"remove_data": "yes", "confirm": "garage"})
         self.assertEqual(status, 400)
+        # every delete needs the typed name, with the data or without: the uninstall drops the instance's options
+        # (its password and ingress_users) either way
+        for body in ({"remove_data": False}, {}, {"remove_data": False, "confirm": "GARAGE"}, {"confirm": ["garage"]}):
+            with self.subTest(body=body):
+                status, data = await env.send("DELETE", "/api/instances/garage", body)
+                self.assertEqual(status, 400, data)
+                self.assertIn("typed", data["error"])
         self.assertIn("local_hri_garage", env.stub.installed)
+        self.assertEqual(env.changing_calls("local_hri_garage/uninstall"), [])
 
     async def test_one_job_per_instance(self):
         env = self.env

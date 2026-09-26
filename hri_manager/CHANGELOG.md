@@ -10,8 +10,8 @@ First release, **experimental**.
   panel, and starts it.
 - Updates an instance to a newer HRI release; the app keeps its options and data. A failed update puts the
   previous definition back.
-- Starts, stops, restarts and deletes instances; deleting keeps the instance's data unless you ask (and type its
-  name).
+- Starts, stops, restarts and deletes instances; deleting needs the instance's name typed, always removes its
+  options (the Supervisor does) and keeps its `/config` folder unless you ask.
 - Repairs an instance whose definition folder went missing after a partial backup restore.
 - A git channel, for testing: builds HRI from a branch or tag of its own repository on the device (checked to exist
   there first; never a commit, a pull request or a fork). That branch's code and Dockerfile run on the device.

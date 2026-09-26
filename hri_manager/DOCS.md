@@ -12,7 +12,9 @@ Open **HRI Manager** in the sidebar:
   sidebar panel, and starts it. The first start of an instance installs Home Assistant inside it, which takes a few
   minutes; open its panel to follow it.
 - **Update** takes an instance to a newer release; its options and data stay. **Delete** stops and uninstalls it
-  and keeps its data folder unless you tick the box and type its name.
+  and needs its name typed. Its options (password, `ingress_users`) are always removed by the Supervisor; only its
+  `/config` folder is kept, unless you tick the box. A new instance with the same name reuses that `/config` folder,
+  without the old options: set them again.
 - **Git branch or tag (testing)** builds HRI from a branch or tag of its own repository on this machine: that
   branch's code and Dockerfile run here. For trying a fix before its release, with a branch you trust; not for
   production. Commits, pull requests and forks are refused.

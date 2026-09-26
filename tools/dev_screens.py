@@ -36,7 +36,7 @@ def main() -> int:
         page.click("#inst button[data-act=delete][data-name=attic]")
         page.wait_for_selector("#confirm[open]")
         page.check("#cf-data")
-        page.fill("#cf-name", "atti")
+        page.fill("#cf-name", "atti")  # one letter short: Delete stays disabled
         page.screenshot(path=f"{OUT}/03-delete-dialog.png")
         page.click("#confirm button[value=cancel]")
 

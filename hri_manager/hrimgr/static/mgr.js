@@ -116,12 +116,8 @@ function dialog({title, text, ok, danger, versions, selected, ref, refKind, data
   $('#cf-ref-row').hidden = ref === undefined; $('#cf-ref').value = ref || '';
   $('#cf-kind-row').hidden = ref === undefined; $('#cf-kind').value = refKind || 'branch';
   $('#cf-data-row').hidden = !data; $('#cf-data').checked = false;
-  $('#cf-name-row').hidden = true; $('#cf-name').value = ''; $('#cf-name-hint').textContent = name || '';
-  const sync = () => {
-    const need = data && $('#cf-data').checked;
-    $('#cf-name-row').hidden = !need;
-    okb.disabled = need && $('#cf-name').value !== name;
-  };
+  $('#cf-name-row').hidden = !name; $('#cf-name').value = ''; $('#cf-name-hint').textContent = name || '';
+  const sync = () => { okb.disabled = !!name && $('#cf-name').value !== name; };
   $('#cf-data').onchange = sync; $('#cf-name').oninput = sync; sync();
   d.returnValue = '';
   return new Promise(resolve => {
@@ -146,9 +142,9 @@ async function act(action, name) {
       r = await send('POST', `api/instances/${encodeURIComponent(name)}/update`, {version: c.version});
     }
   } else if (action === 'delete') {
-    const c = await dialog({title: `Delete ${name}`, text: `Stops and uninstalls ${i.slug} and removes its definition. Without the box below its data folder stays, and a new instance named ${name} would reuse it.`, ok: 'Delete', danger: true, data: true, name});
+    const c = await dialog({title: `Delete ${name}`, text: `Stops and uninstalls ${i.slug} and removes its definition. The Supervisor always removes the instance's options (its password, ingress_users). Without the box below only its /config folder (its Home Assistant, integration and configuration) is kept, and a new instance named ${name} would reuse that folder, without those options.`, ok: 'Delete', danger: true, data: true, name});
     if (!c) return;
-    r = await send('DELETE', `api/instances/${encodeURIComponent(name)}`, {remove_data: c.removeData, confirm: c.removeData ? c.confirm : undefined});
+    r = await send('DELETE', `api/instances/${encodeURIComponent(name)}`, {remove_data: c.removeData, confirm: c.confirm});
   } else if (action === 'repair') {
     const c = await dialog({title: `Repair ${name}`, text: 'Writes the definition folder again for the installed version, so the app can be updated and managed again.', ok: 'Repair'});
     if (!c) return;

@@ -48,8 +48,11 @@ The manager then, as a job whose log the page shows:
 4. installs it (the Supervisor pulls HRI's image), turns on **Start on boot**, the **Watchdog** and **Show in
    sidebar**, and starts it.
 
-If a step fails, what was done is undone: the app is uninstalled (its data folder kept), the definition removed and
-the store reloaded.
+If a step fails, what was done is undone: the app is uninstalled (its `/config` folder kept), the definition removed
+and the store reloaded.
+
+If an instance of the same name was deleted before with its `/config` folder kept, the new one reuses that folder
+(its Home Assistant, integration and credentials) but not the old options: set its password and `ingress_users` again.
 
 The first start of an instance installs Home Assistant inside it and takes a few minutes; open its panel to follow
 it, then set it up as the [HRI documentation](https://github.com/trailro/hass-remote-integration) says. Options
@@ -109,9 +112,15 @@ HRI Manager itself is updated from the App Store like any app (an app cannot upd
 
 ## Deleting
 
-**Delete** stops and uninstalls the instance and removes its definition. Its data folder
-(`app_configs/local_hri_<name>` on the host: its Home Assistant, integration and configuration) stays, unless you tick
-the box and type the instance's name. A new instance with the same name reuses a data folder that stayed.
+**Delete** stops and uninstalls the instance and removes its definition; it always needs the instance's name typed.
+What goes and what stays:
+
+- the instance's **options** (its password, `ingress_users`, Debian packages...) are always removed: the Supervisor
+  drops them with the app, whether or not you keep its data;
+- its **`/config` folder** (`app_configs/local_hri_<name>` on the host: its Home Assistant, integration, credentials
+  and configuration) is kept unless you tick **Also delete the instance's /config folder**;
+- a new instance with the same name **reuses that `/config` folder**, but starts without the old options: set its
+  password and `ingress_users` again before anyone else can open it.
 
 ## Backups
 
