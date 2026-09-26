@@ -63,6 +63,10 @@ class AppConfigTest(unittest.TestCase):
         self.assertEqual(CONFIG["stage"], "experimental")
         self.assertEqual(sorted(CONFIG["arch"]), ["aarch64", "amd64"])
         self.assertIs(CONFIG["homeassistant_api"], True)  # Core's config/auth/list: administrators only (corews.py)
+        # the stop grace: the jobs' rollbacks (ROLLBACK_BOUND) and the wait for open requests fit in it
+        from hrimgr import __main__ as main_module, instances
+        self.assertEqual(CONFIG["timeout"], 30)
+        self.assertLess(instances.ROLLBACK_BOUND + main_module.SHUTDOWN_TIMEOUT, CONFIG["timeout"] - 5)
         for key in ("host_network", "privileged", "full_access", "docker_api", "auth_api", "devices", "uart"):
             self.assertNotIn(key, CONFIG)
 
