@@ -147,7 +147,13 @@ class Manager:
                 others.append({"slug": slug, "name": names.folder_name(name), "kind": "folder", "problem": problem,
                                "installed": slug in installed, "state": installed.get(slug, {}).get("state")})
                 continue
-            out.append(self._entry(name, marker, installed.get(slug), latest, registered.get(name)))
+            entry = self._entry(name, marker, installed.get(slug), latest, registered.get(name))
+            foreign = self._foreign_version(registered.get(name), (installed.get(slug) or {}).get("version_latest"))
+            if foreign and not entry.get("job"):
+                entry["problem"] = "; ".join(p for p in (entry.get("problem"), foreign) if p)
+                entry["actions"] = ["repair"] + (["stop"] if entry["state"] == "started" else []) + ["delete"]
+                entry["foreign"] = True
+            out.append(entry)
         for slug, app in sorted(installed.items()):
             name = names.name_from_slug(slug)
             if name and slug not in seen:
@@ -539,6 +545,7 @@ class Manager:
         managed = await self.managed(name)
         if action in ("start", "restart"):
             self._refuse_marked(name, managed.entry)
+            await self._refuse_foreign(managed)
         return self.jobs.start(name, action, user, lambda job: self._simple(job, managed, action))
 
     async def _detached_entry(self, name: str) -> dict | None:
@@ -562,6 +569,8 @@ class Manager:
             managed = await self.managed(name)
             channel = managed.marker["channel"]
         self._refuse_marked(name, detached if detached is not None else managed.entry)
+        if detached is None:
+            await self._refuse_foreign(managed)
         version, ref = body.get("version"), None
         bluetooth = self.check_bluetooth(body, None)  # None: as it is
         if channel == "release":
@@ -591,6 +600,33 @@ class Manager:
             return self.jobs.start(name, "delete", user, lambda job: self._delete_detached(job, name, remove_data, user))
         return self.jobs.start(name, "delete", user, lambda job: self._delete(job, managed, remove_data))
 
+    @staticmethod
+    def _foreign_version(known: dict | None, offered: object) -> str | None:
+        """Why the store's definition of a managed instance is not one the manager wrote: it offers a version the
+        registry never recorded (nor an update of the manager's own names, in flight).  The Supervisor's own Update
+        button, or its auto-update, would install that folder as it is, without the manager's checks.  None when it
+        is the manager's."""
+        if not known or not isinstance(offered, str):
+            return None
+        flag = known.get("updating")
+        fields = flag.get("fields") if isinstance(flag, dict) and isinstance(flag.get("fields"), dict) else {}
+        if offered in (known.get("version"), fields.get("version")):
+            return None
+        return (f"the store offers a definition the manager did not write ({offered[:40]}; the manager's is "
+                f"{known.get('version')}): do not update from the Supervisor's app page. Someone changed "
+                f"{names.folder_name(str(known.get('name')))}/ in the local apps folder; Repair writes the manager's "
+                "definition again, Delete removes the instance")
+
+    async def _refuse_foreign(self, managed: children.Managed) -> None:
+        """InvalidRequest while the store offers a definition of the instance the manager did not write."""
+        try:
+            offered = (await self.sv.store_app(managed.slug) or {}).get("version_latest")
+        except (SupervisorError, NotAllowed) as err:
+            raise InvalidRequest(str(err)) from None
+        foreign = self._foreign_version(managed.entry, offered)
+        if foreign:
+            raise InvalidRequest(f"{managed.name}: {foreign}")
+
     async def repair(self, name: str, user: str) -> Job:
         name = self.check_name(name)
         try:
@@ -601,7 +637,29 @@ class Manager:
             raise InvalidRequest(f"{name} is not in the manager's registry: not created by this manager, so it is not "
                                  "repaired")
         self._refuse_marked(name, known, check=True)
+        if await asyncio.to_thread(os.path.lexists, os.path.join(self.root, names.folder_name(name))):
+            # its folder is there: Repair only when it holds a definition the manager did not write
+            managed = await self.managed(name)
+            try:
+                offered = (await self.sv.store_app(managed.slug) or {}).get("version_latest")
+            except (SupervisorError, NotAllowed) as err:
+                raise InvalidRequest(str(err)) from None
+            if not self._foreign_version(managed.entry, offered):
+                raise InvalidRequest(f"{names.folder_name(name)} exists and holds the manager's definition: nothing to "
+                                     "repair")
+            return self.jobs.start(name, "repair", user, lambda job: self._repair_foreign(job, managed, user))
         return self.jobs.start(name, "repair", user, lambda job: self._repair(job, name, user))
+
+    async def _repair_foreign(self, job: Job, managed: children.Managed, user: str) -> dict:
+        """The store offers a definition the manager did not write: the folder goes (out of the store's sight), and
+        Repair writes the manager's definition of the installed version again, and checks the installed app."""
+        job.log(f"{names.folder_name(managed.name)} holds a definition the manager did not write: removing it")
+        try:
+            await asyncio.to_thread(children.remove, managed)
+            await self.sv.reload_store()
+        except (SupervisorError, NotAllowed, children.NotManaged, OSError) as err:
+            raise JobFailed(str(err)) from None
+        return await self._repair(job, managed.name, user)
 
     @staticmethod
     def _install_may_finish(entry: dict | None) -> str | None:
@@ -661,6 +719,7 @@ class Manager:
         options and the start)."""
         managed = await self.managed(name)
         self._refuse_marked(name, managed.entry, check=action == "finish")
+        await self._refuse_foreign(managed)
         if action == "install" and managed.entry.get("channel") == "git":
             raise InvalidRequest(GIT_NOT_INSTALLED.format(name=name))
         return self.jobs.start(name, action, user, lambda job: self._setup(job, managed, install=action == "install"))
