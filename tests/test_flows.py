@@ -191,6 +191,46 @@ class FlowTest(unittest.IsolatedAsyncioTestCase):
         _, data = await env.get("/api/instances")
         self.assertTrue(data["instances"][0]["managed"])
 
+    def _hand_made_app(self, folder="my_garage", slug="hri_garage"):
+        """A local app someone wrote by hand in another folder, with an instance's slug and HRI's url, installed."""
+        path = os.path.join(self.env.local_apps, folder)
+        os.makedirs(path)
+        with open(os.path.join(path, "config.yaml"), "w") as fh:
+            fh.write(f"slug: {slug}\nname: My garage\nversion: '0.25.0'\nurl: https://github.com/trailro/hass-remote-integration\n")
+        self.env.stub.installed[f"local_{slug}"] = {"slug": f"local_{slug}", "name": "My garage", "version": "0.25.0",
+                                                    "state": "started", "url": "https://github.com/trailro/hass-remote-integration",
+                                                    "repository": "local"}
+
+    async def test_repair_only_for_a_detached_app_the_store_does_not_define(self):
+        """A hand-made local app with an instance's slug and HRI's url is not detached: Repair would write a second
+        definition of its slug and make it the manager's (deletable with its data)."""
+        env = self.env
+        self._hand_made_app()
+        await env.sv.reload_store()
+        _, data = await env.get("/api/instances")
+        self.assertEqual(data["instances"], [])
+        self.assertIn("local_hri_garage", [o["slug"] for o in data["others"]])
+        job = await env.job(await env.send("POST", "/api/instances/garage/repair"))
+        self.assertEqual(job["state"], "failed")
+        self.assertIn("not detached", job["error"])
+        self.assertFalse(os.path.lexists(self.folder("garage")))
+        self.assertIsNone(env.registry.get("garage"))
+
+    async def test_repair_refuses_when_the_store_finds_a_definition_after_reloading(self):
+        env = self.env
+        await self.create()
+        shutil.rmtree(self.folder("garage"))
+        await env.sv.reload_store()
+        _, data = await env.get("/api/instances")
+        self.assertEqual(data["instances"][0]["actions"], ["repair"])  # detached as far as the Supervisor knew
+        path = os.path.join(env.local_apps, "somewhere")  # meanwhile a definition of the slug appears elsewhere
+        os.makedirs(path)
+        with open(os.path.join(path, "config.yaml"), "w") as fh:
+            fh.write("slug: hri_garage\nname: x\nversion: '0.25.0'\n")
+        job = await env.job(await env.send("POST", "/api/instances/garage/repair"))
+        self.assertEqual(job["state"], "failed")
+        self.assertFalse(os.path.lexists(self.folder("garage")))
+
     async def test_foreign_apps_are_never_changed(self):
         env = self.env
         for action in ("start", "stop", "restart", "update", "repair"):
@@ -198,7 +238,7 @@ class FlowTest(unittest.IsolatedAsyncioTestCase):
             if action == "repair":  # a job that looks and refuses
                 job = await env.job((status, body))
                 self.assertEqual(job["state"], "failed")
-                self.assertIn("not hass-remote-integration", job["error"])
+                self.assertIn("left alone", job["error"])
             else:
                 self.assertEqual(status, 400, body)
         status, _ = await env.send("DELETE", "/api/instances/foreign")

@@ -90,7 +90,9 @@ class Manager:
             name = names.name_from_slug(slug)
             if name and slug not in seen:
                 entry = self._entry(name, None, app, latest)
-                if app.get("url") == names.HRI_URL:
+                # detached: the Supervisor has no definition of it anywhere (a hand-made local app with this slug is
+                # not detached, and Repair would write a second definition of its slug)
+                if app.get("url") == names.HRI_URL and app.get("detached") is True:
                     entry["problem"] = "installed, but its definition folder is gone (a partial restore?): repair writes it again"
                     entry["actions"] = ["repair"]
                     out.append(entry)
@@ -487,7 +489,15 @@ class Manager:
         try:
             if not any(a.get("slug") == slug for a in await self.sv.list_apps()):
                 raise JobFailed(f"{slug} is not installed: nothing to repair")
+            # only an app whose definition is gone from everywhere the store reads: after a reload, the Supervisor
+            # calls it detached and its store has no app of that slug
+            await self.sv.reload_store()
             info = await self.sv.app_info(slug)
+            if info.get("detached") is not True:
+                raise JobFailed(f"{slug} is not detached: a definition of it is in the local apps folder (in another "
+                                f"folder than {names.folder_name(name)}?), so it is not the manager's to repair: left alone")
+            if await self.sv.store_app(slug) is not None:
+                raise JobFailed(f"the Supervisor's store has a definition of {slug}: not repaired, left alone")
         except (SupervisorError, NotAllowed) as err:
             raise JobFailed(str(err)) from None
         if info.get("url") != names.HRI_URL:
