@@ -50,6 +50,20 @@ class Job:
         self.started = time.time()
         self.finished: float | None = None
         self.task: asyncio.Task | None = None
+        self._to_close: list = []
+
+    def keep(self, resource):
+        """``resource`` (with a close()) is closed when the job ends, whatever it ends with; returned as it is."""
+        self._to_close.append(resource)
+        return resource
+
+    def close_kept(self) -> None:
+        for resource in self._to_close:
+            try:
+                resource.close()
+            except Exception:  # noqa: BLE001 - closing never fails a job
+                _LOGGER.debug("closing %r failed", resource, exc_info=True)
+        self._to_close.clear()
 
     def log(self, message: str) -> None:
         _LOGGER.info("%s %s: %s", self.action, self.instance, message)
@@ -108,6 +122,7 @@ class Jobs:
                 _LOGGER.exception("%s %s failed", job.action, job.instance)
             job.log(f"failed: {job.error}")
         finally:
+            job.close_kept()
             job.finished = time.time()
             self._running.pop(job.instance, None)
 

@@ -75,6 +75,30 @@ class TarSafeTest(unittest.TestCase):
         self.assertFalse(os.path.lexists(os.path.join(dest, "abs")))
         self.assertFalse(os.path.lexists(os.path.join(dest, "out")))
 
+    def test_a_name_of_two_kinds_is_refused_when_opened(self):
+        """Not an OSError halfway through the extraction: the archive is refused before anything is written."""
+        cases = {
+            "a file and a link": ({"d/file": b"f", "x": b"x"}, [member(f"{TOP}/x", tarfile.SYMTYPE, linkname="d/file")]),
+            "a file and a folder": ({"x": b"x"}, [member(f"{TOP}/x", tarfile.DIRTYPE)]),
+            "a link and a folder": ({"d/file": b"f"}, [member(f"{TOP}/l", tarfile.SYMTYPE, linkname="d/file"),
+                                                       member(f"{TOP}/l", tarfile.DIRTYPE)]),
+            "below a link": ({"d/file": b"f", "l/x": b"x"}, [member(f"{TOP}/l", tarfile.SYMTYPE, linkname="d/file")]),
+            "below a file": ({"f": b"f", "f/x": b"x"}, []),
+        }
+        for what, (files, extra) in cases.items():
+            with self.subTest(what=what), self.assertRaises(tarsafe.UnsafeArchive):
+                tarsafe.open_archive(make_tarball(TOP, files, extra=extra))
+        # a folder listed with the files below it is fine
+        tarsafe.open_archive(make_tarball(TOP, {"d/file": b"f"}, extra=[member(f"{TOP}/d", tarfile.DIRTYPE)])).close()
+
+    def test_an_archive_is_closed_with_its_unpacked_file(self):
+        archive = tarsafe.open_archive(make_tarball(TOP, {"a": b"a"}))
+        with archive:
+            self.assertEqual(archive.read("a"), b"a")
+        self.assertTrue(archive.fileobj.closed)
+        self.assertTrue(archive.tar.closed)
+        archive.close()  # twice: nothing happens
+
     def test_caps(self):
         with mock.patch.object(tarsafe, "MAX_MEMBERS", 3), self.assertRaises(tarsafe.UnsafeArchive):
             tarsafe.open_archive(make_tarball(TOP, {str(i): b"" for i in range(5)}))
