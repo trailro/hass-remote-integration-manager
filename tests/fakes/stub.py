@@ -133,6 +133,8 @@ class Stub:
         # APP_DYNAMIC_PORT), as every release tag from 0.26.0 on does; and the commits served with it
         self.dynamic_port_refs: set[str] = set()
         self.dynamic_port_commits: set[str] = set()
+        # release tags (short names, v0.26.3) from 0.26.0 on served without it all the same
+        self.no_dynamic_port_refs: set[str] = set()
         self.store_override: dict[str, dict] = {}
         self.install_override: dict[str, dict] = {}
 
@@ -399,7 +401,8 @@ class Stub:
         self.commits.add(sha)
         short = ref.split("/", 2)[-1]
         release = re.fullmatch(r"refs/tags/v(\d+)\.(\d+)\.(\d+)", ref) if ref[len("refs/tags/v"):] in self.releases else None
-        dynamic = short in self.dynamic_port_refs or bool(release and tuple(map(int, release.groups())) >= (0, 26, 0))
+        dynamic = short not in self.no_dynamic_port_refs and (
+            short in self.dynamic_port_refs or bool(release and tuple(map(int, release.groups())) >= (0, 26, 0)))
         if dynamic:
             self.dynamic_port_commits.add(sha)
         if ref.startswith("refs/tags/v"):
