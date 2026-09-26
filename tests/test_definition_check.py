@@ -513,8 +513,8 @@ class FlowCheckTest(FlowBase):
         env.stub.installed["local_hri_garage"]["state"] = "stopped"
         refuse_foreign = env.manager._refuse_foreign
 
-        async def meanwhile_contained(managed):
-            await refuse_foreign(managed)
+        async def meanwhile_contained(managed, **kw):
+            await refuse_foreign(managed, **kw)
             env.registry.update("garage", tampered={"reason": "contained meanwhile", "uninstalled": False,
                                                     "stopped": False, "failure": "x"})
 
@@ -1060,6 +1060,35 @@ class DecoyFlowTest(FlowBase):
         job = await env.job(await env.send("POST", "/api/instances/garage/install"))
         self.assertEqual(job["state"], "succeeded", job)
         self.assertEqual(env.stub.installed["local_hri_garage"]["image"], stamp.HRI_IMAGE)
+
+    async def test_a_file_the_manager_cannot_read_blocks_installs_not_the_start_of_a_checked_instance(self):
+        """F7: a config.* the manager cannot read (here a FIFO) names no instance: it blocks every install and update,
+        with its path and what to do, but not Start or Stop of an installed instance the manager has checked."""
+        env = self.env
+        self.assertEqual((await self.create())["state"], "succeeded")
+        env.stub.installed["local_hri_garage"]["state"] = "stopped"
+        os.makedirs(os.path.join(env.local_apps, "someones_app"))
+        os.mkfifo(os.path.join(env.local_apps, "someones_app", "config.yaml"))
+        decoys, data = await self.listed_decoys()
+        self.assertIn("remove it", decoys["someones_app/config.yaml"]["problem"])
+        (row,) = data["instances"]
+        self.assertEqual(row["actions"], ["start", "delete"])
+        self.assertIn("'someones_app/config.yaml'", row["problem"])
+        job = await env.job(await env.send("POST", "/api/instances/garage/start"))
+        self.assertEqual(job["state"], "succeeded", job)
+        job = await env.job(await env.send("POST", "/api/instances/garage/stop"))
+        self.assertEqual(job["state"], "succeeded", job)
+        status, answer = await env.send("POST", "/api/instances/garage/update", {"version": "0.25.1"})
+        self.assertEqual(status, 400, answer)
+        self.assertIn("'someones_app/config.yaml' in the local apps folder is not a regular file", answer["error"])
+
+    def test_the_entry_limit_names_where_it_stopped(self):
+        root = self.env.local_apps
+        for i in range(5):
+            write(os.path.join(root, "many", f"f{i}"), b"x")
+        with mock.patch.object(stamp, "MAX_SCAN_ENTRIES", 3), self.assertRaises(stamp.ScanError) as ctx:
+            stamp.decoys(root)
+        self.assertIn("'many/f", str(ctx.exception))
 
     async def test_update_is_refused_while_a_decoy_of_the_new_version_appears(self):
         env = self.env
