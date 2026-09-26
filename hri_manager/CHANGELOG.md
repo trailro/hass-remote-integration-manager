@@ -6,10 +6,17 @@ Fixes from an external review of 0.1.1, and Bluetooth per instance. Still **expe
 
 - **It installs only what it wrote.** Anyone who can write the local apps folder could change an instance's
   `config.yaml` between the manager's write and the Supervisor's reading of it, and the manager's own install or
-  update would then install it (`hassio_role: admin`, full access...). The manager now hashes every file it writes and
-  checks them before each store reload and right before the install or update, compares the store's definition with
-  what it stamped before, and the installed app's after: a difference refuses the install or update, or uninstalls the
-  app at once (its `/config` kept), marks the instance and says so.
+  update would then install it (`hassio_role: admin`, full access...). The manager now records every file it writes
+  (content, inode and change time, so a file changed and put back is caught too) and checks them before each store
+  reload, after the store read it and right before the install or update; it compares the store's definition with
+  what it stamped before, and the installed app's after, also before Finish setup, Repair or an update the Supervisor
+  had already made take an app over. A difference refuses the install or update, or marks the instance first and
+  then stops and uninstalls the app (its `/config` kept); if a broken marker blocks that, the job and the row say
+  plainly that it was NOT uninstalled and what to do. A marked instance is never started, installed, updated or
+  repaired. A field the Supervisor no longer reports stops and marks the app without uninstalling it.
+- **Git definitions are installed only from a fresh download**, never from the tree left in the local apps folder;
+  the copy in `/data` is kept from the bytes the build wrote, never read back from the folder; a FIFO in the folder no
+  longer blocks the manager.
 - **Bluetooth, per instance.** A box of the New instance form (and of the Update and Rebuild dialogs, applied with the
   new version) gives the instance the host's D-Bus (`host_dbus: true`) for an integration that talks to Bluetooth
   devices. Off unless chosen; HRI's template can never turn it on. See the README's Bluetooth section.
@@ -31,7 +38,9 @@ Fixes from an external review of 0.1.1, and Bluetooth per instance. Still **expe
   the copy in `/data` is checked before it is kept.
 - **Administrators:** `allowed_users` matches a user's id or login name, never the display name (any administrator can
   change it); a list whose entries are all blank refuses everyone; a hanging Home Assistant is asked once for all
-  waiting requests, and not again for 5 s.
+  waiting requests, and not again for 5 s. `allowed_users` is not a boundary between administrators, and the docs say
+  so.
+- **Bluetooth badge** shows what the installed app has, and an update the Supervisor already made records it.
 - **Smaller fixes:** "newer release" counts the installed version too; a row keeps all its problems; an uninstall
   always says whether the data goes; archives whose names clash are refused before anything is written, and closed
   after use; versions take ASCII digits only; Delete says "delete" when it fails; the wait for the store is measured
