@@ -5,7 +5,7 @@ name: HRI Manager
 # (.github/workflows/image.yml), after that version's image is on ghcr.io and anyone can pull it: never by hand, never
 # in a release (the store would offer a version whose image does not exist).  Without an image: line the Supervisor
 # builds this folder's Dockerfile on the device.
-version: "0.1.1"
+version: "0.1.2"
 image: ghcr.io/trailro/hass-remote-integration-manager
 slug: hri_manager
 description: Run several hass-remote-integration instances on one Home Assistant OS, one integration each
