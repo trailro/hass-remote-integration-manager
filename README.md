@@ -116,6 +116,16 @@ manager does not downgrade.
 The Supervisor's own **Update** button on the instance's app page appears only while the manager is updating it:
 updates go through the manager, which is what moves the definition.
 
+A release instance records the commit its release tag named. When the manager downloads the same tag again (a
+Repair, or rewriting the definition) and the tag names another commit, it refuses and flags the instance "tag
+moved": a release tag is not supposed to move.
+
+A newer manager may stamp definitions differently. Each definition records the manager's stamping version, and
+**Update** at the same HRI version rewrites a definition stamped by an older manager. The Supervisor applies an
+installed app's definition only when the app's version changes (it refuses an update to the same version), so the new
+stamping reaches the running instance at its next HRI update, or, for a git instance, its next rebuild of a new
+commit. The manager does not force a rebuild for it.
+
 HRI Manager itself is updated from the App Store like any app (an app cannot update itself).
 
 ## Deleting

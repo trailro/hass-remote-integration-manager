@@ -31,6 +31,11 @@ import yaml
 
 from . import children, names, tarsafe
 
+# the version of what stamp() and the builders write: raise it with any change to them.  An instance records it (marker
+# and registry), and an update at the same HRI version rewrites a definition stamped by an older manager.  The
+# Supervisor applies an installed app's definition only when the app's version changes (an update at the same version
+# is refused, AppNoUpdateAvailableError), so the new stamping reaches the running app at its next HRI update or rebuild
+STAMP_VERSION = 1
 HRI_BACKUP_PREFIX = f"*_{names.HRI_SLUG}/"
 STAMPED_KEYS = ("name", "version", "slug", "panel_title", "ports", "backup_exclude")
 CONFIG_SUFFIXES = (".yaml", ".yml", ".json")  # what the Supervisor's store reads as config.* (FILE_SUFFIX_CONFIGURATION)

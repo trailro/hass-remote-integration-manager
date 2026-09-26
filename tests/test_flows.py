@@ -6,10 +6,11 @@ import json
 import os
 import shutil
 import unittest
+from unittest import mock
 
 import yaml
 
-from hrimgr import children
+from hrimgr import children, stamp
 
 from .env import Env
 from .fakes.tarballs import sha_of
@@ -295,6 +296,43 @@ class FlowTest(unittest.IsolatedAsyncioTestCase):
         job = await env.job(await env.send("POST", "/api/instances/garage/update", {"version": "0.25.1"}))
         self.assertEqual(job["state"], "succeeded", job)  # the definition catches up, nothing to install
         self.assertEqual((self.marker("garage")["version"], env.stub.installed["local_hri_garage"]["version"]), ("0.25.1", "0.25.1"))
+
+    async def test_a_new_stamping_is_written_at_the_same_version(self):
+        """A manager whose stamping changed rewrites an instance's definition even at the same HRI version (the
+        Supervisor applies it at the instance's next version change: a same-version update is refused)."""
+        env = self.env
+        await self.create()
+        self.assertEqual(self.marker("garage")["stamp_version"], stamp.STAMP_VERSION)
+        job = await env.job(await env.send("POST", "/api/instances/garage/update", {"version": "0.25.0"}))
+        self.assertEqual((job["state"], job["result"].get("unchanged")), ("succeeded", True))
+        with mock.patch.object(stamp, "STAMP_VERSION", stamp.STAMP_VERSION + 1):
+            job = await env.job(await env.send("POST", "/api/instances/garage/update", {"version": "0.25.0"}))
+        self.assertEqual(job["state"], "succeeded", job)
+        self.assertTrue(job["result"].get("restamped"))
+        self.assertEqual(self.marker("garage")["stamp_version"], stamp.STAMP_VERSION + 1)
+        self.assertEqual(env.registry.get("garage")["stamp_version"], stamp.STAMP_VERSION + 1)
+        self.assertEqual(env.changing_calls("local_hri_garage/update"), [])  # nothing for the Supervisor to install
+        self.assertTrue(any("next version change" in l["msg"] for l in job["lines"]), job["lines"])
+
+    async def test_a_moved_release_tag_is_refused_and_flagged(self):
+        env = self.env
+        await self.create()
+        installed_sha = self.marker("garage")["sha"]
+        env.stub.moved["v0.25.0"] = sha_of("someone force-pushed the tag")
+        with mock.patch.object(stamp, "STAMP_VERSION", stamp.STAMP_VERSION + 1):
+            job = await env.job(await env.send("POST", "/api/instances/garage/update", {"version": "0.25.0"}))
+        self.assertEqual(job["state"], "failed")
+        self.assertIn("tag moved", job["error"])
+        self.assertEqual(self.marker("garage")["sha"], installed_sha)  # the definition is untouched
+        _, data = await env.get("/api/instances")
+        self.assertIn("tag moved", data["instances"][0]["problem"])
+        # the same for a repair from the registry
+        shutil.rmtree(self.folder("garage"))
+        await env.sv.reload_store()
+        job = await env.job(await env.send("POST", "/api/instances/garage/repair"))
+        self.assertEqual(job["state"], "failed")
+        self.assertIn("tag moved", job["error"])
+        self.assertFalse(os.path.exists(self.folder("garage")))
 
     async def test_a_failed_update_puts_the_previous_definition_back(self):
         env = self.env

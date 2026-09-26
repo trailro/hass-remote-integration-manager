@@ -24,6 +24,10 @@ class JobFailed(Exception):
     """A failure whose message is for the user as it is."""
 
 
+class TagMoved(JobFailed):
+    """A release tag that no longer names the commit an instance was installed from."""
+
+
 class Job:
     def __init__(self, instance: str, action: str, user: str):
         self.id = secrets.token_hex(8)

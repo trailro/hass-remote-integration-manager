@@ -18,7 +18,7 @@ from typing import Any
 
 from . import VERSION, children, names, stamp
 from .github import GitHub, GitHubError, latest_stable
-from .jobs import Job, JobFailed, Jobs
+from .jobs import Job, JobFailed, Jobs, TagMoved
 from .registry import Registry, RegistryError
 from .supervisor import NotAllowed, SupervisorClient, SupervisorError
 
@@ -32,7 +32,8 @@ class InvalidRequest(ValueError):
     pass
 
 
-REGISTRY_FIELDS = ("name", "slug", "channel", "version", "ref_kind", "ref", "sha", "instance_id", "created_at", "updated_at")
+REGISTRY_FIELDS = ("name", "slug", "channel", "version", "ref_kind", "ref", "sha", "instance_id", "created_at", "updated_at",
+                   "stamp_version")
 
 
 class Manager:
@@ -161,6 +162,8 @@ class Manager:
                 and (names.parse_version(latest["version"]) or ()) > (names.parse_version(marker.get("version")) or ())):
             entry["newer_release"] = latest["version"]
         actions = []
+        if known and known.get("tag_moved"):
+            entry["problem"] = str(known["tag_moved"])[:300]
         if app is None:
             entry["problem"] = "defined, but not installed: Install installs and starts it"
             actions.append("install")
@@ -283,7 +286,10 @@ class Manager:
             await asyncio.sleep(self.poll_interval)
             waited += self.poll_interval
 
-    async def _fetch(self, job: Job, channel: str, version: str | None, ref: tuple[str, str] | None):
+    async def _fetch(self, job: Job, channel: str, version: str | None, ref: tuple[str, str] | None,
+                     recorded: str | None = None):
+        """The source archive.  ``recorded``: the commit this instance got from the same release tag before; a tag
+        that names another commit now was moved (force-pushed), and is refused."""
         expected = None
         try:
             if channel == "release":
@@ -304,7 +310,16 @@ class Manager:
         if expected and archive.sha != expected:
             raise JobFailed(f"the {ref[0]} {ref[1]} moved while it was downloaded ({expected[:12]}, then "
                             f"{archive.sha[:12]}): try again")
+        if channel == "release" and recorded and archive.sha != recorded:
+            raise TagMoved(f"tag moved: v{version} was commit {recorded[:12]} when this instance got it and is "
+                           f"{(archive.sha or 'unknown')[:12]} now; refused (check HRI's release before trusting it)")
         return archive, url
+
+    async def _flag_moved(self, name: str, err: TagMoved) -> None:
+        try:
+            await asyncio.to_thread(self.registry.update, name, tag_moved=str(err))
+        except RegistryError as err2:
+            _LOGGER.error("%s", err2)
 
     async def _check_release(self, version: str) -> None:
         try:
@@ -321,6 +336,7 @@ class Manager:
             "manager": children.MANAGER_ID, "manager_version": VERSION, "name": name, "slug": names.supervisor_slug(name),
             "channel": channel, "version": version, "ref_kind": ref[0], "ref": ref[1], "sha": sha,
             "instance_id": (previous or {}).get("instance_id") or instance_id or secrets.token_hex(16),
+            "stamp_version": stamp.STAMP_VERSION,
             "template_source": source, "created_at": now, "created_by": user, "updated_at": now, "history": [],
         }
         if previous:
@@ -467,6 +483,7 @@ class Manager:
                       user: str) -> dict:
         marker = managed.marker
         channel = marker["channel"]
+        restamp = False
         try:
             info = await self._installed(managed)
         except (SupervisorError, NotAllowed) as err:
@@ -487,17 +504,26 @@ class Manager:
             if (names.parse_version(version) or ()) < (names.parse_version(current) or ()):
                 raise JobFailed(f"{version} is older than {current}: the manager does not downgrade")
             if version == marker.get("version") and info.get("version") == version:
-                job.log(f"already at {version}")
-                return {"version": version, "unchanged": True}
+                if marker.get("stamp_version") == stamp.STAMP_VERSION:
+                    job.log(f"already at {version}")
+                    return {"version": version, "unchanged": True}
+                restamp = True
             new_ref = ("tag", f"v{version}")
         else:
             new_ref = ref or self.check_ref(marker.get("ref_kind"), marker.get("ref"))
-        archive, source = await self._fetch(job, channel, version, new_ref)
+        try:
+            archive, source = await self._fetch(job, channel, version, new_ref,
+                                                recorded=marker.get("sha") if version == marker.get("version") else None)
+        except TagMoved as err:
+            await self._flag_moved(managed.name, err)
+            raise
         sha = archive.sha
         if channel == "git":
             if sha == marker.get("sha") and info.get("version") == marker.get("version"):
-                job.log(f"the {new_ref[0]} {new_ref[1]} is still {sha[:12]}: nothing to rebuild")
-                return {"version": marker.get("version"), "unchanged": True}
+                if marker.get("stamp_version") == stamp.STAMP_VERSION:
+                    job.log(f"the {new_ref[0]} {new_ref[1]} is still {sha[:12]}: nothing to rebuild")
+                    return {"version": marker.get("version"), "unchanged": True}
+                restamp = True
             version = names.git_version(sha)
             if version == marker.get("version") and sha != marker.get("sha"):
                 raise JobFailed(f"commit {sha[:12]} has the same version {version} as the installed {marker.get('sha', '')[:12]}: "
@@ -530,8 +556,13 @@ class Manager:
                 raise JobFailed(str(err)) from None
             raise
         await asyncio.to_thread(replacement.commit)
-        await asyncio.to_thread(self.registry.update, managed.name, **{k: new_marker[k] for k in ("version", "ref_kind", "ref", "sha", "updated_at")})
-        return {"version": version, "state": after.get("state")}
+        await asyncio.to_thread(self.registry.update, managed.name, tag_moved=None,
+                                **{k: new_marker[k] for k in ("version", "ref_kind", "ref", "sha", "updated_at", "stamp_version")})
+        if restamp:
+            job.log(f"the definition is stamped by this manager now (stamping {marker.get('stamp_version')} -> "
+                    f"{stamp.STAMP_VERSION}); the Supervisor applies it to the running app at its next version change "
+                    "(an HRI update, or a rebuild of a new commit), not at the same version")
+        return {"version": version, "state": after.get("state"), "restamped": restamp}
 
     async def _rollback_update(self, job: Job, replacement: children.Replacement) -> None:
         try:
@@ -618,7 +649,13 @@ class Manager:
                             "which branch or tag to write again")
         else:
             raise JobFailed(f"cannot tell which HRI {version!r} is")
-        archive, source = await self._fetch(job, channel, version if channel == "release" else None, ref)
+        recorded = (entry.get("sha") if entry and channel == "release" and entry.get("channel") == "release"
+                    and entry.get("version") == version else None)
+        try:
+            archive, source = await self._fetch(job, channel, version if channel == "release" else None, ref, recorded=recorded)
+        except TagMoved as err:
+            await self._flag_moved(name, err)
+            raise
         sha = archive.sha
         if channel == "git" and names.git_version(sha) != version:
             job.log(f"the {ref[0]} {ref[1]} is now at {sha[:12]}, not the installed {version}: the definition is written "

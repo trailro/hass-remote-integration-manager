@@ -73,6 +73,7 @@ class Stub:
         self.page_size = 100  # the release list is paged: only the newest page_size are on its first page
         self.refs = {"main": sha_of("main-1")}  # branches
         self.tags = {"test-tag": sha_of("test-tag")}  # tags that are not releases
+        self.moved: dict[str, str] = {}  # a release tag force-pushed to another commit: tag -> its new commit
         self.codeload_paths: list[str] = []
         self.users: object = [dict(u) for u in USERS]  # what config/auth/list answers (tests put other shapes here)
         self.core_down = False
@@ -268,7 +269,7 @@ class Stub:
         if full.startswith("refs/heads/"):
             return self.refs.get(full[len("refs/heads/"):])
         if full.startswith("refs/tags/v") and full[len("refs/tags/v"):] in self.releases:
-            return sha_of("tag-" + full[len("refs/tags/v"):])
+            return self.moved.get(full[len("refs/tags/"):]) or sha_of("tag-" + full[len("refs/tags/v"):])
         if full.startswith("refs/tags/"):
             return self.tags.get(full[len("refs/tags/"):])
         return None
