@@ -159,7 +159,10 @@ of the keys the manager accepts from it. The instance's row shows a **Bluetooth*
   with the same name and the other choice (set its options again, see [Deleting](#deleting)).
 
 The manager checks around every install and update that the Supervisor installed `host_dbus` exactly as the registry
-says (see [Security model](#security-model)).
+says (see [Security model](#security-model)). When it writes the definition of the version already installed (Repair,
+automatic or not, Finish setup, an Update to the installed version), the definition takes what the installed app has,
+and the registry records it: its record may lag (an update recorded late, an older `/data` restored), and the app
+must not be taken for a changed one for that.
 
 ### Git channel (testing)
 

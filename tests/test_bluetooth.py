@@ -208,6 +208,70 @@ class BluetoothFlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertIs(self.installed_host_dbus(), True)
         self.assertIs((await self.row())["bluetooth"], True)
 
+    async def lagging_record(self):
+        """The state test_after_a_killed_update_... reached before the next start kept the new definition: the registry
+        (and the definition) say Bluetooth off while the installed app has the host's D-Bus: an update recorded late,
+        or an older /data restored."""
+        await self.create()
+        self.env.stub.installed["local_hri_garage"]["definition"]["host_dbus"] = True
+        self.assertIs(self.env.registry.get("garage")["bluetooth"], False)
+
+    def followed(self):
+        """The definition, the record, the marker and the copy say Bluetooth on, and the app was never uninstalled."""
+        env = self.env
+        self.assertIs(self.config()["host_dbus"], True)
+        self.assertIs(env.registry.get("garage")["bluetooth"], True)
+        self.assertIsNone(env.registry.get("garage").get("tampered"))
+        self.assertIn("local_hri_garage", env.stub.installed)
+        self.assertNotIn(("POST", "/addons/local_hri_garage/uninstall", {"remove_config": False}), env.stub.calls)
+        with open(os.path.join(env.data, "definitions", "garage", "config.yaml"), encoding="utf-8") as fh:
+            self.assertIs(yaml.safe_load(fh)["host_dbus"], True)
+
+    async def test_a_lagging_record_the_badge_and_a_same_version_update_follow_the_app(self):
+        await self.lagging_record()
+        row = await self.row()
+        self.assertIs(row["bluetooth"], True)
+        self.assertIn("Bluetooth: the installed app has the host's D-Bus", row["problem"])
+        job = await self.update(version="0.25.0")  # nothing to install: the definition and the record follow the app
+        self.assertEqual(job["state"], "succeeded", job)
+        self.followed()
+        self.assertNotIn("Bluetooth", (await self.row())["problem"] or "")
+        job = await self.update(version="0.25.0", bluetooth=False)  # the other value at the same version: refused
+        self.assertEqual(job["state"], "failed")
+        self.assertIn("only when the app's version changes", job["error"])
+
+    async def test_repair_of_a_lagging_record_follows_the_installed_app(self):
+        env = self.env
+        await self.lagging_record()
+        shutil.rmtree(os.path.join(env.local_apps, "hri_garage"))  # a restore without the local apps folder
+        await env.sv.reload_store()
+        job = await env.job(await env.send("POST", "/api/instances/garage/repair"))
+        self.assertEqual(job["state"], "succeeded", job)
+        self.assertTrue(any("the definition follows the app" in line["msg"] for line in job["lines"]))
+        self.followed()
+
+    async def test_automatic_repair_of_a_lagging_record_follows_the_installed_app(self):
+        env = self.env
+        await self.lagging_record()
+        shutil.rmtree(os.path.join(env.local_apps, "hri_garage"))
+        await env.sv.reload_store()
+        env.manager.auto_repair_interval = 300.0
+        await env.get("/api/instances")  # the list starts the automatic repair
+        await env.manager.jobs.wait_all()
+        self.followed()
+
+    async def test_finish_setup_of_a_lagging_record_follows_the_installed_app(self):
+        env = self.env
+        await self.lagging_record()
+        env.registry.update("garage", setup_complete=False)
+        job = await env.job(await env.send("POST", "/api/instances/garage/finish"))
+        self.assertEqual(job["state"], "succeeded", job)
+        self.followed()
+        with open(os.path.join(env.local_apps, "hri_garage", ".hri-manager.json"), encoding="utf-8") as fh:
+            self.assertIs(json.load(fh)["bluetooth"], True)
+        self.assertEqual(sorted(os.listdir(os.path.join(env.local_apps, "hri_garage"))),
+                         sorted(e for e in os.listdir(os.path.join(env.local_apps, "hri_garage")) if not e.startswith(".hri-new")))
+
     async def test_only_true_or_false(self):
         env = self.env
         status, body = await env.send("POST", "/api/instances", {"name": "garage", "version": "0.25.0", "bluetooth": "yes"})
