@@ -80,7 +80,9 @@ function autoNote(i) {
   if (!a) return '';
   if (a.state === 'running') return '<span class="problem">installed but detached (a restore without the local apps folder?): its definition is being written again automatically</span>';
   if (a.state === 'succeeded') return `<span class="sub">definition written again automatically at ${esc(a.at)}</span>`;
-  return `<span class="problem">automatic repair failed: ${esc(a.error)}. It is tried again every few minutes; Repair tries now.</span>`;
+  const next = a.next_try_in ? `, next try in about ${Math.max(1, Math.round(a.next_try_in / 60))} min` : '';
+  const count = a.failures > 1 ? ` (${a.failures} times)` : '';
+  return `<span class="problem">automatic repair failed${esc(count)}: ${esc(a.error)}${esc(next)}. Repair tries now.</span>`;
 }
 const LABELS = {start: 'Start', stop: 'Stop', restart: 'Restart', update: 'Update', delete: 'Delete', repair: 'Repair', install: 'Install', finish: 'Finish setup'};
 function actionsCell(i) {

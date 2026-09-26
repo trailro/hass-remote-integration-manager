@@ -115,10 +115,58 @@ class AutoRepairTest(unittest.IsolatedAsyncioTestCase):
         row = data["instances"][0]
         self.assertEqual((row["auto_repair"]["state"], row["actions"]), ("failed", ["repair"]))
         self.assertIn("unreachable", row["auto_repair"]["error"])
+        self.assertGreater(row["auto_repair"]["next_try_in"], 0)
         env.manager._auto_checked -= instances.AUTO_REPAIR_INTERVAL + 1
+        env.manager.auto_backoff["garage"]["next"] = 0  # its back-off has passed too
         await env.get("/api/instances")
         await self.wait_jobs()
         self.assertTrue(os.path.isdir(self.folder("garage")))
+
+    async def test_repeated_failures_back_off_and_log_once(self):
+        """GitHub down for long: each instance waits twice as long after each failure, up to a day; the first failure
+        is a warning, the repeats debug lines; the row shows the last failure and when the next try is."""
+        env = self.env
+        await self.create("garage")
+        await self.restore_without_the_local_apps_folder()
+        shutil.rmtree(os.path.join(env.data, "definitions", "garage"))
+        manager = env.manager
+        manager.auto_repair_interval = instances.AUTO_REPAIR_INTERVAL
+
+        async def check():
+            manager._auto_checked = None  # the global cadence is not what this test is about
+            await env.get("/api/instances")
+            await self.wait_jobs()
+            return len([j for j in manager.jobs.recent() if j.action == "repair"])
+
+        down = mock.patch.object(env.gh, "_get", side_effect=GitHubError("GitHub unreachable: ClientConnectorError"))
+        down.start()
+        self.addCleanup(mock.patch.stopall)
+        with self.assertLogs("hrimgr.instances", level="DEBUG") as logs:
+            self.assertEqual(await check(), 1)
+            self.assertEqual(await check(), 1)  # within its back-off: not tried
+            delays = []
+            for attempt in (2, 3, 4):
+                manager.auto_backoff["garage"]["next"] = 0  # the back-off has passed
+                self.assertEqual(await check(), attempt)
+                delays.append(manager.auto_backoff["garage"]["delay"])
+        self.assertEqual(delays, [instances.AUTO_REPAIR_INTERVAL * 2, instances.AUTO_REPAIR_INTERVAL * 4,
+                                  instances.AUTO_REPAIR_INTERVAL * 8])
+        warnings = [r for r in logs.records if r.levelname == "WARNING" and "garage" in r.getMessage()]
+        self.assertEqual(len(warnings), 2, [r.getMessage() for r in warnings])  # the first start, the first failure
+        manager.auto_backoff["garage"].update(failures=30, next=0)
+        await check()
+        self.assertEqual(manager.auto_backoff["garage"]["delay"], instances.AUTO_REPAIR_MAX_DELAY)
+        _, data = await env.get("/api/instances")
+        note = data["instances"][0]["auto_repair"]
+        self.assertEqual(note["state"], "failed")
+        self.assertIn("unreachable", note["error"])
+        self.assertEqual(note["failures"], 31)
+        self.assertGreater(note["next_try_in"], 0)
+        down.stop()
+        manager.auto_backoff["garage"]["next"] = 0
+        await check()
+        self.assertTrue(os.path.isdir(self.folder("garage")))
+        self.assertNotIn("garage", manager.auto_backoff)  # a success forgets the failures
 
     async def test_never_another_version_and_not_again_when_it_needs_attention(self):
         """The installed commit of a git instance is gone: automatic repair writes nothing (not the branch's head), and
