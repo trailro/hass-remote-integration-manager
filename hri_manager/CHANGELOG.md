@@ -8,8 +8,9 @@ First release, **experimental**.
   or newer) as local apps, each with its own sidebar panel, options, data and backups: pick a name and a release,
   the manager writes HRI's own app definition for it, installs it, turns on start at boot, the Watchdog and the
   panel, and starts it.
-- Updates an instance to a newer HRI release; the app keeps its options and data. A failed update puts the
-  previous definition back.
+- Updates an instance to a newer HRI release; the app keeps its options and data. A failed update, or one stopped
+  by the manager's own stop, puts the previous definition back; a create is rolled back the same way, and what is
+  left over is offered as Finish setup, Install or Repair.
 - Starts, stops, restarts and deletes instances; deleting needs the instance's name typed, always removes its
   options (the Supervisor does) and keeps its `/config` folder unless you ask.
 - Repairs an instance whose definition folder is missing (on current Supervisors, a full backup leaves the local
@@ -19,6 +20,7 @@ First release, **experimental**.
 - Lists the published hass-remote-integration app, and other local apps named like instances, without touching
   them.
 - Security: the manager role is restricted in code to an allow-list of Supervisor calls, and only apps whose
-  folder carries the manager's marker are ever changed. The UI is served only through Home Assistant's ingress, and
+  folder carries the manager's marker, matching its own registry, are ever changed. HRI's app template is vetted
+  against a list of known keys and values before it is stamped. The UI is served only through Home Assistant's ingress, and
   only to Home Assistant's administrators: the app asks Home Assistant on every request and refuses when it cannot
   tell.

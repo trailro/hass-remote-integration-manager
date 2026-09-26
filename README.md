@@ -28,7 +28,8 @@ release you choose. On a plain Docker install you do not need this: run one HRI 
 1. **Settings > Apps > App Store**, menu **⋮ > Repositories**, add
    `https://github.com/trailro/hass-remote-integration-manager`.
 2. Install **HRI Manager**. The Supervisor builds it on your machine (a small Python image); this takes a minute.
-3. Start it and open **HRI Manager** in the sidebar.
+3. Start it and open **HRI Manager** in the sidebar. It is for Home Assistant administrators only (see
+   [Security model](#security-model)).
 
 ## Creating an instance
 
@@ -36,21 +37,23 @@ Under **New instance**, give a name and pick a release:
 
 - the name: lowercase letters, digits and `_`, starting with a letter, at most 20 characters. It becomes the app
   `local_hri_<name>`, shown as *HRI &lt;Name&gt;*, with the sidebar panel *HRI &lt;name&gt;*. It must not be the
-  slug of any installed app; `manager` and a few other words are reserved;
+  slug of any installed app, nor give the host name of one (the Supervisor writes `_` as `-` in host names, so
+  `local_hri_a-b` takes `a_b`); `manager` and a few other words are reserved;
 - the release: HRI releases from 0.25.0 on, newest first; pre-releases are marked.
 
 The manager then, as a job whose log the page shows:
 
 1. downloads that release's source from GitHub and takes its `app/` folder (config, docs, translations);
-2. writes the instance's definition to `hri_<name>/` in the local apps folder, stamped for this instance (below),
-   with a marker file `.hri-manager.json`;
+2. records the instance in its registry (`/data/instances.json`) and writes the instance's definition to
+   `hri_<name>/` in the local apps folder, stamped for this instance (below), with a marker file
+   `.hri-manager.json`;
 3. reloads the Supervisor's store and waits for `local_hri_<name>` to appear;
 4. installs it (the Supervisor pulls HRI's image), turns on **Start on boot**, the **Watchdog** and **Show in
    sidebar**, and starts it.
 
 If a step fails, what was done is undone: the app is uninstalled (its `/config` folder kept), the definition removed
 and the store reloaded. The same when the manager itself is stopped midway (for at most 8 seconds, within the
-Supervisor's stop timeout). Two cases are left for you to finish, and the page says which:
+Supervisor's stop timeout). Three cases are left for you to finish, and the page says which:
 
 - the Supervisor went on installing after the manager stopped waiting: the app is listed as **install interrupted**,
   with **Repair** (then **Finish setup** or **Delete**);
@@ -101,8 +104,9 @@ The manager downloads that source tree into the instance's folder, puts HRI's ap
 `image:` (so the Supervisor builds the folder's Dockerfile on your machine, which takes several minutes), removes
 every other file the Supervisor's store would read as an app (by its own rule: `config.*` ending in `.yaml`, `.yml`
 or `.json`, such as `docs/config.example.yaml`, outside dot folders and `rootfs/`) and nothing else, and gives it the
-version `0.0.0-<first 12 hex digits of the commit>`. A tree with `apparmor.txt`, `build.yaml/yml/json` or a `Dockerfile.<anything>` at its root
-is refused: the Supervisor would use them to confine or build the app instead of HRI's Dockerfile. HRI's page shows the commit as its build. **Rebuild** downloads the branch or tag again and
+version `0.0.0-<first 12 hex digits of the commit>`. A tree with `apparmor.txt`, `build.yaml/yml/json` or a
+`Dockerfile.<anything>` at its root is refused: the Supervisor would use them to confine or build the app instead of
+HRI's Dockerfile. HRI's page shows the commit as its build. **Rebuild** downloads the branch or tag again and
 rebuilds when its commit changed. Not for production.
 
 ## Updating
@@ -163,8 +167,9 @@ store still has no definition of its slug.
 
 ## Other HRI apps
 
-The published single app (`<repository>_hass_remote_integration`) and local apps whose slug looks like an instance
-but that the manager did not create are listed under **Other HRI apps**, read-only. Adopting the single app into the
+The published single app (`<repository>_hass_remote_integration`), local apps whose slug looks like an instance but
+that the manager did not create, and `hri_<name>/` folders whose marker the manager's registry does not hold are
+listed under **Other HRI apps**, read-only: the manager offers no action on them. Adopting the single app into the
 manager is on the roadmap.
 
 ## Security model
@@ -199,14 +204,18 @@ narrows itself, in code, and the tests pin it:
   SSH, another app) can write a marker, but not the manager's `/data`: a folder whose marker the registry does not
   hold is listed as not managed and gets no action, and a `local_hri_*` app without a marker is left alone.
 - **No secrets passed on.** The Supervisor includes an app's options in its info (an HRI instance's options hold its
-  password); the manager keeps only a list of harmless fields and never shows or logs options. The Supervisor token
-  and the optional GitHub token are never logged.
+  password); the manager keeps only a list of harmless fields and never shows or logs options. A Supervisor error
+  that quotes an app's options (invalid options: `… Got {…}`) is replaced by its error key and the app's slug. The
+  Supervisor token and the optional GitHub token are never logged: the log formatter removes them from every line,
+  tracebacks included.
 - **Files.** Writes stay inside `hri_<name>/` of the local apps folder: built in a hidden temporary folder and renamed
   into place, no symlink followed, YAML written with a safe dumper. Source archives from GitHub are checked before
   anything is written (no absolute paths, no `..`, no hard links or devices, links only to files of the same
-  archive, size and count caps).
-- **Network.** GitHub only: `api.github.com` (the release list, with the optional token) and `codeload.github.com`
-  (source archives, never with the token); no redirect followed.
+  archive, size and count caps; the gzip layer is unpacked as a capped stream first, so a huge tar header is refused
+  too), outside the event loop.
+- **Network.** Besides the Supervisor (and Core's websocket through it, for the administrator check below), GitHub
+  only: `api.github.com` (the release list and refs, with the optional token) and `codeload.github.com` (source
+  archives, never with the token); no redirect followed.
 - **Administrators only, checked by the app.** Through Home Assistant's ingress only: the app publishes no port, and
   it serves a request only when the connection comes from the Supervisor (`172.30.32.2`, checked on the socket, not
   in a header). Being logged in to Home Assistant is not enough: any user may open an app's ingress, and the panel

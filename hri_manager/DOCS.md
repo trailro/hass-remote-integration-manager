@@ -5,13 +5,14 @@ Runs several instances of
 integration each. Every instance is a separate local app, `local_hri_<name>`, with its own sidebar panel, options,
 data and backups.
 
-Open **HRI Manager** in the sidebar:
+Open **HRI Manager** in the sidebar (Home Assistant administrators only):
 
 - **New instance**: a name (lowercase letters, digits and `_`, at most 20) and an HRI release (0.25.0 or newer).
   The manager writes HRI's own app definition for it, installs it, turns on start at boot, the Watchdog and the
   sidebar panel, and starts it. The first start of an instance installs Home Assistant inside it, which takes a few
   minutes; open its panel to follow it.
-- **Update** takes an instance to a newer release; its options and data stay. **Delete** stops and uninstalls it
+- **Update** takes an instance to a newer release; its options and data stay. If a create or update stops midway,
+  the page offers what is left: **Finish setup**, **Install** or **Repair**. **Delete** stops and uninstalls it
   and needs its name typed. Its options (password, `ingress_users`) are always removed by the Supervisor; only its
   `/config` folder is kept, unless you tick the box. A new instance with the same name reuses that `/config` folder,
   without the old options: set them again.
@@ -41,7 +42,7 @@ the manager in the same backups: its `/data` holds the registry that Repair work
 
 The app has the Supervisor's **manager** role, which could stop or remove any app. The manager's code allows itself
 only the calls listed in the README's security section, and changes only the apps it created (their folder carries
-its marker). Its UI is reachable only through Home Assistant, and only by Home Assistant's administrators: the panel
+its marker, and its own registry in `/data` agrees). Its UI is reachable only through Home Assistant, and only by Home Assistant's administrators: the panel
 is hidden from other users, and the app checks it on its side too, on every request (it asks Home Assistant, and
 refuses when it cannot).
 
