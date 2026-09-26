@@ -1118,6 +1118,11 @@ class Manager:
                 job.log(f"updating {info.get('version')} -> {version}" + (" (building)" if channel == "git" else ""))
                 await self.sv.update(managed)
                 missing = await self._verify_installed(job, managed, expected)
+            elif version != marker.get("version"):
+                # the Supervisor finished an update the manager stopped waiting for: the app is taken over only as
+                # checked (a restamp at the same version is not: a newer stamping may report otherwise)
+                job.log(f"{managed.slug} is already at {version}: checking what the Supervisor installed")
+                missing = await self._verify_installed(job, managed, expected)
             after = await self.sv.app_info(managed.slug)
             if after.get("version") != version:
                 raise JobFailed(f"the Supervisor reports {after.get('version')} after the update, not {version}")
@@ -1204,6 +1209,13 @@ class Manager:
                     raise await self._hold(job, managed, missing)
             elif not installed:
                 raise JobFailed(f"{managed.slug} is not installed: Install it")
+            else:
+                # installed by a create the manager did not finish: taken over only once checked against its folder
+                expected, manifest = await asyncio.to_thread(self._definition_on_disk, managed)
+                await self._check_tree(managed.slug, manifest)
+                missing = await self._verify_installed(job, managed, expected)
+                if missing:
+                    raise await self._hold(job, managed, missing)
             await self._finish_setup(job, managed)
         except Tampered as err:
             mark = await self._contain(job, managed, str(err))
@@ -1393,7 +1405,15 @@ class Manager:
             raise JobFailed(f"the definition was not written: {err}") from None
         self._clear_auto(name, keep_job=job.id)  # an automatic repair's own note stays: it succeeded
         await self._save_copy(job, managed, bluetooth, built["files"])
-        await self._wait_store(job, slug, version)
+        await self._wait_store(job, slug, version, managed.manifest)
+        # the app keeps running as the Supervisor installed it: taken over only once it reports the definition written
+        try:
+            missing = await self._verify_installed(job, managed, stamp.expected_view(built["config"], slug))
+        except Tampered as err:
+            mark = await self._contain(job, managed, str(err))
+            raise self._tampered(managed, str(err), mark, "") from None
+        if missing:
+            raise await self._hold(job, managed, missing)
         return {"slug": slug, "version": version}
 
     async def _update_detached(self, job: Job, name: str, version: str | None, ref: tuple[str, str] | None,
