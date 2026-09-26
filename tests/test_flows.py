@@ -364,13 +364,28 @@ class FlowTest(unittest.IsolatedAsyncioTestCase):
         with mock.patch.object(env.registry, "update", side_effect=full_disk):
             job = await env.job(await env.send("POST", "/api/instances/garage/update", {"version": "0.25.1"}))
         self.assertEqual(job["state"], "succeeded", job)
-        self.assertIn("updated to 0.25.1, but the manager's records were not updated", job["result"]["warning"])
+        self.assertIn("updated to 0.25.1, but the manager's registry was not updated", job["result"]["warning"])
         self.assertEqual(env.stub.installed["local_hri_garage"]["version"], "0.25.1")
         self.assertEqual(sorted(os.listdir(env.local_apps)), ["hri_garage"])
         self.assertEqual(env.registry.get("garage")["version"], "0.25.0")
         children.cleanup_stale(env.local_apps, env.registry)  # the next start catches up
         entry = env.registry.get("garage")
         self.assertEqual((entry["version"], entry["updating"]), ("0.25.1", None))
+
+    async def test_a_previous_definition_that_cannot_be_removed_is_a_warning_and_goes_at_the_next_start(self):
+        env = self.env
+        await self.create()
+        with mock.patch.object(children.Replacement, "commit", side_effect=PermissionError(13, "Permission denied")):
+            job = await env.job(await env.send("POST", "/api/instances/garage/update", {"version": "0.25.1"}))
+        self.assertEqual(job["state"], "succeeded", job)
+        self.assertIn("the previous definition was not removed", job["result"]["warning"])
+        self.assertIn("the next start removes it", job["result"]["warning"])
+        entry = env.registry.get("garage")
+        self.assertEqual((entry["version"], entry["updating"]), ("0.25.1", None))  # recorded all the same
+        self.assertEqual(len(os.listdir(env.local_apps)), 2)
+        children.cleanup_stale(env.local_apps, env.registry)
+        self.assertEqual(sorted(os.listdir(env.local_apps)), ["hri_garage"])
+        self.assertEqual(self.config("garage")["version"], "0.25.1")
 
     async def test_a_later_failed_update_does_not_lose_an_earlier_update_s_record(self):
         env = self.env

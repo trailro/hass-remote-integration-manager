@@ -1168,15 +1168,22 @@ class Manager:
             if isinstance(err, (SupervisorError, NotAllowed)):
                 raise JobFailed(str(err)) from None
             raise
-        warning = None
+        # the record first, then the previous definition goes: stopped between the two, the next start finds no flag
+        # and removes the previous definition (children.cleanup_stale), so the update stands either way
+        warnings = []
+        try:
+            await asyncio.to_thread(self.registry.update, managed.name, updating=None, **recorded)
+        except RegistryError as err:
+            warnings.append(f"the manager's registry was not updated ({err}); its flag lets the next start record "
+                            "the update")
         try:
             await asyncio.to_thread(replacement.commit)
-            await asyncio.to_thread(self.registry.update, managed.name, updating=None, **recorded)
-        except (OSError, RegistryError) as err:
-            # the app is updated and its definition in place: only the manager's own records lag, and the flag left
-            # in the registry lets the next start record the update (children.cleanup_stale)
-            warning = (f"updated to {version}, but the manager's records were not updated ({err}); they catch up when "
-                       "the manager starts again")
+        except OSError as err:
+            warnings.append(f"the previous definition was not removed ({err}); "
+                            + ("the next start removes it" if not warnings else
+                               "with the record missing too, the next start puts it back: Update again then"))
+        warning = f"updated to {version}, but " + "; and ".join(warnings) if warnings else None
+        if warning:
             job.log(f"warning: {warning}")
             _LOGGER.warning("%s: %s", managed.name, warning)
         await self._save_copy(job, managed, bluetooth, built["files"])
