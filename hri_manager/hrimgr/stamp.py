@@ -26,10 +26,14 @@ manager version that vets it.  The YAML is written with ``yaml.safe_dump``."""
 
 from __future__ import annotations
 
+import errno
 import fnmatch
+import json
 import os
 import re
 import reprlib
+import stat
+from dataclasses import dataclass
 from typing import Any
 
 import yaml
@@ -179,9 +183,9 @@ def vet_template(data: dict) -> None:
 # host_ipc, host_uts, host_dbus, privileged, devices, uart, usb, gpio, video, audio, kernel_modules, devicetree,
 # udev, ports, map or image (only "build", whether there is an image).  GET /addons/<slug>/info (api/apps.py
 # info_data) reports INSTALLED_VIEW of the installed app; it does not report map, image, backup_pre or backup_post
-# either (neither does the store).  Those two, and
-# every other key, are covered only by children.check_tree: the folder's files are hashed when written and checked
-# again before each store reload and right before the install or update.
+# either (neither does the store).  Those, and every other key, rest on the folder checks alone: children.check_tree
+# (the folder's files, hashed when written, checked again before each store reload, right before the install or
+# update and right after it) and decoys (no other config.* of the local apps folder declares the slug).
 STORE_VIEW = ("slug", "name", "url", "version", "build", "ingress", "hassio_role", "hassio_api", "homeassistant_api",
               "auth_api", "full_access", "docker_api", "host_network", "host_pid", "apparmor")
 INSTALLED_VIEW = STORE_VIEW + ("host_ipc", "host_uts", "host_dbus", "privileged", "devices", "uart", "usb", "gpio",
@@ -363,6 +367,97 @@ def build_git(archive: tarsafe.Archive, dest: str, name: str, version: str, sha:
     else:
         notes.append("Dockerfile: no 'ARG HRI_BUILD=local' line; the build shows as 'local'")
     return config, notes
+
+
+MAX_SCAN_DEPTH = 40
+MAX_SCAN_ENTRIES = 500_000
+MAX_APP_CONFIG = 1024 * 1024
+# the Supervisor's own loader (utils/yaml.py: CSafeLoader when PyYAML has libyaml), so both read a file alike
+_LOADER = getattr(yaml, "CSafeLoader", yaml.SafeLoader)
+
+
+class ScanError(Exception):
+    """The local apps folder could not be searched for decoys: nothing may be installed, updated or started."""
+
+
+@dataclass(frozen=True)
+class Decoy:
+    """An app definition of the local apps folder that the Supervisor's store would take for (or as) an instance's."""
+
+    path: str  # of its config file, relative to the local apps folder
+    slug: str | None  # the slug it declares; None when the manager cannot read it
+    problem: str
+
+
+def _show_slug(slug: str) -> str:
+    return repr(slug[:60])
+
+
+def in_manager_space(slug: str) -> bool:
+    """Whether a slug is one an instance has or could have (``hri_*``), compared as the host names the Supervisor gives
+    apps (``_`` written ``-``, and without case, as DNS names are): a looser match than the store's own key."""
+    return names.host_key(slug).startswith(names.host_key(names.FOLDER_PREFIX))
+
+
+def decoys(root: str) -> list[Decoy]:
+    """The Supervisor's store finds local apps by globbing ``**/config.*`` over the WHOLE local apps folder
+    (store/data.py ``_find_app_configs``, ``is_app_config``) and keys each by the ``slug:`` inside the file, the last
+    one found winning: a ``config.*`` in any folder that declares ``hri_garage`` replaces the definition in
+    ``hri_garage/``, and the manager's own install or update installs it.  Its API does not say which file an app came
+    from (it keeps it, ATTR_LOCATION, and never reports it), so the manager searches the folder by the same rule: every
+    such file that declares a slug in the manager's space (in_manager_space) is a decoy, except an instance folder's
+    own definition, ``<slug>/config.yaml`` at the root of the folder named as its slug.  So is a ``config.*`` the
+    manager cannot read (not a regular file: a FIFO could serve the Supervisor a definition; larger than
+    MAX_APP_CONFIG; unreadable), while one that does not parse is not (the Supervisor cannot read it either).
+
+    Walked by folder descriptors, never through a link to a folder (as the Supervisor's glob), skipping dot folders and
+    ``rootfs``; a config file that is a link is read through it, as the Supervisor reads it.  Parsed values are never
+    spelled out (YAML aliases).  ScanError when the folder cannot be searched to its end."""
+    out: list[Decoy] = []
+    try:
+        real_root = os.path.realpath(root)
+        entries = children.walk(real_root, skip=lambda n: n.startswith(".") or n == "rootfs",
+                                max_depth=MAX_SCAN_DEPTH, max_entries=MAX_SCAN_ENTRIES)
+        for rel, name, parent, st in entries:
+            if stat.S_ISDIR(st.st_mode) or not is_app_config(rel):
+                continue
+            shown = tarsafe.show(rel)
+            try:
+                fd = children.open_regular(name, parent, follow=True)
+            except (FileNotFoundError, NotADirectoryError):
+                continue  # a link to nothing: the Supervisor cannot read it either
+            except children.UnsafePath:
+                out.append(Decoy(rel, None, f"{shown} is not a regular file, so the manager cannot check which app it "
+                                            "defines"))
+                continue
+            except OSError as err:
+                if err.errno == errno.ELOOP:
+                    continue
+                out.append(Decoy(rel, None, f"{shown} cannot be read ({err.strerror}), so the manager cannot check which "
+                                            "app it defines"))
+                continue
+            with os.fdopen(fd, "rb") as fh:
+                raw = fh.read(MAX_APP_CONFIG + 1)
+            if len(raw) > MAX_APP_CONFIG:
+                out.append(Decoy(rel, None, f"{shown} is larger than the manager reads, so it cannot check which app it "
+                                            "defines"))
+                continue
+            try:
+                data = json.loads(raw) if rel.endswith(".json") else yaml.load(raw.decode("utf-8"), Loader=_LOADER)
+            except (ValueError, UnicodeDecodeError, yaml.YAMLError):
+                continue
+            except RecursionError:
+                out.append(Decoy(rel, None, f"{shown} is nested too deeply for the manager to read"))
+                continue
+            slug = data.get("slug") if isinstance(data, dict) else None
+            if not isinstance(slug, str) or not in_manager_space(slug) or rel.split("/") == [slug, "config.yaml"]:
+                continue
+            out.append(Decoy(rel, slug, f"{shown} in the local apps folder declares the slug {_show_slug(slug)}, of "
+                                        "the manager's instances: the Supervisor's store may take it for the instance's "
+                                        "own definition and install it. Remove it (and find out who wrote it)"))
+    except (OSError, children.UnsafePath) as err:
+        raise ScanError(f"the local apps folder could not be searched for other definitions of the instances: {err}") from None
+    return out
 
 
 def find_configs(root: str) -> list[str]:

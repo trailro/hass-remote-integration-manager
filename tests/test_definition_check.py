@@ -184,7 +184,7 @@ class TreeTest(unittest.TestCase):
             children.check_tree(self.root, "garage", self.manifest)
 
 
-class FlowCheckTest(unittest.IsolatedAsyncioTestCase):
+class FlowBase(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.env = await Env(tmpdir(self)).start()
 
@@ -205,6 +205,9 @@ class FlowCheckTest(unittest.IsolatedAsyncioTestCase):
 
     def called(self, path: str, since: int = 0) -> bool:
         return any(m == "POST" and p == path for m, p, _ in self.env.stub.calls[since:])
+
+
+class FlowCheckTest(FlowBase):
 
     async def test_a_store_definition_with_another_role_is_never_installed(self):
         env = self.env
@@ -615,6 +618,230 @@ class FlowCheckTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("the installed definition is the one the manager wrote", lines)
         with open(os.path.join(self.folder(), children.MARKER), encoding="utf-8") as fh:
             self.assertEqual(json.load(fh)["slug"], names.supervisor_slug("garage"))
+
+
+
+def write(path: str, data: bytes) -> None:
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "wb") as fh:
+        fh.write(data)
+
+
+class DecoyScanTest(unittest.TestCase):
+    """R2-1: the Supervisor's store reads every config.* of the local apps folder (not in a dot folder or rootfs) and
+    keys each by the slug inside it, the last one found winning; the manager searches the folder by the same rule."""
+
+    def setUp(self):
+        self.root = tmpdir(self)
+        write(os.path.join(self.root, "hri_garage", "config.yaml"), b"slug: hri_garage\nversion: 0.25.0\n")
+        write(os.path.join(self.root, "my_app", "config.yaml"), b"slug: my_app\nversion: 1.0.0\n")
+
+    def found(self):
+        return {d.path: d.slug for d in stamp.decoys(self.root)}
+
+    def test_an_instance_s_own_definition_is_not_a_decoy(self):
+        self.assertEqual(self.found(), {})
+
+    def test_decoys_anywhere_in_the_folder(self):
+        cases = {
+            "x/config.yaml": b"slug: hri_garage\n",
+            "a/b/c/config.yml": b"slug: hri_garage\n",  # nested
+            "y/config.json": json.dumps({"slug": "hri_garage"}).encode(),  # another suffix
+            "docs/config.example.yaml": b"slug: hri_attic\n",  # config.* with a config suffix is read too
+            "hri_attic/config.yaml": b"slug: hri_garage\n",  # an instance folder declaring another instance
+            "hri_garage/config.json": b'{"slug": "hri_garage"}',  # beside the instance's own, not it
+            "hri_garage/sub/config.yaml": b"slug: hri_garage\n",  # below the instance's own folder
+            "z/config.yaml": b"slug: HRI-Garage\n",  # the same host name
+        }
+        for rel, data in cases.items():
+            write(os.path.join(self.root, *rel.split("/")), data)
+        found = self.found()
+        self.assertEqual(set(found), set(cases))
+        self.assertEqual(found["docs/config.example.yaml"], "hri_attic")
+
+    def test_what_the_supervisor_skips_is_skipped(self):
+        for rel, data in ((".hidden/config.yaml", b"slug: hri_garage\n"), ("z/rootfs/config.yaml", b"slug: hri_garage\n"),
+                          ("z/.git/config.yaml", b"slug: hri_garage\n"), ("w/config.js", b"slug: hri_garage\n"),
+                          ("w/config.txt", b"slug: hri_garage\n"), ("v/config.yaml", b"slug: [not yaml\n"),
+                          ("u/config.yaml", b"- a list\n"), ("t/notconfig.yaml", b"slug: hri_garage\n")):
+            write(os.path.join(self.root, *rel.split("/")), data)
+        self.assertEqual(self.found(), {})
+
+    def test_links_folders_are_not_walked_but_a_linked_config_is_read(self):
+        outside = tmpdir(self)
+        write(os.path.join(outside, "config.yaml"), b"slug: hri_garage\n")
+        os.symlink(outside, os.path.join(self.root, "linked"))  # the Supervisor's glob does not follow it either
+        self.assertEqual(self.found(), {})
+        os.makedirs(os.path.join(self.root, "x"))
+        os.symlink(os.path.join(outside, "config.yaml"), os.path.join(self.root, "x", "config.yaml"))
+        self.assertEqual(self.found(), {"x/config.yaml": "hri_garage"})
+
+    def test_what_the_manager_cannot_read_is_a_decoy(self):
+        os.makedirs(os.path.join(self.root, "f"))
+        os.mkfifo(os.path.join(self.root, "f", "config.yaml"))  # could serve the Supervisor any definition
+        write(os.path.join(self.root, "big", "config.yaml"), b"slug: hri_garage\n" + b"#" * stamp.MAX_APP_CONFIG)
+        self.assertEqual(self.found(), {"f/config.yaml": None, "big/config.yaml": None})
+
+    def test_an_alias_bomb_is_read_without_being_spelled_out(self):
+        doc = "a0: &a0 [x, x]\n" + "".join(f"a{i}: &a{i} [*a{i - 1}, *a{i - 1}]\n" for i in range(1, 30))
+        write(os.path.join(self.root, "b", "config.yaml"), (doc + "slug: hri_garage\nname: *a29\n").encode())
+        started = time.monotonic()
+        (decoy,) = stamp.decoys(self.root)
+        self.assertLess(time.monotonic() - started, 2)
+        self.assertLess(len(decoy.problem), 400)
+
+    def test_a_folder_too_deep_or_too_large_cannot_be_searched(self):
+        path = self.root
+        for _ in range(stamp.MAX_SCAN_DEPTH + 1):
+            path = os.path.join(path, "d")
+        os.makedirs(path)
+        with self.assertRaises(stamp.ScanError):
+            stamp.decoys(self.root)
+
+
+class DecoyFlowTest(FlowBase):
+    """R2-1 through the manager: a decoy makes create, install, update and start refuse before the Supervisor is
+    asked, one that appears around an install is contained, and the page lists every decoy."""
+
+    def decoy(self, rel="x/config.yaml", **over):
+        """A copy of the instance's definition elsewhere, with what neither Supervisor answer reports: a map of Home
+        Assistant's configuration and another image."""
+        config = {**self.config(), "map": [{"type": "homeassistant_config", "read_only": False}],
+                  "image": "example.com/evil/img", **over}
+        data = json.dumps(config) if rel.endswith(".json") else yaml.safe_dump(config)
+        write(os.path.join(self.env.local_apps, *rel.split("/")), data.encode())
+
+    async def listed_decoys(self):
+        _, data = await self.env.get("/api/instances")
+        return {o["name"]: o for o in data["others"] if o["kind"] == "decoy"}, data
+
+    async def test_create_is_refused_while_a_decoy_appears(self):
+        env = self.env
+        write_new = children.write_new
+
+        def then_decoy(root, name, build, registry):
+            managed = write_new(root, name, build, registry)
+            self.decoy()
+            return managed
+
+        with mock.patch.object(children, "write_new", then_decoy):
+            job = await self.create()
+        self.assertEqual(job["state"], "failed", job)
+        self.assertIn("'x/config.yaml' in the local apps folder declares the slug 'hri_garage'", job["error"])
+        self.assertFalse(self.called("/store/addons/local_hri_garage/install"))
+        self.assertNotIn("local_hri_garage", env.stub.installed)
+        self.assertFalse(os.path.exists(self.folder()))
+        self.assertIsNone(env.registry.get("garage"))
+        decoys, _ = await self.listed_decoys()
+        self.assertEqual(decoys["x/config.yaml"]["slug"], "local_hri_garage")
+        self.assertIn("Remove it", decoys["x/config.yaml"]["problem"])
+        # while it is there, no instance is created at all
+        status, body = await env.send("POST", "/api/instances", {"name": "attic", "channel": "release", "version": "0.25.0"})
+        job = await env.job((status, body))
+        self.assertEqual(job["state"], "failed", job)
+        self.assertEqual(self.env.changing_calls(), [])
+
+    async def test_what_the_supervisor_skips_does_not_refuse_anything(self):
+        env = self.env
+        for rel in (".hidden/config.yaml", "z/rootfs/config.yaml", ".hri-old-garage-0123abcd/config.yaml"):
+            write(os.path.join(env.local_apps, *rel.split("/")), b"slug: hri_garage\nversion: 9.9.9\n")
+        job = await self.create()
+        self.assertEqual(job["state"], "succeeded", job)
+        decoys, _ = await self.listed_decoys()
+        self.assertEqual(decoys, {})
+
+    async def test_install_and_start_are_refused_while_a_decoy_is_there(self):
+        env = self.env
+        self.assertEqual((await self.create())["state"], "succeeded")
+        env.stub.installed["local_hri_garage"]["state"] = "stopped"
+        for rel in ("x/config.yaml", "nested/deeper/config.yml", "j/config.json"):
+            with self.subTest(rel=rel):
+                self.decoy(rel)
+                decoys, data = await self.listed_decoys()
+                self.assertIn(rel, decoys)
+                (row,) = data["instances"]
+                self.assertEqual(row["actions"], ["delete"])
+                self.assertIn(f"{rel!r} in the local apps folder declares", row["problem"])
+                before = len(env.changing_calls())
+                for action in ("start", "restart", "update", "finish"):
+                    status, answer = await env.send("POST", f"/api/instances/garage/{action}", {"version": "0.25.1"})
+                    self.assertEqual(status, 400, (action, answer))
+                    self.assertIn("declares the slug", answer["error"])
+                self.assertEqual(env.changing_calls()[before:], [])
+                os.unlink(os.path.join(env.local_apps, *rel.split("/")))
+        del env.stub.installed["local_hri_garage"]  # a definition restored without its app: Install
+        self.decoy("nested/config.yaml")
+        status, answer = await env.send("POST", "/api/instances/garage/install")
+        self.assertEqual(status, 400, answer)
+        # past the request's check, the job's own refuses before the store is reloaded or the app installed
+        async def allowed(managed):
+            return None
+
+        since = len(env.stub.calls)
+        with mock.patch.object(env.manager, "_refuse_foreign", side_effect=allowed):
+            job = await env.job(await env.send("POST", "/api/instances/garage/install"))
+        self.assertEqual(job["state"], "failed", job)
+        self.assertIn("declares the slug", job["error"])
+        self.assertFalse(self.called("/store/addons/local_hri_garage/install", since))
+        self.assertNotIn(("POST", "/store/reload", {}), env.stub.calls[since:])
+        self.assertNotIn("local_hri_garage", env.stub.installed)
+
+    async def test_update_is_refused_while_a_decoy_of_the_new_version_appears(self):
+        env = self.env
+        self.assertEqual((await self.create())["state"], "succeeded")
+        replace = children.replace
+
+        def then_decoy(managed, build):
+            replacement = replace(managed, build)
+            self.decoy(rel="elsewhere/config.yaml")  # a copy of the new definition, with its version
+            return replacement
+
+        with mock.patch.object(children, "replace", then_decoy):
+            job = await env.job(await env.send("POST", "/api/instances/garage/update", {"version": "0.25.1"}))
+        self.assertEqual(job["state"], "failed", job)
+        self.assertIn("'elsewhere/config.yaml' in the local apps folder declares", job["error"])
+        self.assertFalse(self.called("/store/addons/local_hri_garage/update"))
+        self.assertEqual(env.stub.installed["local_hri_garage"]["version"], "0.25.0")
+        self.assertEqual(self.config()["version"], "0.25.0")  # the previous definition is back
+
+    async def test_a_decoy_that_appears_around_the_install_is_contained(self):
+        """Between the manager's last look and the Supervisor's install, a reload by anyone (the Supervisor's own
+        every 3 hours) can make the store take a decoy: found right after the install, the app is uninstalled."""
+        env = self.env
+        install = env.sv.install
+
+        async def decoy_then_install(managed):
+            self.decoy()
+            await env.sv.reload_store()  # someone else's reload
+            await install(managed)
+
+        with mock.patch.object(env.sv, "install", side_effect=decoy_then_install):
+            job = await self.create()
+        self.assertEqual(job["state"], "failed", job)
+        self.assertIn("after the install or update, 'x/config.yaml' in the local apps folder declares", job["error"])
+        self.assertIn("uninstalled at once", job["error"])
+        self.assertNotIn("local_hri_garage", env.stub.installed)
+        self.assertFalse(self.called("/addons/local_hri_garage/start"))
+
+    async def test_a_folder_changed_around_the_update_is_contained(self):
+        """R2-3: the folder is checked right after the update too, before the installed app is compared."""
+        env = self.env
+        self.assertEqual((await self.create())["state"], "succeeded")
+        update = env.sv.update
+
+        async def change_then_update(managed):
+            with open(os.path.join(self.folder(), "config.yaml"), "ab") as fh:
+                fh.write(b"map:\n  - type: homeassistant_config\n")  # neither answer reports it
+            await env.sv.reload_store()
+            await update(managed)
+
+        with mock.patch.object(env.sv, "update", side_effect=change_then_update):
+            job = await env.job(await env.send("POST", "/api/instances/garage/update", {"version": "0.25.1"}))
+        self.assertEqual(job["state"], "failed", job)
+        self.assertIn("was changed after the manager wrote it", job["error"])
+        self.assertIn("around the install or update", job["error"])
+        self.assertNotIn("local_hri_garage", env.stub.installed)
+        self.assertEqual(self.config()["version"], "0.25.0")
 
 
 if __name__ == "__main__":
