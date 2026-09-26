@@ -27,7 +27,9 @@ app page, or its auto-update): they install whatever the local apps folder holds
 manager's checks. Use the manager's **Update**. The manager's page flags an instance's definition it did not write,
 with **Repair** to write its own again, and lists any other file in the local apps folder that declares an
 instance's slug (the Supervisor's store could take it for the instance's): remove such a file, and find out who wrote
-it.
+it. So is a `config.*` that is a link, a FIFO or over 1 MiB; a local apps folder more than 40 folders deep or with
+more than 500,000 entries cannot be searched. While any of these is there, nothing is installed, updated or repaired
+(the page names the path and what to do).
 
 **Bluetooth** (a box of the **New instance** form) gives the instance the host's D-Bus (`host_dbus`), through
 which BlueZ offers the host's Bluetooth adapters: for an integration that talks to Bluetooth devices. D-Bus is a
