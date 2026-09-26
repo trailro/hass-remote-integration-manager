@@ -156,7 +156,17 @@ class PageTest(unittest.TestCase):
             self.assertIn(needle, html)
         self.assertIn("bluetooth, host_network}", js)  # the create form's body, both channels
         self.assertEqual(js.count("host_network: c.hostNetwork"), 2)  # Update and Rebuild
-        self.assertEqual(js.count("hostNetwork: !!i.host_network"), 2)
+        # the Update and Rebuild dialogs start from the manager's record, and say where the installed app differs
+        for access, key in (("bluetooth", "bluetooth"), ("hostNetwork", "host_network")):
+            self.assertEqual(js.count(f"{access}: recorded(i, '{key}')"), 2)
+        self.assertEqual(js.count("installed: i.installed ? i : undefined"), 2)
+        self.assertNotIn("!!i.host_network", js)
+        self.assertNotIn("!!i.bluetooth", js)
+        self.assertIn("const recorded = (i, access) => !!((i.recorded || i)[access]);", js)
+        for needle in ('id="cf-bt-diff"', 'id="cf-hn-diff"'):
+            self.assertIn(needle, html)
+        self.assertIn("accessDiff('#cf-bt-diff', !!bluetooth, installed && installed.bluetooth)", js)
+        self.assertIn("accessDiff('#cf-hn-diff', !!hostNetwork, installed && installed.host_network)", js)
         self.assertIn(">Host network</span>", js)  # the row's badge
 
 
@@ -215,6 +225,7 @@ class HostNetworkFlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertIs(self.installed_host_network(), True)  # what the check after the install expected
         row = await self.row()
         self.assertEqual((row["host_network"], row["bluetooth"]), (True, False))
+        self.assertEqual(row["recorded"], {"bluetooth": False, "host_network": True})
         self.assertTrue(any("with Host network: the instance gets the host's network (host_network)" in line["msg"]
                             for line in job["lines"]))
 
@@ -616,6 +627,8 @@ class HostNetworkFlowTest(unittest.IsolatedAsyncioTestCase):
         await self.lagging_record()
         row = await self.row()
         self.assertIs(row["host_network"], True)
+        # what the Update dialog starts from: the record, not the installed app
+        self.assertEqual(row["recorded"], {"bluetooth": False, "host_network": False})
         self.assertIn("Host network: the installed app has the host's network, the manager's record says off",
                       row["problem"])
         self.assertIn("the manager did not make that change", row["problem"])

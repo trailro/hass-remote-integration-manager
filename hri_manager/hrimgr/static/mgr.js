@@ -122,7 +122,15 @@ async function loadInstances() {
   body.querySelectorAll('button[data-job]').forEach(b => { b.onclick = () => watch(b.dataset.job); });
 }
 
-function dialog({title, text, ok, danger, versions, selected, ref, refKind, data, name, bluetooth, hostNetwork}) {
+// the Update and Rebuild dialog's choices start from the manager's record (what the row's badges show is what the
+// installed app has); where the two differ, the dialog says so next to the box
+const recorded = (i, access) => !!((i.recorded || i)[access]);
+function accessDiff(id, on, has) {
+  const el = $(id);
+  el.hidden = has === undefined || !!has === on;
+  el.textContent = el.hidden ? '' : ` The installed app has it ${has ? 'on' : 'off'}; the manager's record, which the box starts from, says ${on ? 'on' : 'off'}.`;
+}
+function dialog({title, text, ok, danger, versions, selected, ref, refKind, data, name, bluetooth, hostNetwork, installed}) {
   const d = $('#confirm');
   $('#cf-title').textContent = title; $('#cf-text').textContent = text;
   const okb = $('#cf-ok'); okb.textContent = ok; okb.className = danger ? 'danger' : 'primary';
@@ -133,6 +141,8 @@ function dialog({title, text, ok, danger, versions, selected, ref, refKind, data
   $('#cf-data-row').hidden = !data; $('#cf-data').checked = false;
   $('#cf-bt-row').hidden = bluetooth === undefined; $('#cf-bt').checked = !!bluetooth;
   $('#cf-hn-row').hidden = hostNetwork === undefined; $('#cf-hn').checked = !!hostNetwork;
+  accessDiff('#cf-bt-diff', !!bluetooth, installed && installed.bluetooth);
+  accessDiff('#cf-hn-diff', !!hostNetwork, installed && installed.host_network);
   $('#cf-name-row').hidden = !name; $('#cf-name').value = ''; $('#cf-name-hint').textContent = name || '';
   const sync = () => { okb.disabled = !!name && $('#cf-name').value !== name; };
   $('#cf-data').onchange = sync; $('#cf-name').oninput = sync; sync();
@@ -148,7 +158,7 @@ async function act(action, name) {
   let r;
   if (action === 'update') {
     if (i.channel === 'git') {
-      const c = await dialog({title: `Rebuild ${name}`, text: 'Downloads the branch or tag of hass-remote-integration again and, when its commit changed, builds and runs that code on this machine. For testing only. The app restarts; its data stays. Bluetooth and Host network change only with a new commit; Host network needs a branch or tag that has it (HRI 0.26.0 or newer).', ok: 'Rebuild', ref: i.ref || '', refKind: i.ref_kind, bluetooth: !!i.bluetooth, hostNetwork: !!i.host_network});
+      const c = await dialog({title: `Rebuild ${name}`, text: 'Downloads the branch or tag of hass-remote-integration again and, when its commit changed, builds and runs that code on this machine. For testing only. The app restarts; its data stays. Bluetooth and Host network change only with a new commit; Host network needs a branch or tag that has it (HRI 0.26.0 or newer).', ok: 'Rebuild', ref: i.ref || '', refKind: i.ref_kind, bluetooth: recorded(i, 'bluetooth'), hostNetwork: recorded(i, 'host_network'), installed: i.installed ? i : undefined});
       if (!c) return;
       r = await send('POST', `api/instances/${encodeURIComponent(name)}/update`, {...(c.ref ? {ref_kind: c.refKind, ref: c.ref} : {}), bluetooth: c.bluetooth, host_network: c.hostNetwork});
     } else {
@@ -157,7 +167,7 @@ async function act(action, name) {
       // an instance without its definition (needs attention): only newer releases; the installed one is Repair's
       const choices = releases.filter(x => i.managed ? vcmp(x.version, floor) >= 0 : vcmp(x.version, floor) > 0);
       if (!choices.length) { flash('No release at or above ' + floor + ' is known yet.', 'err'); return; }
-      const c = await dialog({title: `Update ${name}`, text: `From ${i.installed_version || i.version}. The Supervisor pulls the new image and restarts the app; its options and data stay. Bluetooth and Host network change only with a newer version; Host network needs HRI 0.26.0 or newer.`, ok: 'Update', versions: choices, selected: i.newer_release || latest, bluetooth: !!i.bluetooth, hostNetwork: !!i.host_network});
+      const c = await dialog({title: `Update ${name}`, text: `From ${i.installed_version || i.version}. The Supervisor pulls the new image and restarts the app; its options and data stay. Bluetooth and Host network change only with a newer version; Host network needs HRI 0.26.0 or newer.`, ok: 'Update', versions: choices, selected: i.newer_release || latest, bluetooth: recorded(i, 'bluetooth'), hostNetwork: recorded(i, 'host_network'), installed: i.installed ? i : undefined});
       if (!c) return;
       r = await send('POST', `api/instances/${encodeURIComponent(name)}/update`, {version: c.version, bluetooth: c.bluetooth, host_network: c.hostNetwork});
     }

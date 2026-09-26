@@ -571,7 +571,8 @@ class Manager:
             "sha": marker.get("sha") if marker else None,
             "newer_release": None, "problem": None, "ingress_url": None, "ingress_panel": False,
             "job": job.summary() if job else None, "actions": [], "auto_repair": None,
-            **self._access_of(known),
+            # bluetooth, host_network: what the installed app has once list() read it; recorded: the registry's
+            **self._access_of(known), "recorded": self._access_of(known),
         }
         if marker is None:
             return entry
