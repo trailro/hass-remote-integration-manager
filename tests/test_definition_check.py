@@ -386,7 +386,7 @@ class FlowCheckTest(FlowBase):
         _, data = await env.get("/api/instances")
         (row,) = data["instances"]
         self.assertIn("the store offers a definition the manager did not write (0.25.9", row["problem"])
-        self.assertIn("do not update from the Supervisor's app page", row["problem"])
+        self.assertIn("do not update or rebuild it from the Supervisor's app page", row["problem"])
         self.assertEqual(row["actions"], ["repair", "stop", "delete"])
         for path, body in (("start", {}), ("restart", {}), ("update", {"version": "0.25.1"}), ("finish", {})):
             with self.subTest(action=path):
@@ -403,6 +403,53 @@ class FlowCheckTest(FlowBase):
         self.assertFalse(data["instances"][0]["update_available"])
         status, answer = await env.send("POST", "/api/instances/garage/repair")  # nothing foreign any more
         self.assertEqual(status, 400)
+
+    async def test_a_same_version_definition_the_manager_did_not_write_is_flagged(self):
+        """R2-4: at the recorded version, a writer adds what neither Supervisor answer reports (a map of Home
+        Assistant's configuration): the Supervisor's own Rebuild would apply it.  The registry records the sha256 of
+        the config.yaml the manager wrote; another one is flagged as foreign, and Repair writes the manager's again."""
+        env = self.env
+        self.assertEqual((await self.create())["state"], "succeeded")
+        self.assertRegex(env.registry.get("garage")["config_sha256"], r"^[0-9a-f]{64}$")
+        with open(os.path.join(self.folder(), "config.yaml"), "a", encoding="utf-8") as fh:
+            fh.write("map:\n  - type: homeassistant_config\n    read_only: false\n")
+        _, data = await env.get("/api/instances")
+        (row,) = data["instances"]
+        self.assertIn("hri_garage/config.yaml is not the one the manager wrote for 0.25.0", row["problem"])
+        self.assertIn("do not update or rebuild it", row["problem"])
+        self.assertEqual(row["actions"], ["repair", "stop", "delete"])
+        for path in ("restart", "update", "finish"):
+            status, answer = await env.send("POST", f"/api/instances/garage/{path}", {"version": "0.25.1"})
+            self.assertEqual(status, 400, (path, answer))
+            self.assertIn("is not the one the manager wrote", answer["error"])
+        job = await env.job(await env.send("POST", "/api/instances/garage/repair"))
+        self.assertEqual(job["state"], "succeeded", job)
+        self.assertEqual(self.config()["map"], [{"type": "app_config", "read_only": False}])  # HRI's own
+        _, data = await env.get("/api/instances")
+        self.assertIsNone(data["instances"][0]["problem"])
+
+    async def test_a_mark_set_while_a_request_was_checked_stops_the_job(self):
+        """R2-6: a containment can finish between the request's check of the mark and the job: every job body reads
+        the mark again."""
+        env = self.env
+        self.assertEqual((await self.create())["state"], "succeeded")
+        env.stub.installed["local_hri_garage"]["state"] = "stopped"
+        refuse_foreign = env.manager._refuse_foreign
+
+        async def meanwhile_contained(managed):
+            await refuse_foreign(managed)
+            env.registry.update("garage", tampered={"reason": "contained meanwhile", "uninstalled": False,
+                                                    "stopped": False, "failure": "x"})
+
+        for action, body in (("start", {}), ("update", {"version": "0.25.1"})):
+            with self.subTest(action=action):
+                env.registry.update("garage", tampered=None)
+                since = len(env.stub.calls)
+                with mock.patch.object(env.manager, "_refuse_foreign", side_effect=meanwhile_contained):
+                    job = await env.job(await env.send("POST", f"/api/instances/garage/{action}", body))
+                self.assertEqual(job["state"], "failed", job)
+                self.assertIn("is marked", job["error"])
+                self.assertEqual([c for c in env.stub.calls[since:] if c[0] == "POST" and c[1] != "/store/reload"], [])
 
     def installed_as(self, **fields):
         """What the Supervisor holds of the installed app, changed behind the manager's back."""
@@ -586,6 +633,11 @@ class FlowCheckTest(FlowBase):
         with open(os.path.join(self.folder(), "config.yaml"), "ab") as fh:
             fh.write(b"full_access: true\n")
         since = len(env.stub.calls)
+        status, answer = await env.send("POST", "/api/instances/garage/install")  # not the config.yaml it wrote
+        self.assertEqual(status, 400, answer)
+        self.assertIn("is not the one the manager wrote", answer["error"])
+        # an instance last written by 0.1.2 has no sha256 recorded: the job's own check of the folder refuses it
+        env.registry.update("garage", config_sha256=None)
         job = await env.job(await env.send("POST", "/api/instances/garage/install"))
         self.assertEqual(job["state"], "failed", job)
         self.assertIn("not a definition this manager writes", job["error"])
