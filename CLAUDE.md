@@ -27,7 +27,7 @@ gitignored. Never commit them here or anywhere else in this public repository.
 
 ## Tests
 ```bash
-python3 -m venv <scratch>/venv && <scratch>/venv/bin/pip install aiohttp==3.14.3 pyyaml==6.0.3
+python3 -m venv <scratch>/venv && <scratch>/venv/bin/pip install --require-hashes -r hri_manager/requirements.txt
 <scratch>/venv/bin/python -m unittest discover -s tests -t .
 ```
 Keep venvs out of the repo. Check the exit code, never `| tail` the runner. All tests must pass before a commit.
