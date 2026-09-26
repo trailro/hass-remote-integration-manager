@@ -13,7 +13,7 @@ sidebar panel, **Configuration** tab, data folder, logs and backups.
 HRI itself is unchanged and stays the source of truth: the manager takes each instance's definition from the HRI
 release you choose. On a plain Docker install you do not need this: run one HRI container per integration.
 
-**Status: 0.1.1, experimental.** Home Assistant OS only (the Supervisor's local apps folder is required).
+**Status: 0.1.2, experimental.** Home Assistant OS only (the Supervisor's local apps folder is required).
 
 ## What it looks like
 
@@ -72,9 +72,10 @@ The manager then, as a job whose log the page shows:
    `hri_<name>/` in the local apps folder, stamped for this instance (below), with a marker file
    `.hri-manager.json`; a copy of the definition goes to its own `/data/definitions/<name>/` (see
    [Backups](#backups));
-3. reloads the Supervisor's store and waits for `local_hri_<name>` to appear;
-4. installs it (the Supervisor pulls HRI's image), turns on **Start on boot**, the **Watchdog** and **Show in
-   sidebar**, and starts it.
+3. reloads the Supervisor's store and waits for `local_hri_<name>` to appear, and checks that the store's definition
+   is the one it wrote (see [Security model](#security-model));
+4. installs it (the Supervisor pulls HRI's image), checks the installed app the same way, turns on **Start on boot**,
+   the **Watchdog** and **Show in sidebar**, and starts it.
 
 If a step fails, what was done is undone: the app is uninstalled (its `/config` folder kept), the definition removed
 and the store reloaded. The same when the manager itself is stopped midway (for at most 8 seconds, within the
@@ -424,8 +425,8 @@ manager in its development mode, which only environment variables the app cannot
 update / delete through the page's API and takes screenshots; see its header.
 
 CI runs the unit tests on Python 3.13 and 3.14, the app linter on the manager and on an instance stamped from HRI's
-template, the Supervisor's own schema checks of both (`.github/app_supervisor_check.py`, against a pinned Supervisor
-release; with its own backup filter over three instances side by side: no venv, HRI backups or logs in any of them,
+template, the Supervisor's own schema checks of both and of an instance with Bluetooth
+(`.github/app_supervisor_check.py`, against a Supervisor release pinned by its commit; with its own backup filter over three instances side by side: no venv, HRI backups or logs in any of them,
 their state kept), a build of the image for amd64 and arm64, and, once `config.yaml` names an image, an anonymous
 pull of that image at its version for both architectures (`.github/check_published_image.py`). A published release runs the Image workflow
 (`.github/workflows/image.yml`): it pushes the image for both architectures to ghcr.io and only then moves the app's
