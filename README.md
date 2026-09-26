@@ -68,6 +68,13 @@ Only what makes the copy a separate app; everything else is HRI's, as released:
 | `backup_exclude` | `*_hass_remote_integration/…` becomes `*_hri_garage/…`, so the instance's backups leave out its installed Home Assistant (about 800 MB) as HRI's do |
 | `webui` | dropped |
 
+Before stamping, the manager checks HRI's template against the keys it knows from HRI's own app (`hrimgr/stamp.py`,
+`TEMPLATE_KEYS`) and a vetted range for each: `map` only the instance's own `app_config`, `image` only HRI's, `url`
+only HRI's repository, option types without `device`, and so on. A template with any other key (`hassio_role`,
+`full_access`, `docker_api`, `privileged`, `host_network`, `devices`, `apparmor`, `environment`...) or a value
+outside its range is refused, on both channels, with "HRI's app definition has &lt;key&gt;, which this manager version
+does not accept; update the manager". `uart: true` is kept: HRI uses it for serial sticks.
+
 ### Git channel (testing)
 
 **Git branch or tag (testing)** builds HRI from a branch or a tag of

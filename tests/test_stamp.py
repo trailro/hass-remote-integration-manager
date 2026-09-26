@@ -69,6 +69,57 @@ class StampTest(unittest.TestCase):
             with self.subTest(raw=raw[:20]), self.assertRaises(stamp.TemplateError):
                 stamp.parse_template(raw)
 
+    def test_the_template_may_hold_only_the_vetted_keys(self):
+        """Both channels: a key HRI's template does not have, or one that gives more than HRI's app has, refuses the
+        whole definition instead of passing through to an app the manager writes with its role."""
+        for key, value in (("hassio_role", "admin"), ("hassio_api", True), ("full_access", True), ("docker_api", True),
+                           ("host_network", True), ("host_pid", True), ("host_dbus", True), ("privileged", ["SYS_ADMIN"]),
+                           ("devices", ["/dev/mem"]), ("apparmor", False), ("auth_api", True), ("homeassistant_api", True),
+                           ("kernel_modules", True), ("udev", True), ("usb", True), ("gpio", True), ("audio", True),
+                           ("video", True), ("environment", {"X": "1"}), ("init", False), ("stdin", True),
+                           ("tmpfs", True), ("discovery", ["mqtt"]), ("services", ["mqtt:need"]), ("realtime", True),
+                           ("journald", True), ("backup", "cold"), ("startup", "system")):
+            t = template()
+            t[key] = value
+            with self.subTest(key=key), self.assertRaises(stamp.TemplateError) as ctx:
+                stamp.parse_template(yaml.safe_dump(t).encode())
+            self.assertIn(f"has '{key}', which this manager version does not accept; update the manager", str(ctx.exception))
+
+    def test_values_outside_the_vetted_range_are_refused(self):
+        for key, value in (("map", [{"type": "homeassistant_config", "read_only": False}]),
+                           ("map", [{"type": "app_config", "read_only": False}, {"type": "backup"}]),
+                           ("map", ["config:rw"]), ("map", [{"type": "app_config", "path": "/"}]),
+                           ("image", "ghcr.io/someone/else"), ("url", "https://example.com/fork"),
+                           ("schema", {"port": "device(subsystem=tty)"}), ("schema", {"x": "device"}),
+                           ("schema", {"x": {"nested": "str"}}), ("options", {"x": {"nested": 1}}),
+                           ("ingress", False), ("ingress_port", 0), ("timeout", 1000), ("arch", ["amd64", "mips"]),
+                           ("arch", []), ("uart", "yes"), ("panel_icon", "javascript:alert(1)"),
+                           ("ports", {"8087/tcp": "8087"}), ("ports", {"8087": 8087}), ("ports_description", {"x": "y"})):
+            t = template()
+            t[key] = value
+            with self.subTest(key=key, value=value), self.assertRaises(stamp.TemplateError) as ctx:
+                stamp.parse_template(yaml.safe_dump(t).encode())
+            self.assertIn("update the manager", str(ctx.exception))
+
+    def test_hri_s_template_is_accepted(self):
+        """HRI's template at v0.25.0; at the time of writing HRI's main has the same keys (only version differs)."""
+        t = template()
+        stamp.vet_template(t)
+        self.assertEqual(set(t) - set(stamp.TEMPLATE_KEYS), set())
+        for value in ({"type": "app_config"}, {"type": "app_config", "read_only": True}):
+            stamp.vet_template({**t, "map": [value], "uart": False, "ports": {"8087/tcp": None}})
+
+    def test_a_git_tree_with_a_privileged_template_is_refused(self):
+        files = hri_files()
+        files["app/config.yaml"] += b"\nfull_access: true\n"
+        archive = tarsafe.open_archive(make_tarball("hass-remote-integration-x", files, sha_of("x")))
+        for build in (lambda d: stamp.build_git(archive, d, "garage", "0.0.0-abc", "a" * 40, "src"),
+                      lambda d: stamp.build_release(archive, d, "garage", "0.25.0", "src")):
+            dest = tmpdir(self)
+            with self.assertRaises(stamp.TemplateError):
+                build(dest)
+            self.assertEqual(os.listdir(dest), [])
+
     def test_a_slug_left_elsewhere_in_backup_exclude_is_refused(self):
         t = template()
         t["backup_exclude"] = t["backup_exclude"] + ["*/x_hass_remote_integration/y"]

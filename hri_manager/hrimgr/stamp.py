@@ -13,7 +13,12 @@ and the icons) from the HRI release or git ref and changes only what makes the c
 - ``webui`` dropped; ``image`` dropped for a git build (the Supervisor builds the folder instead).
 
 Everything else (options, schema, ingress, map, homeassistant, image, arch, timeout, uart...) is kept as HRI wrote
-it.  The YAML is written with ``yaml.safe_dump``."""
+it, after a check (``vet_template``): the template may hold only the keys this manager version knows from HRI's own
+template (``TEMPLATE_KEYS``), each with a value in the range vetted for it.  A key that could give an instance more
+than HRI's app has (``hassio_role``, ``full_access``, ``docker_api``, ``privileged``, ``host_network``, ``devices``,
+``apparmor``, a ``map`` of another folder...) is refused with the whole definition, whichever channel it comes from:
+the manager writes app definitions with the Supervisor's manager role, and a new key in HRI's template needs a new
+manager version that vets it.  The YAML is written with ``yaml.safe_dump``."""
 
 from __future__ import annotations
 
@@ -39,6 +44,105 @@ class TemplateError(Exception):
     pass
 
 
+def _string(value: Any) -> bool:
+    return isinstance(value, str) and 0 < len(value) <= 500
+
+
+def _bool(value: Any) -> bool:
+    return type(value) is bool
+
+
+def _int_in(low: int, high: int):
+    return lambda value: type(value) is int and low <= value <= high
+
+
+def _match(pattern: str):
+    regex = re.compile(pattern)
+    return lambda value: isinstance(value, str) and regex.fullmatch(value) is not None
+
+
+HRI_IMAGE = "ghcr.io/trailro/hass-remote-integration"
+PORT_RE = r"[1-9][0-9]{0,4}/(?:tcp|udp)"
+ARCHES = frozenset({"aarch64", "amd64", "armhf", "armv7", "i386"})
+# the Supervisor's option types (apps/options.py RE_SCHEMA_ELEMENT) without device(...): an option of that type maps
+# the host device it names into the container
+SCHEMA_ELEMENT = re.compile(r"(?:bool|email|url|port|str(?:\(\d*,\d*\))?|password(?:\(\d*,\d*\))?"
+                            r"|int(?:\(-?\d*,-?\d*\))?|float(?:\(-?[\d.]*,-?[\d.]*\))?|match\([^\n]{1,200}\)|list\([^\n]{1,200}\))\??")
+
+
+def _schema(value: Any) -> bool:
+    def element(v: Any) -> bool:
+        return isinstance(v, str) and SCHEMA_ELEMENT.fullmatch(v) is not None
+    return isinstance(value, dict) and all(
+        isinstance(k, str) and (element(v) or (isinstance(v, list) and len(v) == 1 and element(v[0])))
+        for k, v in value.items())
+
+
+def _options(value: Any) -> bool:
+    def plain(v: Any) -> bool:
+        return v is None or isinstance(v, (str, bool, int, float))
+    return isinstance(value, dict) and all(
+        isinstance(k, str) and (plain(v) or (isinstance(v, list) and all(plain(x) for x in v))) for k, v in value.items())
+
+
+def _map(value: Any) -> bool:
+    """Only the instance's own folder: app_config, as HRI maps it."""
+    return isinstance(value, list) and all(
+        isinstance(e, dict) and e.get("type") == "app_config" and set(e) <= {"type", "read_only"}
+        and _bool(e.get("read_only", False)) for e in value)
+
+
+def _ports(value: Any) -> bool:
+    return isinstance(value, dict) and all(
+        _match(PORT_RE)(k) and (v is None or _int_in(1, 65535)(v)) for k, v in value.items())
+
+
+def _ports_description(value: Any) -> bool:
+    return isinstance(value, dict) and all(_match(PORT_RE)(k) and _string(v) for k, v in value.items())
+
+
+# the keys of HRI's app template (tests/fixtures/hri_v0.25.0, and app/config.yaml on HRI's main when this manager
+# version was made) and the values vetted for each.  Anything else is refused: hassio_role, hassio_api, full_access,
+# docker_api, host_*, privileged, devices, apparmor, auth_api, homeassistant_api, kernel_modules, udev, usb, gpio,
+# audio, video, environment, init, stdin, tmpfs, discovery, services...
+TEMPLATE_KEYS: dict[str, Any] = {
+    "name": _string,
+    "version": _match(r"[0-9][0-9A-Za-z.+-]{0,40}"),
+    "slug": lambda v: v == names.HRI_SLUG,
+    "description": _string,
+    "url": lambda v: v == names.HRI_URL,
+    "homeassistant": _match(r"[0-9]{4}\.[0-9]{1,2}\.[0-9]{1,3}"),
+    "arch": lambda v: isinstance(v, list) and bool(v) and all(a in ARCHES for a in v),
+    "image": lambda v: v == HRI_IMAGE,
+    "timeout": _int_in(10, 300),
+    "map": _map,
+    "ingress": lambda v: v is True,
+    "ingress_port": _int_in(1, 65535),
+    "ingress_stream": _bool,
+    "panel_icon": _match(r"mdi:[a-z0-9-]{1,64}"),
+    "panel_title": _string,
+    "ports": _ports,
+    "ports_description": _ports_description,
+    "uart": _bool,  # HRI's serial sticks: /dev/ttyUSB*, /dev/ttyACM*
+    "options": _options,
+    "schema": _schema,
+    "backup_exclude": lambda v: isinstance(v, list) and all(_string(e) for e in v),
+    "webui": _string,  # dropped by stamp()
+}
+
+
+def vet_template(data: dict) -> None:
+    """Refuse a template with a key this manager does not know, or a value outside the range vetted for it."""
+    for key, value in data.items():
+        check = TEMPLATE_KEYS.get(key) if isinstance(key, str) else None
+        if check is None:
+            raise TemplateError(f"HRI's app definition has {str(key)[:60]!r}, which this manager version does not "
+                                "accept; update the manager")
+        if not check(value):
+            raise TemplateError(f"HRI's app definition has {key}: {str(value)[:80]!r}, a value this manager version "
+                                "does not accept; update the manager")
+
+
 def parse_template(raw: bytes) -> dict:
     if len(raw) > MAX_TEMPLATE:
         raise TemplateError("HRI's app/config.yaml is larger than expected")
@@ -57,6 +161,7 @@ def parse_template(raw: bytes) -> dict:
         raise TemplateError("HRI's app/config.yaml: ports is not a mapping")
     if not isinstance(data.get("backup_exclude"), list) or not all(isinstance(e, str) for e in data["backup_exclude"]):
         raise TemplateError("HRI's app/config.yaml: backup_exclude is not a list of strings")
+    vet_template(data)
     return data
 
 
