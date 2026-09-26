@@ -268,22 +268,22 @@ async def api_action(request: web.Request) -> web.Response:
     body = await _body(request)
     manager = _manager(request)
     if action in ("start", "stop", "restart"):
-        return _job(manager.action(name, action, request[USER_KEY]))
+        return _job(await manager.action(name, action, request[USER_KEY]))
     if action == "update":
-        return _job(manager.update(name, body, request[USER_KEY]))
+        return _job(await manager.update(name, body, request[USER_KEY]))
     if action == "repair":
-        return _job(manager.repair(name, request[USER_KEY]))
+        return _job(await manager.repair(name, request[USER_KEY]))
     if action in ("install", "finish"):
-        return _job(manager.setup(name, action, request[USER_KEY]))
+        return _job(await manager.setup(name, action, request[USER_KEY]))
     if action == "forget":
-        return _job(manager.forget(name, body, request[USER_KEY]))
+        return _job(await manager.forget(name, body, request[USER_KEY]))
     return _error(404, "no such action")
 
 
 @_handled
 async def api_delete(request: web.Request) -> web.Response:
     body = await _body(request)
-    return _job(_manager(request).delete(request.match_info["name"], body, request[USER_KEY]))
+    return _job(await _manager(request).delete(request.match_info["name"], body, request[USER_KEY]))
 
 
 @_handled

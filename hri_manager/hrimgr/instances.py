@@ -409,9 +409,11 @@ class Manager:
             return name, channel, None, self.check_ref(body.get("ref_kind"), body.get("ref")), bluetooth
         raise InvalidRequest("The channel is 'release' or 'git'.")
 
-    def managed(self, name: str) -> children.Managed:
+    async def managed(self, name: str) -> children.Managed:
+        """The instance's Managed, for a request: its marker and the registry (up to 4 MB) are read off the event loop."""
+        name = self.check_name(name)
         try:
-            return children.load_managed(self.root, self.check_name(name), self.registry)
+            return await asyncio.to_thread(children.load_managed, self.root, name, self.registry)
         except children.NotManaged as err:
             raise InvalidRequest(f"{name} is not an instance of this manager: {err}") from None
 
@@ -422,25 +424,29 @@ class Manager:
         return self.jobs.start(name, "create", user,
                                lambda job: self._create(job, name, channel, version, ref, user, bluetooth))
 
-    def action(self, name: str, action: str, user: str) -> Job:
-        managed = self.managed(name)
+    async def action(self, name: str, action: str, user: str) -> Job:
+        managed = await self.managed(name)
         return self.jobs.start(name, action, user, lambda job: self._simple(job, managed, action))
 
-    def _detached_entry(self, name: str) -> dict | None:
+    async def _detached_entry(self, name: str) -> dict | None:
         """The registry's entry of ``name`` when its folder is gone (a detached instance), else None."""
         name = self.check_name(name)
-        if os.path.lexists(os.path.join(self.root, names.folder_name(name))):
-            return None
-        try:
+
+        def read() -> dict | None:
+            if os.path.lexists(os.path.join(self.root, names.folder_name(name))):
+                return None
             return self.registry.get(name)
+
+        try:
+            return await asyncio.to_thread(read)
         except RegistryError as err:
             raise InvalidRequest(str(err)) from None
 
-    def update(self, name: str, body: dict, user: str) -> Job:
-        detached = self._detached_entry(name)
+    async def update(self, name: str, body: dict, user: str) -> Job:
+        detached = await self._detached_entry(name)
         channel = detached.get("channel") if detached else None
         if detached is None:
-            managed = self.managed(name)
+            managed = await self.managed(name)
             channel = managed.marker["channel"]
         version, ref = body.get("version"), None
         bluetooth = self.check_bluetooth(body, None)  # None: as it is
@@ -457,9 +463,9 @@ class Manager:
                                    lambda job: self._update_detached(job, name, version, ref, user, bluetooth))
         return self.jobs.start(name, "update", user, lambda job: self._update(job, managed, version, ref, user, bluetooth))
 
-    def delete(self, name: str, body: dict, user: str) -> Job:
-        detached = self._detached_entry(name)
-        managed = self.managed(name) if detached is None else None
+    async def delete(self, name: str, body: dict, user: str) -> Job:
+        detached = await self._detached_entry(name)
+        managed = await self.managed(name) if detached is None else None
         remove_data = body.get("remove_data", False)
         if not isinstance(remove_data, bool):
             raise InvalidRequest("remove_data is true or false.")
@@ -471,10 +477,10 @@ class Manager:
             return self.jobs.start(name, "delete", user, lambda job: self._delete_detached(job, name, remove_data, user))
         return self.jobs.start(name, "delete", user, lambda job: self._delete(job, managed, remove_data))
 
-    def repair(self, name: str, user: str) -> Job:
+    async def repair(self, name: str, user: str) -> Job:
         name = self.check_name(name)
         try:
-            known = self.registry.get(name)
+            known = await asyncio.to_thread(self.registry.get, name)
         except RegistryError as err:
             raise InvalidRequest(str(err)) from None
         if known is None:
@@ -496,7 +502,7 @@ class Manager:
                 f"{int(INTERRUPTED_GRACE // 60)} minutes after that (then, or once it is listed as installed, Repair "
                 "or Delete)")
 
-    def forget(self, name: str, body: dict, user: str) -> Job:
+    async def forget(self, name: str, body: dict, user: str) -> Job:
         """Drop the registry entry and the copy of an instance that is neither installed nor defined (checked again in
         the job).  Needs the name typed."""
         name = self.check_name(name)
@@ -505,7 +511,7 @@ class Manager:
         if os.path.lexists(os.path.join(self.root, names.folder_name(name))):
             raise InvalidRequest(f"{names.folder_name(name)} exists: {name} is defined, not something to forget")
         try:
-            pending = self._install_may_finish(self.registry.get(name))
+            pending = self._install_may_finish(await asyncio.to_thread(self.registry.get, name))
         except RegistryError as err:
             raise InvalidRequest(str(err)) from None
         if pending:
@@ -535,10 +541,10 @@ class Manager:
         job.log(f"forgot {name}: " + ("its registry entry and " if known else "") + "any copy of its definition")
         return {"forgotten": name}
 
-    def setup(self, name: str, action: str, user: str) -> Job:
+    async def setup(self, name: str, action: str, user: str) -> Job:
         """``install`` (a definition without its app) or ``finish`` (installed, but its create stopped before the
         options and the start)."""
-        managed = self.managed(name)
+        managed = await self.managed(name)
         return self.jobs.start(name, action, user, lambda job: self._setup(job, managed, install=action == "install"))
 
     def pending_setup(self) -> list[str]:
