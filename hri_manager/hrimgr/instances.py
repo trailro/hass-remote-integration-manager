@@ -10,11 +10,13 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import secrets
 from typing import Any
 
 from . import VERSION, children, names, stamp
 from .github import GitHub, GitHubError, latest_stable
 from .jobs import Job, JobFailed, Jobs
+from .registry import Registry, RegistryError
 from .supervisor import NotAllowed, SupervisorClient, SupervisorError
 
 _LOGGER = logging.getLogger(__name__)
@@ -25,13 +27,17 @@ class InvalidRequest(ValueError):
     pass
 
 
+REGISTRY_FIELDS = ("name", "slug", "channel", "version", "ref_kind", "ref", "sha", "instance_id", "created_at", "updated_at")
+
+
 class Manager:
-    def __init__(self, local_apps: str, supervisor: SupervisorClient, github: GitHub, jobs: Jobs, *,
+    def __init__(self, local_apps: str, supervisor: SupervisorClient, github: GitHub, jobs: Jobs, registry: Registry, *,
                  dev: bool = False, poll_interval: float = 2.0, store_timeout: float = 90.0):
         self.root = local_apps
         self.sv = supervisor
         self.gh = github
         self.jobs = jobs
+        self.registry = registry
         self.dev = dev
         self.poll_interval = poll_interval
         self.store_timeout = store_timeout
@@ -70,7 +76,7 @@ class Manager:
         apps = await self.sv.list_apps()
         installed = {a.get("slug"): a for a in apps if isinstance(a.get("slug"), str)}
         latest = latest_stable(self.gh.cached_releases())
-        folders = await asyncio.to_thread(children.scan, self.root)
+        folders = await asyncio.to_thread(children.scan, self.root, self.registry)
         out, others, seen = [], [], set()
         for name, marker, problem in folders:
             slug = names.supervisor_slug(name)
@@ -179,7 +185,7 @@ class Manager:
 
     def managed(self, name: str) -> children.Managed:
         try:
-            return children.load_managed(self.root, self.check_name(name))
+            return children.load_managed(self.root, self.check_name(name), self.registry)
         except children.NotManaged as err:
             raise InvalidRequest(f"{name} is not an instance of this manager: {err}") from None
 
@@ -270,11 +276,12 @@ class Manager:
             raise JobFailed(f"hass-remote-integration {version} is not a published release (0.25.0 or newer)")
 
     def _marker(self, name: str, channel: str, version: str, ref: tuple[str, str], sha: str | None, source: str, user: str,
-                previous: dict | None = None) -> dict:
+                previous: dict | None = None, instance_id: str | None = None) -> dict:
         now = children.now_iso()
         marker = {
             "manager": children.MANAGER_ID, "manager_version": VERSION, "name": name, "slug": names.supervisor_slug(name),
             "channel": channel, "version": version, "ref_kind": ref[0], "ref": ref[1], "sha": sha,
+            "instance_id": (previous or {}).get("instance_id") or instance_id or secrets.token_hex(16),
             "template_source": source, "created_at": now, "created_by": user, "updated_at": now, "history": [],
         }
         if previous:
@@ -285,6 +292,16 @@ class Manager:
             marker["history"] = history[-HISTORY:]
             marker["updated_by"] = user
         return marker
+
+    @staticmethod
+    def _registry_entry(marker: dict, **extra) -> dict:
+        return {**{k: marker.get(k) for k in REGISTRY_FIELDS}, "setup_complete": False, **extra}
+
+    def _forget(self, name: str, instance_id: str) -> None:
+        """Drop the registry's entry of ``name``, when it is still the one of that instance."""
+        entry = self.registry.get(name)
+        if entry and entry.get("instance_id") == instance_id:
+            self.registry.remove(name)
 
     def _builder(self, job: Job, archive, channel: str, name: str, version: str, sha: str | None, marker: dict, source: str):
         def build(tmp: str) -> dict:
@@ -321,9 +338,12 @@ class Manager:
         marker = self._marker(name, channel, version, ("tag", f"v{version}") if channel == "release" else ref, sha, source, user)
         job.log(f"writing {names.folder_name(name)}")
         try:
+            await asyncio.to_thread(self.registry.put, name, self._registry_entry(marker))
             managed = await asyncio.to_thread(children.write_new, self.root, name,
-                                              self._builder(job, archive, channel, name, version, sha, marker, source))
-        except (stamp.TemplateError, children.UnsafePath, OSError) as err:
+                                              self._builder(job, archive, channel, name, version, sha, marker, source),
+                                              self.registry)
+        except (stamp.TemplateError, children.UnsafePath, children.NotManaged, RegistryError, OSError) as err:
+            await asyncio.to_thread(self._forget, name, marker["instance_id"])
             raise JobFailed(f"the definition was not written: {err}") from None
         try:
             await self._wait_store(job, slug, version)
@@ -351,6 +371,7 @@ class Manager:
                 await self.sv.uninstall(managed, remove_config=False)
             job.log("removing the definition")
             await asyncio.to_thread(children.remove, managed)
+            await asyncio.to_thread(self._forget, managed.name, managed.marker["instance_id"])
             await self.sv.reload_store()
         except Exception as err:  # noqa: BLE001 - the original failure is what the job reports
             job.log(f"rollback incomplete: {err}")
@@ -414,7 +435,7 @@ class Manager:
         except (stamp.TemplateError, children.UnsafePath, children.NotManaged, OSError) as err:
             raise JobFailed(f"the definition was not written: {err}") from None
         try:
-            managed = children.load_managed(self.root, managed.name)
+            managed = children.load_managed(self.root, managed.name, self.registry)
             await self._wait_store(job, managed.slug, version)
             if info.get("version") != version:
                 job.log(f"updating {info.get('version')} -> {version}" + (" (building)" if channel == "git" else ""))
@@ -433,6 +454,7 @@ class Manager:
                 raise JobFailed(str(err)) from None
             raise
         await asyncio.to_thread(replacement.commit)
+        await asyncio.to_thread(self.registry.update, managed.name, **{k: new_marker[k] for k in ("version", "ref_kind", "ref", "sha", "updated_at")})
         return {"version": version, "state": after.get("state")}
 
     async def _delete(self, job: Job, managed: children.Managed, remove_data: bool) -> dict:
@@ -450,12 +472,15 @@ class Manager:
                 await self.sv.uninstall(managed, remove_config=remove_data)
             job.log(f"removing {names.folder_name(managed.name)}")
             await asyncio.to_thread(children.remove, managed)
+            await asyncio.to_thread(self._forget, managed.name, managed.marker["instance_id"])
             await self.sv.reload_store()
-        except (SupervisorError, NotAllowed, children.NotManaged) as err:
+        except (SupervisorError, NotAllowed, children.NotManaged, RegistryError) as err:
             raise JobFailed(str(err)) from None
         return {"removed": managed.slug, "data_removed": remove_data}
 
     async def _repair(self, job: Job, name: str, user: str) -> dict:
+        """Write the definition of an installed instance again: from the manager's registry when it has the
+        instance (its channel, branch or tag), else from the installed version (a release only)."""
         slug = names.supervisor_slug(name)
         if os.path.lexists(os.path.join(self.root, names.folder_name(name))):
             raise JobFailed(f"{names.folder_name(name)} exists: nothing to repair")
@@ -467,27 +492,50 @@ class Manager:
             raise JobFailed(str(err)) from None
         if info.get("url") != names.HRI_URL:
             raise JobFailed(f"{slug} is not hass-remote-integration (its url is {info.get('url')!r}): left alone")
+        try:
+            entry = await asyncio.to_thread(self.registry.get, name)
+        except RegistryError as err:
+            raise JobFailed(str(err)) from None
         version = str(info.get("version") or "")
-        git = names.GIT_VERSION_RE.fullmatch(version)
-        if names.parse_version(version) and names.supported_version(version):
+        if entry and entry.get("channel") == "git":
+            try:
+                channel, ref = "git", names.validate_ref(entry.get("ref_kind"), entry.get("ref"))
+            except ValueError as err:
+                raise JobFailed(f"the manager's registry has no usable branch or tag for {name}: {err}") from None
+        elif names.parse_version(version) and names.supported_version(version):
             channel, ref = "release", ("tag", f"v{version}")
             await self._check_release(version)
-        elif git:
-            raise JobFailed(f"{slug} is a git build ({version}): the manager does not know which branch or tag it came "
-                            "from, so it cannot write its definition again")
+        elif names.GIT_VERSION_RE.fullmatch(version):
+            raise JobFailed(f"{slug} is a git build ({version}) the manager's registry does not know: it cannot tell "
+                            "which branch or tag to write again")
         else:
             raise JobFailed(f"cannot tell which HRI {version!r} is")
         archive, source = await self._fetch(job, channel, version if channel == "release" else None, ref)
         sha = archive.sha
         if channel == "git" and names.git_version(sha) != version:
-            raise JobFailed(f"{ref} is commit {sha[:12]}, which is not the installed {version}")
-        marker = self._marker(name, channel, version, ref, sha, source, user)
-        marker["repaired_at"] = marker["created_at"]
-        job.log(f"writing {names.folder_name(name)} again for {version}")
+            job.log(f"the {ref[0]} {ref[1]} is now at {sha[:12]}, not the installed {version}: the definition is written "
+                    "for the new commit, and Rebuild installs it")
+            version = names.git_version(sha)
+        marker = self._marker(name, channel, version, ref, sha, source, user,
+                              instance_id=entry.get("instance_id") if entry else None)
+        marker["repaired_at"] = marker["updated_at"]
+        if entry:
+            marker["created_at"] = entry.get("created_at") or marker["created_at"]
+        setup_complete = entry.get("setup_complete", True) if entry else True
+        job.log(f"writing {names.folder_name(name)} again for {version}"
+                + (" (from the manager's registry)" if entry else ""))
         try:
+            await asyncio.to_thread(self.registry.put, name, self._registry_entry(marker, setup_complete=setup_complete))
             await asyncio.to_thread(children.write_new, self.root, name,
-                                    self._builder(job, archive, channel, name, version, sha, marker, source))
-        except (stamp.TemplateError, children.UnsafePath, OSError) as err:
+                                    self._builder(job, archive, channel, name, version, sha, marker, source), self.registry)
+        except (stamp.TemplateError, children.UnsafePath, children.NotManaged, RegistryError, OSError) as err:
+            await asyncio.to_thread(self._restore_entry, name, entry, marker["instance_id"])
             raise JobFailed(f"the definition was not written: {err}") from None
         await self._wait_store(job, slug, version)
         return {"slug": slug, "version": version}
+
+    def _restore_entry(self, name: str, entry: dict | None, instance_id: str) -> None:
+        if entry is not None:
+            self.registry.put(name, entry)
+        else:
+            self._forget(name, instance_id)

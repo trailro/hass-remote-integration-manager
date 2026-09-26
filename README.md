@@ -158,8 +158,11 @@ narrows itself, in code, and the tests pin it:
   a request body may carry only the keys and values listed. Everything else (other apps, the host, backups,
   repositories, the v2 API) is refused.
 - **Only its own apps.** A call that changes an app also needs proof that the manager created it: the marker file
-  `.hri-manager.json` in `hri_<name>/`, naming that instance and the slug `local_hri_<name>`, read again from disk
-  right before the call (never through a symlink). A `local_hri_*` app without it is left alone.
+  `.hri-manager.json` in `hri_<name>/`, naming that instance and the slug `local_hri_<name>`, and the manager's own
+  registry of the instances it created (`/data/instances.json`), which must hold the same random instance id. Both
+  are read again right before the call (never through a symlink). Anyone who can write the local apps folder (Samba,
+  SSH, another app) can write a marker, but not the manager's `/data`: a folder whose marker the registry does not
+  hold is listed as not managed and gets no action, and a `local_hri_*` app without a marker is left alone.
 - **No secrets passed on.** The Supervisor includes an app's options in its info (an HRI instance's options hold its
   password); the manager keeps only a list of harmless fields and never shows or logs options. The Supervisor token
   and the optional GitHub token are never logged.

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import sys
 
 from aiohttp import web
@@ -12,6 +13,7 @@ from .corews import CoreUsers
 from .github import GitHub
 from .instances import Manager
 from .jobs import Jobs
+from .registry import FILE_NAME, Registry
 from .settings import Redact, SettingsError, from_environment
 from .supervisor import SupervisorClient
 from .web import create_app
@@ -39,7 +41,8 @@ def main() -> int:
         sv = SupervisorClient(settings.supervisor_url, settings.supervisor_token)
         gh = GitHub(f"{settings.data_dir}/releases.json", settings.github_token, settings.github_api, settings.codeload)
         jobs = Jobs()
-        manager = Manager(settings.local_apps, sv, gh, jobs, dev=settings.dev)
+        registry = Registry(os.path.join(settings.data_dir, FILE_NAME))
+        manager = Manager(settings.local_apps, sv, gh, jobs, registry, dev=settings.dev)
         users = CoreUsers(settings.core_ws_url, settings.supervisor_token)
         app = create_app(settings, manager, users)
 

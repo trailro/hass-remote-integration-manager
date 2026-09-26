@@ -4,9 +4,11 @@ Every write stays inside ``<local apps>/hri_<name>/``: a folder is built in a hi
 (``.hri-tmp-*``: the Supervisor's store skips every path part that starts with a dot) and renamed into place, so the
 store never reads half a definition.  No symlink is followed: a folder or marker that is a link is not the manager's.
 
-The marker ``.hri-manager.json`` is the only proof that a folder, and the local app defined by it, belongs to the
-manager.  ``Managed`` is what ``load_managed`` returns after checking it, and the Supervisor client refuses every
-call that changes an app unless it is given the ``Managed`` of that app's slug (supervisor.py)."""
+The marker ``.hri-manager.json`` says that a folder, and the local app defined by it, belongs to the manager; the
+manager's registry (registry.py, in its own /data, which the local apps folder cannot write) has to say so too, with
+the same random ``instance_id``.  ``Managed`` is what ``load_managed`` returns after checking both, and the
+Supervisor client refuses every call that changes an app unless it is given the ``Managed`` of that app's slug
+(supervisor.py), checked again right before the call."""
 
 from __future__ import annotations
 
@@ -22,6 +24,7 @@ from dataclasses import dataclass, field
 from typing import Callable
 
 from . import names
+from .registry import INSTANCE_ID_RE, Registry, RegistryError
 
 MARKER = ".hri-manager.json"
 MANAGER_ID = "hri_manager"
@@ -74,7 +77,26 @@ def validate_marker(data: object, name: str) -> dict:
         raise NotManaged(f"the marker's slug {data.get('slug')!r} is not {names.supervisor_slug(name)!r}")
     if data.get("channel") not in CHANNELS:
         raise NotManaged(f"the marker's channel {data.get('channel')!r} is unknown")
+    if not isinstance(data.get("instance_id"), str) or not INSTANCE_ID_RE.fullmatch(data["instance_id"]):
+        raise NotManaged("the marker has no instance id")
     return data
+
+
+def check_registry(marker: dict, registry: Registry, name: str) -> dict:
+    """The registry's entry for ``name``, when it agrees with the marker; NotManaged otherwise."""
+    if not isinstance(registry, Registry):
+        raise NotManaged("no registry to check the marker against")
+    try:
+        entry = registry.get(name)
+    except RegistryError as err:
+        raise NotManaged(str(err)) from None
+    if entry is None:
+        raise NotManaged(f"{names.folder_name(name)} has a marker, but the manager's registry has no instance {name}: "
+                         "not created by this manager")
+    for key in ("instance_id", "slug", "channel"):
+        if entry.get(key) != marker.get(key):
+            raise NotManaged(f"the marker of {names.folder_name(name)} and the manager's registry disagree ({key})")
+    return entry
 
 
 def read_marker(folder: str, name: str) -> dict:
@@ -109,17 +131,19 @@ class Managed:
     root: str
     name: str
     marker: dict = field(compare=False, hash=False, repr=False)
+    registry: Registry | None = field(default=None, compare=False, hash=False, repr=False)
+    entry: dict = field(default_factory=dict, compare=False, hash=False, repr=False)
 
     @property
     def slug(self) -> str:
         return names.supervisor_slug(self.name)
 
     def verify(self) -> None:
-        """Check the marker on disk again, right before a call: it may have gone since it was loaded."""
-        load_managed(self.root, self.name)
+        """Check the marker on disk and the registry again, right before a call: either may have changed since."""
+        load_managed(self.root, self.name, self.registry)
 
 
-def load_managed(root: str, name: str) -> Managed:
+def load_managed(root: str, name: str, registry: Registry | None) -> Managed:
     names.validate_name(name)
     try:
         path = child_path(root, name)
@@ -131,10 +155,12 @@ def load_managed(root: str, name: str) -> Managed:
         raise NotManaged(f"no folder {names.folder_name(name)} in the local apps folder") from None
     if not stat.S_ISDIR(st.st_mode):
         raise NotManaged(f"{names.folder_name(name)} is not a folder")
-    return Managed(root=root, name=name, marker=read_marker(path, name))
+    marker = read_marker(path, name)
+    entry = check_registry(marker, registry, name)
+    return Managed(root=root, name=name, marker=marker, registry=registry, entry=entry)
 
 
-def scan(root: str) -> list[tuple[str, dict | None, str | None]]:
+def scan(root: str, registry: Registry) -> list[tuple[str, dict | None, str | None]]:
     """Every ``hri_<name>`` entry of the local apps folder: (name, marker or None, why it is not managed)."""
     out = []
     try:
@@ -151,7 +177,7 @@ def scan(root: str) -> list[tuple[str, dict | None, str | None]]:
         except names.InvalidName:
             continue
         try:
-            out.append((name, load_managed(root, name).marker, None))
+            out.append((name, load_managed(root, name, registry).marker, None))
         except NotManaged as err:
             out.append((name, None, str(err)))
     return out
@@ -206,9 +232,9 @@ def _remove_tree(path: str) -> None:
         shutil.rmtree(path)
 
 
-def write_new(root: str, name: str, build: Callable[[str], dict]) -> Managed:
+def write_new(root: str, name: str, build: Callable[[str], dict], registry: Registry) -> Managed:
     """Build a new instance folder with ``build(tmp)`` (which fills the folder and returns the marker) and rename
-    it into place.  Refused when anything named ``hri_<name>`` exists."""
+    it into place.  Refused when anything named ``hri_<name>`` exists.  The caller has put the registry's entry."""
     final = child_path(root, name)
     if os.path.lexists(final):
         raise UnsafePath(f"{names.folder_name(name)} already exists in the local apps folder")
@@ -222,7 +248,7 @@ def write_new(root: str, name: str, build: Callable[[str], dict]) -> Managed:
     except BaseException:
         _remove_tree(tmp)
         raise
-    return load_managed(root, name)
+    return load_managed(root, name, registry)
 
 
 class Replacement:

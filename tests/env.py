@@ -12,6 +12,7 @@ from hrimgr.corews import CoreUsers
 from hrimgr.github import GitHub
 from hrimgr.instances import Manager
 from hrimgr.jobs import Jobs
+from hrimgr.registry import FILE_NAME, Registry
 from hrimgr.settings import Settings
 from hrimgr.supervisor import SupervisorClient
 from hrimgr.web import create_app
@@ -43,7 +44,9 @@ class Env:
             setattr(self.settings, key, value)
         self.sv = SupervisorClient(self.settings.supervisor_url, "test-token")
         self.gh = GitHub(os.path.join(self.data, "releases.json"), "", self.settings.github_api, self.settings.codeload)
-        self.manager = Manager(self.local_apps, self.sv, self.gh, Jobs(), dev=True, poll_interval=0.02, store_timeout=2)
+        self.registry = Registry(os.path.join(self.data, FILE_NAME))
+        self.manager = Manager(self.local_apps, self.sv, self.gh, Jobs(), self.registry, dev=True, poll_interval=0.02,
+                               store_timeout=2)
         self.users = CoreUsers(self.settings.core_ws_url, "test-token")
         self.client = TestClient(TestServer(create_app(self.settings, self.manager, self.users)), headers=USER)
         await self.client.start_server()

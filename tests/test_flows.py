@@ -195,7 +195,7 @@ class FlowTest(unittest.IsolatedAsyncioTestCase):
         env = self.env
         for action in ("start", "stop", "restart", "update", "repair"):
             status, body = await env.send("POST", f"/api/instances/foreign/{action}")
-            if action == "repair":  # a job that looks and refuses: its url is not HRI's
+            if action == "repair":  # a job that looks and refuses
                 job = await env.job((status, body))
                 self.assertEqual(job["state"], "failed")
                 self.assertIn("not hass-remote-integration", job["error"])
@@ -212,14 +212,19 @@ class FlowTest(unittest.IsolatedAsyncioTestCase):
         env = self.env
         await self.create()
         env.stub.calls.clear()
+        good = self.marker("garage")
+        entry = env.registry.get("garage")
         cases = {
             "no marker": lambda: os.unlink(os.path.join(self.folder("garage"), children.MARKER)),
-            "another slug": lambda: self._write_marker(marker("garage", slug="core_ssh")),
-            "another manager": lambda: self._write_marker(marker("garage", manager="x")),
+            "another slug": lambda: self._write_marker({**good, "slug": "core_ssh"}),
+            "another manager": lambda: self._write_marker({**good, "manager": "x"}),
             "a marker link": lambda: self._link_marker(),
+            "no registry entry": lambda: env.registry.remove("garage"),
+            "another instance id in the marker": lambda: self._write_marker({**good, "instance_id": "f" * 32}),
         }
         for label, spoil in cases.items():
-            self._write_marker(marker("garage"))
+            self._write_marker(good)
+            env.registry.put("garage", entry)
             spoil()
             for method, path, body in (("POST", "/api/instances/garage/start", {}), ("POST", "/api/instances/garage/stop", {}),
                                        ("POST", "/api/instances/garage/restart", {}), ("POST", "/api/instances/garage/update", {}),
@@ -229,6 +234,56 @@ class FlowTest(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(status, 400, data)
                     self.assertIn("not an instance of this manager", data["error"])
         self.assertEqual(env.changing_calls(), [])
+
+    async def test_a_marker_without_the_registry_is_not_managed(self):
+        """A marker written by someone else (Samba, SSH, another app) over a user's own app: listed as not managed,
+        no action, nothing changed."""
+        env = self.env
+        os.makedirs(self.folder("garage"))
+        with open(os.path.join(self.folder("garage"), "config.yaml"), "w") as fh:
+            fh.write("slug: hri_garage\nname: My garage\nversion: '1.0'\nurl: https://github.com/trailro/hass-remote-integration\n")
+        self._write_marker(marker("garage"))
+        _, data = await env.get("/api/instances")
+        self.assertEqual(data["instances"], [])
+        (other,) = [o for o in data["others"] if o["slug"] == "local_hri_garage"]
+        self.assertIn("registry has no instance garage", other["problem"])
+        for method, path, body in (("POST", "/api/instances/garage/stop", {}), ("POST", "/api/instances/garage/update", {}),
+                                   ("DELETE", "/api/instances/garage", {"remove_data": True, "confirm": "garage"})):
+            status, _ = await env.send(method, path, body)
+            self.assertEqual(status, 400)
+        self.assertEqual(env.changing_calls(), [])
+
+    async def test_the_registry_follows_the_instance(self):
+        env = self.env
+        await self.create()
+        entry = env.registry.get("garage")
+        m = self.marker("garage")
+        self.assertEqual((entry["instance_id"], entry["channel"], entry["version"], entry["sha"]),
+                         (m["instance_id"], "release", "0.25.0", m["sha"]))
+        await env.job(await env.send("POST", "/api/instances/garage/update", {"version": "0.25.1"}))
+        self.assertEqual((env.registry.get("garage")["version"], env.registry.get("garage")["instance_id"]), ("0.25.1", m["instance_id"]))
+        await env.job(await env.send("DELETE", "/api/instances/garage", {"remove_data": False, "confirm": "garage"}))
+        self.assertIsNone(env.registry.get("garage"))
+        env.stub.fail[("POST", "/addons/local_hri_attic/start")] = "Can't start"
+        job = await self.create("attic")
+        self.assertEqual(job["state"], "failed")
+        self.assertIsNone(env.registry.get("attic"))  # rolled back with the rest
+
+    async def test_repair_of_a_git_instance_from_the_registry(self):
+        """The folder is gone (a full backup on current Supervisors skips the local apps folder): the registry, in the
+        manager's own /data, still knows the branch."""
+        env = self.env
+        await self.create("lab", channel="git", ref_kind="branch", ref="main")
+        instance_id = self.marker("lab")["instance_id"]
+        shutil.rmtree(self.folder("lab"))
+        await env.sv.reload_store()
+        job = await env.job(await env.send("POST", "/api/instances/lab/repair"))
+        self.assertEqual(job["state"], "succeeded", job)
+        m = self.marker("lab")
+        self.assertEqual((m["channel"], m["ref_kind"], m["ref"], m["instance_id"]), ("git", "branch", "main", instance_id))
+        self.assertEqual(env.stub.store["local_hri_lab"]["version"], env.stub.installed["local_hri_lab"]["version"])
+        status, _ = await env.send("POST", "/api/instances/lab/restart")
+        self.assertEqual(status, 202)
 
     def _write_marker(self, data):
         path = os.path.join(self.folder("garage"), children.MARKER)

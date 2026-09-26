@@ -10,7 +10,7 @@ from unittest import mock
 from hrimgr import children, supervisor
 from hrimgr.supervisor import NotAllowed, SupervisorClient, authorize
 
-from .helpers import make_child, tmpdir
+from .helpers import make_child, new_registry, tmpdir
 
 # the allow-list, pinned: a rule added or widened must be added here too, with a reason in supervisor.py
 EXPECTED_RULES = {
@@ -103,8 +103,9 @@ class RecordingSession:
 class AllowListTest(unittest.TestCase):
     def setUp(self):
         self.root = tmpdir(self)
-        make_child(self.root, "garage")
-        self.garage = children.load_managed(self.root, "garage")
+        self.registry = new_registry(self)
+        make_child(self.root, "garage", registry=self.registry)
+        self.garage = children.load_managed(self.root, "garage", self.registry)
 
     def test_the_rules_are_exactly_the_pinned_ones(self):
         self.assertEqual({(r.method, r.pattern.pattern) for r in supervisor.RULES}, EXPECTED_RULES)
@@ -136,8 +137,8 @@ class AllowListTest(unittest.TestCase):
         self.assertEqual(session.requests, [])
 
     def test_changing_calls_need_the_managed_of_that_slug(self):
-        make_child(self.root, "attic")
-        attic = children.load_managed(self.root, "attic")
+        make_child(self.root, "attic", registry=self.registry)
+        attic = children.load_managed(self.root, "attic", self.registry)
         for path in ("/store/addons/local_hri_garage/install", "/store/addons/local_hri_garage/update",
                      "/addons/local_hri_garage/options", "/addons/local_hri_garage/start", "/addons/local_hri_garage/stop",
                      "/addons/local_hri_garage/restart", "/addons/local_hri_garage/uninstall"):
@@ -160,9 +161,20 @@ class AllowListTest(unittest.TestCase):
 
     def test_a_marker_changed_to_another_slug_refuses_the_call(self):
         with open(os.path.join(self.root, "hri_garage", children.MARKER), "w") as fh:
-            fh.write('{"manager": "hri_manager", "name": "garage", "slug": "core_ssh", "channel": "release"}')
+            fh.write('{"manager": "hri_manager", "name": "garage", "slug": "core_ssh", "channel": "release", '
+                     '"instance_id": "%s"}' % self.garage.marker["instance_id"])
         with self.assertRaises(NotAllowed):
             authorize("POST", "/addons/local_hri_garage/stop", {}, self.garage)
+
+    def test_a_marker_the_registry_does_not_hold_refuses_the_call(self):
+        """A marker anyone with write access to the local apps folder could forge: without the registry's entry of
+        the same instance id, in the manager's own /data, no changing call passes."""
+        self.registry.update("garage", instance_id="f" * 32)
+        with self.assertRaises(NotAllowed):
+            authorize("POST", "/addons/local_hri_garage/uninstall", {"remove_config": True}, self.garage)
+        self.registry.remove("garage")
+        with self.assertRaises(NotAllowed):
+            authorize("POST", "/addons/local_hri_garage/uninstall", {"remove_config": True}, self.garage)
 
     def test_read_only_calls_take_no_instance(self):
         with self.assertRaises(NotAllowed):
