@@ -15,7 +15,8 @@ and the icons) from the HRI release or git ref and changes only what makes the c
   host's D-Bus, through which BlueZ offers the Bluetooth adapters.  The template itself can never add it: it is not a
   key of ``TEMPLATE_KEYS``.
 
-Everything else (options, schema, ingress, map, homeassistant, image, arch, timeout, uart...) is kept as HRI wrote
+Everything else (options, schema, ingress, map, homeassistant, image, arch, timeout, uart, backup_pre/backup_post...)
+is kept as HRI wrote
 it, after a check (``vet_template``): the template may hold only the keys this manager version knows from HRI's own
 template (``TEMPLATE_KEYS``), each with a value in the range vetted for it.  A key that could give an instance more
 than HRI's app has (``hassio_role``, ``full_access``, ``docker_api``, ``privileged``, ``host_network``, ``devices``,
@@ -112,6 +113,14 @@ def _ports(value: Any) -> bool:
         _match(PORT_RE)(k) and (v is None or _int_in(1, 65535)(v)) for k, v in value.items())
 
 
+def _backup_command(value: Any) -> bool:
+    """HRI's backup_pre / backup_post: one line of at most 512 characters.  The Supervisor runs it only inside the
+    app's own container, around a hot backup of a running app (apps/app.py begin_backup / end_backup -> run_inside:
+    docker exec, the string split by shlex), so it can do nothing the instance's own image cannot."""
+    return (isinstance(value, str) and 0 < len(value) <= 512 and value.strip() == value
+            and not any(c in value for c in "\n\r\0"))
+
+
 def _ports_description(value: Any) -> bool:
     return isinstance(value, dict) and all(_match(PORT_RE)(k) and _string(v) for k, v in value.items())
 
@@ -142,6 +151,8 @@ TEMPLATE_KEYS: dict[str, Any] = {
     "options": _options,
     "schema": _schema,
     "backup_exclude": lambda v: isinstance(v, list) and all(_string(e) for e in v),
+    "backup_pre": _backup_command,  # from HRI 0.25.2 on: copied as they are
+    "backup_post": _backup_command,
     "webui": _string,  # dropped by stamp()
 }
 
@@ -167,7 +178,8 @@ def vet_template(data: dict) -> None:
 # reports STORE_VIEW of the store's parsed definition, the one an install or update takes; it does not report
 # host_ipc, host_uts, host_dbus, privileged, devices, uart, usb, gpio, video, audio, kernel_modules, devicetree,
 # udev, ports, map or image (only "build", whether there is an image).  GET /addons/<slug>/info (api/apps.py
-# info_data) reports INSTALLED_VIEW of the installed app; it does not report map or image either.  Those two, and
+# info_data) reports INSTALLED_VIEW of the installed app; it does not report map, image, backup_pre or backup_post
+# either (neither does the store).  Those two, and
 # every other key, are covered only by children.check_tree: the folder's files are hashed when written and checked
 # again before each store reload and right before the install or update.
 STORE_VIEW = ("slug", "name", "url", "version", "build", "ingress", "hassio_role", "hassio_api", "homeassistant_api",

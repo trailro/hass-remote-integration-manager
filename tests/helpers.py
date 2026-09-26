@@ -13,6 +13,8 @@ from hrimgr.registry import Registry
 from . import ROOT
 
 FIXTURE_CONFIG = ROOT / "tests" / "fixtures" / "hri_v0.25.0" / "app_config.yaml"
+# HRI 0.25.2's template (feat/0.25.2 at ef3a7ef): backup_pre / backup_post, and its own backups kept in a HA backup
+FIXTURE_0252 = ROOT / "tests" / "fixtures" / "hri_v0.25.2"
 
 
 def tmpdir(test) -> str:

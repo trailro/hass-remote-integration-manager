@@ -9,14 +9,15 @@ supervisord) and runs what the Supervisor runs when it reads an app:
   - discovery: the config.* files its store finds in this repository are exactly hri_manager/config.yaml;
   - SCHEMA_APP_CONFIG on hri_manager/config.yaml, SCHEMA_APP_TRANSLATIONS on its translations, AppOptions on its
     default options.  Any warning logged fails, and so does a key the schema drops (it drops unknown keys silently);
-  - the same for an instance stamped (hrimgr.stamp) from HRI's app template, the fixture of v0.25.0, on both
-    channels (a release keeps the image, a git build has none and a 0.0.0-<sha> version), and for one with Bluetooth
+  - the same for an instance stamped (hrimgr.stamp) from HRI's app template, the fixtures of v0.25.0 and v0.25.2
+    (backup_pre / backup_post, and HRI's own backups kept in a Home Assistant backup), on both channels (a release keeps the image, a git build has none and a 0.0.0-<sha> version), and for one with Bluetooth
     (host_dbus kept, and no other access to the host);
   - App._is_excluded_by_filter over the instance's folder as the Supervisor names it (local_hri_<name>): every path
     HRI's own backup_exclude leaves out of its folder (<repo>_hass_remote_integration) is left out of the
     instance's, and what HRI keeps is kept;
   - the same filter over three release instances side by side (app_configs/local_hri_<name>/ each, as on one
-    machine): none of them keeps a venv, HRI's own backups or a log, and each keeps its state files.
+    machine): none of them keeps a venv or a log, each keeps its state files, and HRI's own backups are left out
+    (v0.25.0) or kept, with their temporary files and the backup-running flag left out (v0.25.2).
 
 Every section runs and prints its problems; the exit status is 1 when any section failed."""
 
@@ -30,17 +31,22 @@ from types import SimpleNamespace
 
 HERE = pathlib.Path(__file__).resolve().parent
 ROOT = HERE.parent
-FIXTURE = ROOT / "tests" / "fixtures" / "hri_v0.25.0"
+FIXTURES = ROOT / "tests" / "fixtures"
 CONFIG_PARENT = PurePath("/data/app_configs")
 HRI_FOLDER = CONFIG_PARENT / "5c53de3b_hass_remote_integration"
 MANAGER_IMAGE = "ghcr.io/trailro/hass-remote-integration-manager"
-# HRI's live state, which a backup must keep (relative to its folder)
-# what no instance's backup may hold (relative to its folder): the installed Home Assistant (about 800 MB), HRI's
-# own backups, logs
+# what no instance's backup may hold (relative to its folder): the installed Home Assistant (about 800 MB), logs
 DISPOSABLE = ("venv-current", "venv-current/lib/python3.14/site-packages/homeassistant/__init__.py",
-              "venv-2026.9.3/bin/python", "backups/hri-backup-20260926.zip", "integration_manager/backups/pre-update.zip",
-              "home-assistant.log", "home-assistant.log.1", "integration_manager/process.log",
+              "venv-2026.9.3/bin/python", "home-assistant.log", "home-assistant.log.1", "integration_manager/process.log",
               "integration_manager/ha-install.log", ".storage/core.restore_state.log", "deps/lib/x.py")
+# HRI's own backups: left out up to v0.25.1, kept from v0.25.2 on (a restore replaces the folder, and would delete them)
+HRI_BACKUPS = ("backups/hri-backup-20260926.zip", "integration_manager/backups/pre-update.zip")
+# per template: (fixture folder, what an instance's backup leaves out, what it keeps besides STATE_FILES)
+TEMPLATES = {
+    "v0.25.0": ("hri_v0.25.0", DISPOSABLE + HRI_BACKUPS, ()),
+    "v0.25.2": ("hri_v0.25.2", DISPOSABLE + ("backups/.hri-backup-20260926.zip.tmp", "integration_manager/ha-backup-running"),
+                HRI_BACKUPS),
+}
 INSTANCES = ("garage", "lab", "boiler_room")
 STATE_FILES = ("configuration.yaml", ".storage/core.config_entries", ".storage/core.device_registry",
                "integration_manager/settings.json", "integration_manager/state.json", "integration_manager/mqtt.json",
@@ -142,7 +148,7 @@ class Check:
         problems += [f"warning: {m}" for m in self.handler.records[start:]]
         self.section(title, problems)
 
-    def backup_filter(self, title: str, original: dict, stamped: dict, slug: str) -> None:
+    def backup_filter(self, title: str, original: dict, stamped: dict, slug: str, kept: tuple[str, ...] = ()) -> None:
         from supervisor.apps.app import App
 
         def excluded(config: dict, folder: PurePath, rel: str) -> bool:
@@ -152,7 +158,7 @@ class Check:
                        for i in range(1, len(parts) + 1))
 
         folder = CONFIG_PARENT / slug
-        samples = set(STATE_FILES)
+        samples = set(STATE_FILES) | set(kept)
         for glob in original.get("backup_exclude") or []:
             for path in example_paths(glob):
                 rel = path.split("/", 1)[1] if path.startswith("x1_hass_remote_integration/") or path.startswith("_hass_remote_integration/") else path
@@ -165,12 +171,12 @@ class Check:
             out += before
             if before != after:
                 problems.append(f"{rel}: HRI {'leaves it out' if before else 'keeps it'}, the instance {'leaves it out' if after else 'keeps it'}")
-        problems += [f"live state left out: {rel}" for rel in STATE_FILES if excluded(stamped, folder, rel)]
+        problems += [f"live state left out: {rel}" for rel in (*STATE_FILES, *kept) if excluded(stamped, folder, rel)]
         if out < 10:
             problems.append(f"only {out} sample paths are left out by HRI's own filter: the samples are wrong")
         self.section(f"{title} ({len(samples)} paths, {out} left out)", problems)
 
-    def instances_side_by_side(self, template: dict) -> None:
+    def instances_side_by_side(self, template: dict, label: str, disposable: tuple[str, ...], kept: tuple[str, ...]) -> None:
         from supervisor.apps.app import App
 
         from hrimgr import stamp
@@ -189,14 +195,14 @@ class Check:
                 return any(App._is_excluded_by_filter(app, folder, "config", PurePath("config", *parts[:i]))
                            for i in range(1, len(parts) + 1))
 
-            for rel in DISPOSABLE:
+            for rel in disposable:
                 if excluded(rel):
                     left_out += 1
                 else:
                     problems.append(f"local_hri_{name}/{rel} is kept in the instance's backup")
-            problems += [f"local_hri_{name}/{rel}: live state left out" for rel in STATE_FILES if excluded(rel)]
-        self.section(f"{len(INSTANCES)} release instances side by side: no venv, HRI backups or logs kept, state kept "
-                     f"({left_out} paths left out)", problems)
+            problems += [f"local_hri_{name}/{rel}: live state left out" for rel in (*STATE_FILES, *kept) if excluded(rel)]
+        self.section(f"{len(INSTANCES)} release instances side by side from {label}: no venv or logs kept, state"
+                     f"{' and HRI backups' if kept else ''} kept ({left_out} paths left out)", problems)
 
     def run(self) -> int:
         from supervisor.const import FILE_SUFFIX_CONFIGURATION
@@ -224,15 +230,36 @@ class Check:
             self.section("with the image line, the Supervisor pulls instead of building",
                          [] if with_image.get("image") == MANAGER_IMAGE else [f"image {with_image.get('image')!r}"])
 
-        template = stamp.parse_template((FIXTURE / "app_config.yaml").read_bytes())
-        tr = read_json_or_yaml_file(FIXTURE / "app_translations_en.yaml")
-        for channel, version in (("release", "0.25.0"), ("git", names.git_version("0123456789abcdef0123456789abcdef01234567"))):
-            child = stamp.stamp(template, "garage", version, channel)
-            # what the manager writes, read back the way the Supervisor reads it
-            import yaml
+        import yaml
 
-            child_raw = yaml.safe_load(stamp.dump(child, "check"))
-            label = f"instance 'garage' ({channel}, {version})"
+        for fixture_label, (fixture, disposable, kept) in TEMPLATES.items():
+            self.template_sections(fixture_label, FIXTURES / fixture, disposable, kept)
+        template = stamp.parse_template((FIXTURES / "hri_v0.25.0" / "app_config.yaml").read_bytes())
+        with_bt = self.validate("instance 'garage' with Bluetooth against SCHEMA_APP_CONFIG",
+                                yaml.safe_load(stamp.dump(stamp.stamp(template, "garage", "0.25.0", "release", bluetooth=True), "check")))
+        if with_bt is not None:
+            without = self.validate("instance 'garage' without Bluetooth (for comparison)",
+                                    yaml.safe_load(stamp.dump(stamp.stamp(template, "garage", "0.25.0", "release"), "check")))
+            changed = sorted(k for k in set(with_bt) | set(without or {}) if with_bt.get(k) != (without or {}).get(k))
+            self.section("with Bluetooth: host_dbus true, and nothing else changes",
+                         [] if with_bt.get("host_dbus") is True and changed == ["host_dbus"] else [f"differs in {changed}"])
+        return 1 if self.failed else 0
+
+    def template_sections(self, fixture_label: str, fixture: pathlib.Path, disposable: tuple[str, ...],
+                          kept: tuple[str, ...]) -> None:
+        """An instance stamped from one of HRI's templates, on both channels, read by the Supervisor's own code."""
+        from supervisor.utils.common import read_json_or_yaml_file
+
+        from hrimgr import names, stamp
+
+        import yaml
+
+        template = stamp.parse_template((fixture / "app_config.yaml").read_bytes())
+        tr = read_json_or_yaml_file(fixture / "app_translations_en.yaml")
+        for channel, version in (("release", "0.25.0"), ("git", names.git_version("0123456789abcdef0123456789abcdef01234567"))):
+            # what the manager writes, read back the way the Supervisor reads it
+            child_raw = yaml.safe_load(stamp.dump(stamp.stamp(template, "garage", version, channel), "check"))
+            label = f"instance 'garage' from {fixture_label} ({channel}, {version})"
             stamped = self.validate(f"{label} against SCHEMA_APP_CONFIG", child_raw)
             if stamped is None:
                 continue
@@ -245,22 +272,14 @@ class Check:
                 problems.append("the release lost its image")
             if str(stamped["version"]) != version:
                 problems.append(f"version {stamped['version']}")
-            self.section(f"{label}: slug, image and version", problems)
+            # backup_pre / backup_post as HRI wrote them, kept by the schema
+            problems += [f"{k} {stamped.get(k)!r}" for k in ("backup_pre", "backup_post") if stamped.get(k) != template.get(k)]
+            self.section(f"{label}: slug, image, version and backup commands", problems)
             self.translations(f"{label}: HRI's translations", tr, stamped)
             self.options(f"{label}: default options (AppOptions)", stamped)
-            self.backup_filter(f"{label}: backup_exclude under {CONFIG_PARENT / 'local_hri_garage'}", template, stamped, "local_hri_garage")
-        import yaml
-
-        with_bt = self.validate("instance 'garage' with Bluetooth against SCHEMA_APP_CONFIG",
-                                yaml.safe_load(stamp.dump(stamp.stamp(template, "garage", "0.25.0", "release", bluetooth=True), "check")))
-        if with_bt is not None:
-            without = self.validate("instance 'garage' without Bluetooth (for comparison)",
-                                    yaml.safe_load(stamp.dump(stamp.stamp(template, "garage", "0.25.0", "release"), "check")))
-            changed = sorted(k for k in set(with_bt) | set(without or {}) if with_bt.get(k) != (without or {}).get(k))
-            self.section("with Bluetooth: host_dbus true, and nothing else changes",
-                         [] if with_bt.get("host_dbus") is True and changed == ["host_dbus"] else [f"differs in {changed}"])
-        self.instances_side_by_side(template)
-        return 1 if self.failed else 0
+            self.backup_filter(f"{label}: backup_exclude under {CONFIG_PARENT / 'local_hri_garage'}", template, stamped,
+                               "local_hri_garage", kept)
+        self.instances_side_by_side(template, fixture_label, disposable, kept)
 
 
 def main(argv: list[str]) -> int:
