@@ -51,8 +51,8 @@
   <label id="cf-version-row" hidden>Version <select id="cf-version"></select></label>
   <label id="cf-kind-row" hidden>Branch or tag <select id="cf-kind"><option value="branch">Branch</option><option value="tag">Tag</option></select></label>
   <label id="cf-ref-row" hidden>Name <input id="cf-ref" maxlength="100" spellcheck="false"></label>
-  <label id="cf-bt-row" class="check" hidden><input type="checkbox" id="cf-bt"><span>Bluetooth (access to the host's D-Bus), from this version on</span></label>
-  <label id="cf-hn-row" class="check" hidden><input type="checkbox" id="cf-hn"><span>Host network (LAN discovery; the instance's web port on the LAN, refused without the app's password), from this version on (HRI 0.26.0 or newer)</span></label>
+  <label id="cf-bt-row" class="check" hidden><input type="checkbox" id="cf-bt"><span>Bluetooth (access to the host's D-Bus), from this version on<small id="cf-bt-diff" class="diff" hidden></small></span></label>
+  <label id="cf-hn-row" class="check" hidden><input type="checkbox" id="cf-hn"><span>Host network (LAN discovery; the instance's web port on the LAN, refused without the app's password), from this version on (HRI 0.26.0 or newer)<small id="cf-hn-diff" class="diff" hidden></small></span></label>
   <label id="cf-data-row" class="check" hidden><input type="checkbox" id="cf-data"><span>Also delete the instance's /config folder (its Home Assistant, integration and configuration)</span></label>
   <label id="cf-name-row" hidden><span>Type <b id="cf-name-hint"></b> to confirm</span><input id="cf-name" spellcheck="false" autocomplete="off"></label>
   <div class="row end"><button value="cancel" type="submit">Cancel</button><button id="cf-ok" value="ok" type="submit" class="primary">OK</button></div>
