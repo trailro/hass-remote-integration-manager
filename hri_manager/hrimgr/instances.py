@@ -34,6 +34,7 @@ HISTORY = 20
 # the Supervisor stops an app 10 s after SIGTERM by default: a rollback when the manager stops gets less than that
 ROLLBACK_BOUND = 8.0
 AUTO_REPAIR_INTERVAL = 300.0
+AUTO_REPAIR_MAX_DELAY = 86400.0  # an instance's automatic repair that keeps failing is tried at least once a day
 AUTO_USER = "automatic repair"
 
 
@@ -63,6 +64,9 @@ class Manager:
         self.auto_repair_interval = auto_repair_interval
         self._auto_checked: float | None = None
         self.auto_repairs: dict[str, dict] = {}  # name -> {"job": id, "at": iso} of its last automatic repair
+        # name -> {"failures", "delay", "next" (monotonic), "error", "at"}: an instance whose automatic repair failed
+        # waits AUTO_REPAIR_INTERVAL * 2**(failures-1) seconds, at most AUTO_REPAIR_MAX_DELAY, before the next
+        self.auto_backoff: dict[str, dict] = {}
 
     # ------------------------------------------------------------------ reading
 
@@ -181,27 +185,52 @@ class Manager:
         self._auto_checked = now
         started = {}
         for name in names_:
+            backoff = self.auto_backoff.get(name)
+            if backoff and now < backoff["next"]:
+                continue
             try:
                 job = self.jobs.start(name, "repair", AUTO_USER, lambda job, name=name: self._auto_repair_job(job, name))
             except Busy:
                 continue
-            _LOGGER.warning("instance %s is installed but detached, its definition gone (a restore without the local "
-                            "apps folder?): writing it again automatically (job %s)", name, job.id)
+            _LOGGER.log(logging.DEBUG if backoff else logging.WARNING,
+                        "instance %s is installed but detached, its definition gone (a restore without the local apps "
+                        "folder?): writing it again automatically (job %s%s)", name, job.id,
+                        f", attempt {backoff['failures'] + 1}" if backoff else "")
             self.auto_repairs[name] = {"job": job.id, "at": children.now_iso()}
             started[name] = job.id
         return started
 
     async def _auto_repair_job(self, job: Job, name: str) -> dict:
         job.log("started automatically: the instance is installed, detached and its definition folder is gone")
-        return await self._repair(job, name, AUTO_USER)
+        try:
+            result = await self._repair(job, name, AUTO_USER)
+        except Exception as err:
+            previous = self.auto_backoff.get(name, {})
+            failures = previous.get("failures", 0) + 1
+            delay = min(self.auto_repair_interval or AUTO_REPAIR_INTERVAL, AUTO_REPAIR_MAX_DELAY) * 2 ** min(failures - 1, 20)
+            delay = min(delay, AUTO_REPAIR_MAX_DELAY)
+            self.auto_backoff[name] = {"failures": failures, "delay": delay, "next": time.monotonic() + delay,
+                                       "error": str(err) or err.__class__.__name__, "at": children.now_iso()}
+            _LOGGER.log(logging.WARNING if failures == 1 else logging.DEBUG,
+                        "the automatic repair of %s failed (%d time(s)): %s; next try in %d s", name, failures, err, delay)
+            raise
+        self.auto_backoff.pop(name, None)
+        return result
 
     def _auto_repair_note(self, name: str) -> dict | None:
         """What the row shows of the instance's last automatic repair, while the manager remembers its job."""
         known = self.auto_repairs.get(name)
         job = self.jobs.get(known["job"]) if known else None
-        if job is None:
+        backoff = self.auto_backoff.get(name)
+        if job is None and backoff is None:
             return None
-        return {"at": known["at"], "job": job.id, "state": job.state, "error": job.error}
+        note = {"at": known["at"], "job": job.id, "state": job.state, "error": job.error} if job else \
+            {"at": backoff["at"], "job": None, "state": "failed", "error": backoff["error"]}
+        if backoff and note["state"] != "running":
+            # the last failure, kept after its job is forgotten, and when the next try is
+            note.update(failures=backoff["failures"], error=backoff["error"],
+                        next_try_in=max(0, round(backoff["next"] - time.monotonic())))
+        return note
 
     def copy_missing(self) -> list[str]:
         """A copy in /data of every managed instance's definition the manager has none of (instances created by 0.1.0,
