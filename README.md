@@ -15,6 +15,20 @@ release you choose. On a plain Docker install you do not need this: run one HRI 
 
 **Status: 0.1.1, experimental.** Home Assistant OS only (the Supervisor's local apps folder is required).
 
+## What it looks like
+
+The manager's page, with three instances: two of HRI releases and one git build.
+
+![HRI Manager's page: the managed instances attic, garage and lab with their state, HRI version, channel and actions; the New instance form; a local build of HRI under Other HRI apps](docs/images/manager.png)
+
+Each instance is HRI's own app, with HRI's page as its sidebar panel:
+
+![The sidebar panel of the instance garage: HRI's Overview page, running the hri_probe test integration](docs/images/instance-panel.png)
+
+and its integration's devices mirrored into Home Assistant over MQTT:
+
+![The device of the instance garage in Home Assistant: its controls and activity, from MQTT](docs/images/core-device.png)
+
 ## Requirements
 
 - Home Assistant OS with Supervisor **2026.07.1 or newer** (the `local_apps` folder mapping), Core 2025.10 or newer
@@ -35,9 +49,15 @@ release you choose. On a plain Docker install you do not need this: run one HRI 
 4. Open **HRI Manager** in the sidebar (or **Open web UI** on its Info tab). It is for Home Assistant
    administrators only (see [Security model](#security-model)).
 
+The manager and each instance it creates are apps in **Settings > Apps**:
+
+![The Supervisor's apps list: HRI Manager (experimental), the instances HRI Attic, HRI Garage and HRI Lab, HRI's own app and the Mosquitto broker](docs/images/apps-list.png)
+
 ## Creating an instance
 
 Under **New instance**, give a name and pick a release:
+
+![The New instance form: the name kitchen, the Release channel, HRI 0.25.1 (latest), and the app name local_hri_kitchen it gives](docs/images/new-instance.png)
 
 - the name: lowercase letters, digits and `_`, starting with a letter, at most 20 characters. It becomes the app
   `local_hri_<name>`, shown as *HRI &lt;Name&gt;*, with the sidebar panel *HRI &lt;name&gt;*. It must not be the
@@ -131,6 +151,8 @@ one aside, and asks the Supervisor to update the app: it pulls the new image and
 options and data. If the update fails, or the manager is stopped midway, the previous definition is put back. The
 manager does not downgrade.
 
+![The Update dialog of the instance garage: from 0.25.1, a version to choose, Cancel or Update](docs/images/update-dialog.png)
+
 The Supervisor's own **Update** button on the instance's app page appears only while the manager is updating it:
 updates go through the manager, which is what moves the definition.
 
@@ -150,6 +172,8 @@ HRI Manager itself is updated from the App Store like any app (an app cannot upd
 
 **Delete** stops and uninstalls the instance and removes its definition; it always needs the instance's name typed.
 What goes and what stays:
+
+![The Delete dialog of the instance attic: what is removed and kept, the box to delete its /config folder too, and Delete disabled until the name is typed](docs/images/delete-dialog.png)
 
 - the instance's **options** (its password, `ingress_users`, Debian packages...) are always removed: the Supervisor
   drops them with the app, whether or not you keep its data;
@@ -178,6 +202,8 @@ has moved it to `apps/local` (an upstream issue of the Supervisor, not of this a
   failure is a warning in the log. A repair that finds the instance **needs attention** (below) is not tried again:
   the log and the row say why and what you can do, with no next try. Apps that are not in the registry are never
   touched.
+
+  ![The instance garage after a restore: its row says its definition was written again automatically, with the time](docs/images/auto-repair.png)
 - **After a partial restore of an instance without the local apps folder**: the same.
 - The manager's own **registry** of the instances it created (`/data/instances.json`: each instance's channel, branch
   or tag, commit and id) and a **copy of each definition** (`/data/definitions/<name>/`) are in the manager's
