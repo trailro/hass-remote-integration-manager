@@ -258,6 +258,21 @@ class FlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(os.listdir(self.env.local_apps), [])
         self.assertEqual(self.env.changing_calls(), [])
 
+    async def test_no_downgrade_below_the_installed_version(self):
+        """An update the manager stopped waiting for can leave the app newer than its definition: the guard compares
+        against the newer of the two."""
+        env = self.env
+        await self.create()
+        env.stub.installed["local_hri_garage"]["version"] = "0.25.1"
+        job = await env.job(await env.send("POST", "/api/instances/garage/update", {"version": "0.25.0"}))
+        self.assertEqual(job["state"], "failed")
+        self.assertIn("does not downgrade", job["error"])
+        self.assertEqual(env.stub.installed["local_hri_garage"]["version"], "0.25.1")
+        self.assertEqual(env.changing_calls("local_hri_garage/update"), [])
+        job = await env.job(await env.send("POST", "/api/instances/garage/update", {"version": "0.25.1"}))
+        self.assertEqual(job["state"], "succeeded", job)  # the definition catches up, nothing to install
+        self.assertEqual((self.marker("garage")["version"], env.stub.installed["local_hri_garage"]["version"]), ("0.25.1", "0.25.1"))
+
     async def test_a_failed_update_puts_the_previous_definition_back(self):
         env = self.env
         await self.create()

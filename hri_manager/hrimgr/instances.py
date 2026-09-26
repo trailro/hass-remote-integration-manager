@@ -476,8 +476,11 @@ class Manager:
                     raise JobFailed("no stable HRI release found")
                 version = latest["version"]
             await self._check_release(version)
-            if (names.parse_version(version) or ()) < (names.parse_version(marker.get("version")) or ()):
-                raise JobFailed(f"{version} is older than {marker.get('version')}: the manager does not downgrade")
+            # the newer of the definition and the installed app: an update the manager stopped waiting for can leave
+            # the app newer than its definition
+            current = max((marker.get("version"), info.get("version")), key=lambda v: names.parse_version(v) or ())
+            if (names.parse_version(version) or ()) < (names.parse_version(current) or ()):
+                raise JobFailed(f"{version} is older than {current}: the manager does not downgrade")
             if version == marker.get("version") and info.get("version") == version:
                 job.log(f"already at {version}")
                 return {"version": version, "unchanged": True}

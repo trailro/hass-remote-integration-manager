@@ -135,8 +135,10 @@ async function act(action, name) {
       if (!c) return;
       r = await send('POST', `api/instances/${encodeURIComponent(name)}/update`, c.ref ? {ref_kind: c.refKind, ref: c.ref} : {});
     } else {
-      const choices = releases.filter(x => vcmp(x.version, i.version) >= 0);
-      if (!choices.length) { flash('No release at or above ' + i.version + ' is known yet.', 'err'); return; }
+      // the newer of the definition and the installed app: the manager does not downgrade either
+      const floor = vcmp(i.installed_version, i.version) > 0 ? i.installed_version : i.version;
+      const choices = releases.filter(x => vcmp(x.version, floor) >= 0);
+      if (!choices.length) { flash('No release at or above ' + floor + ' is known yet.', 'err'); return; }
       const c = await dialog({title: `Update ${name}`, text: `From ${i.installed_version || i.version}. The Supervisor pulls the new image and restarts the app; its options and data stay.`, ok: 'Update', versions: choices, selected: i.newer_release || latest});
       if (!c) return;
       r = await send('POST', `api/instances/${encodeURIComponent(name)}/update`, {version: c.version});
