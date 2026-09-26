@@ -924,13 +924,34 @@ class Manager:
         await self._check_tree(managed.slug, manifest, installed=True)
         await self._refuse_decoys(installed=True)
 
+    @staticmethod
+    def _future_text(future: tuple[str, float]) -> str:
+        when = datetime.datetime.fromtimestamp(future[1], datetime.timezone.utc).replace(microsecond=0).isoformat()
+        return (f"{tarsafe.show(future[0])} in the local apps folder is dated {when}, in the future, and the Supervisor "
+                "notices changes there only by a newer date. Give it the current date (touch it) and try again")
+
+    async def _reload_fresh(self) -> None:
+        """A store reload that reads the local apps folder again: refused (JobFailed) while an entry of the folder is
+        dated in the future, which would hide the change; otherwise the folder's own time is made the newest
+        (children.force_reread), or the Supervisor keeps what it read before, a decoy removed since among it."""
+        future = await asyncio.to_thread(children.newest_future, self.root)
+        if future:
+            raise JobFailed(f"refused, nothing installed or updated: {self._future_text(future)}")
+        try:
+            await asyncio.to_thread(children.force_reread, self.root)
+        except (OSError, children.UnsafePath) as err:
+            raise JobFailed(f"the local apps folder could not be marked to be read again ({err}): refused, nothing "
+                            "installed or updated") from None
+        await self.sv.reload_store()
+
     async def _wait_store(self, job: Job, slug: str, version: str, manifest: dict | None = None) -> None:
         """Reload the store until it has ``slug`` at ``version``.  ``manifest``: what the manager wrote, checked
-        again right before each reload (the store reads the folder then), and that no other folder holds a decoy."""
+        again right before each reload (the store reads the folder then), and that no other folder holds a decoy.
+        Each reload reads the folder again (_reload_fresh)."""
         await self._check_tree(slug, manifest)
         await self._refuse_decoys()
         job.log("reloading the Supervisor's store")
-        await self.sv.reload_store()
+        await self._reload_fresh()
         # by the clock: a store answer can take up to its own timeout, which counting sleeps would not see
         start = time.monotonic()
         reloaded_again = False
@@ -944,15 +965,12 @@ class Manager:
                 message = f"the Supervisor's store did not show {slug} {version} within {int(self.store_timeout)} s"
                 future = await asyncio.to_thread(children.newest_future, self.root)
                 if future:
-                    when = datetime.datetime.fromtimestamp(future[1], datetime.timezone.utc).replace(microsecond=0).isoformat()
-                    message += (f": {tarsafe.show(future[0])} in the local apps folder is dated {when}, in the future, and "
-                                "the Supervisor notices changes there only by a newer date. Give it the current date "
-                                "(touch it) and try again")
+                    message += f": {self._future_text(future)}"
                 raise JobFailed(message)
             if not reloaded_again and waited >= self.store_timeout / 2:
                 await self._check_tree(slug, manifest)
                 await self._refuse_decoys()
-                await self.sv.reload_store()
+                await self._reload_fresh()
                 reloaded_again = True
             await asyncio.sleep(self.poll_interval)
 
