@@ -33,6 +33,9 @@ BARE_SHA_RE = re.compile(r"[0-9a-fA-F]{7,40}")
 SHA_RE = re.compile(r"[0-9a-f]{40}")
 GIT_VERSION_LENGTH = 12  # hex digits of the commit in a git build's version
 GIT_VERSION_RE = re.compile(r"0\.0\.0-([0-9a-f]{12})")
+# where a definition came from, as a marker and a copy record it and the config's header comment shows it: the URL of a
+# source archive (codeload's, with a ref's characters, percent-escaped), one line, nothing else
+SOURCE_RE = re.compile(r"[A-Za-z0-9._/:%+-]{1,500}")
 
 
 class InvalidName(ValueError):

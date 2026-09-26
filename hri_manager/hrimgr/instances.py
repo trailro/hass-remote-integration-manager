@@ -895,7 +895,7 @@ class Manager:
         copy = await self._usable_copy(job, name, entry, version)
         archive = None
         if channel == "release" and copy is not None:
-            sha, source = copy.sha, str(copy.meta.get("template_source") or "the manager's copy")
+            sha, source = copy.sha, copy.meta["template_source"]  # a source URL: copies.load checked it
             job.log(f"from the manager's copy of its definition (release {version}): nothing downloaded")
         elif channel == "release":
             try:

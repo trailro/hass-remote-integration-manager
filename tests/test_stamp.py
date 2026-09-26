@@ -126,6 +126,12 @@ class StampTest(unittest.TestCase):
         with self.assertRaises(stamp.TemplateError):
             stamp.stamp(t, "garage", "0.25.0", "release")
 
+    def test_the_header_is_one_line(self):
+        config = stamp.stamp(stamp.parse_template(FIXTURE_CONFIG.read_bytes()), "garage", "0.25.0", "release")
+        for source in ("a\nprivileged: true", "a\rb", "a\r\nb"):
+            with self.subTest(source=source), self.assertRaises(stamp.TemplateError):
+                stamp.dump(config, source)
+
     def test_the_yaml_is_safe_and_round_trips(self):
         out = stamp.stamp(template(), "garage", "0.25.0", "release")
         raw = stamp.dump(out, "test")

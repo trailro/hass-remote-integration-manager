@@ -28,6 +28,7 @@ def instance_id(name: str) -> str:
 def marker(name: str, **over) -> dict:
     data = {"manager": children.MANAGER_ID, "name": name, "slug": names.supervisor_slug(name), "channel": "release",
             "version": "0.25.0", "ref_kind": "tag", "ref": "v0.25.0", "sha": "a" * 40, "instance_id": instance_id(name),
+            "template_source": "https://codeload.github.com/trailro/hass-remote-integration/tar.gz/refs/tags/v0.25.0",
             "history": []}
     data.update(over)
     return data
