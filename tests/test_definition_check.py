@@ -393,6 +393,34 @@ class FlowCheckTest(FlowBase):
         self.assertNotIn("local_hri_garage", env.stub.installed)
         self.assertTrue(env.registry.get("garage")["tampered"]["uninstalled"])
 
+    async def test_a_stop_right_after_a_containment_does_not_wait_twice(self):
+        """D-2: the stop budget.  Cancelled exactly between _contain() returning and the rollback of the update in the
+        Tampered branch, the job ends at once: only one bounded wait (CONTAIN_BOUND or ROLLBACK_BOUND) can run in one
+        cancellation, never both; the flag and the previous definition are left for the next start."""
+        env = self.env
+        self.assertEqual((await self.create())["state"], "succeeded")
+        env.stub.install_override["local_hri_garage"] = {"docker_api": True}
+        contain = env.manager._contain
+        cancelled_at = []
+
+        async def contain_then_stop(job, managed, reason):
+            mark = await contain(job, managed, reason)
+            cancelled_at.append(time.monotonic())
+            asyncio.current_task().cancel()  # the manager is told to stop, right now
+            return mark
+
+        with mock.patch.object(env.manager, "_contain", side_effect=contain_then_stop):
+            status, body = await env.send("POST", "/api/instances/garage/update", {"version": "0.25.1"})
+            job = env.manager.jobs.get(body["job"]["id"])
+            await asyncio.gather(job.task, return_exceptions=True)
+        self.assertLess(time.monotonic() - cancelled_at[0], 1.0)
+        self.assertEqual((job.state, job.error), ("failed", "cancelled: the manager stopped"))
+        self.assertIsInstance(env.registry.get("garage")["updating"], dict)
+        self.assertTrue(env.registry.get("garage")["tampered"]["uninstalled"])
+        await env.manager.startup()  # the next start puts the previous definition back
+        self.assertEqual(sorted(os.listdir(env.local_apps)), ["hri_garage"])
+        self.assertEqual(self.config()["version"], "0.25.0")
+
     async def test_a_containment_cut_short_by_a_stop_says_so_and_the_next_start_finishes_it(self):
         env = self.env
         env.stub.install_override["local_hri_garage"] = {"hassio_role": "admin"}

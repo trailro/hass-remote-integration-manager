@@ -186,7 +186,8 @@ class GitHub:
             raise NotHRICommit("not a commit")
         full = names.full_ref(kind, ref)
         # the base by its full name (refs/heads/... or refs/tags/...), never a short one that a branch and a tag could
-        # share: GitHub's compare accepts it, as checked against its API (behind or identical for an ancestor)
+        # share. Verified live against GitHub's API on 2026-09-26: compare/refs/heads/<branch>...<sha> answered
+        # "identical" for the branch's head and "behind" for an ancestor
         try:
             data = await self._api_json(f"compare/{quote(full, safe='/._-')}...{sha}", MAX_RELEASES_JSON, "comparison")
         except GitHubError as err:
