@@ -182,10 +182,8 @@ async def _body(request: web.Request) -> dict:
     if not request.can_read_body:
         return {}
     # the whole body (content.read(n) returns what has arrived so far); past client_max_size (MAX_BODY) aiohttp answers
-    # 413 itself
+    # 413 itself, so a body read here is never larger
     raw = await request.read()
-    if len(raw) > MAX_BODY:
-        raise InvalidRequest("the request body is too large")
     try:
         data = json.loads(raw.decode("utf-8")) if raw.strip() else {}
     except (UnicodeDecodeError, ValueError):
