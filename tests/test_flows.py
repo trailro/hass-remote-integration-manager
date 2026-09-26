@@ -372,6 +372,28 @@ class FlowTest(unittest.IsolatedAsyncioTestCase):
         entry = env.registry.get("garage")
         self.assertEqual((entry["version"], entry["updating"]), ("0.25.1", None))
 
+    async def test_a_later_failed_update_does_not_lose_an_earlier_update_s_record(self):
+        env = self.env
+        await self.create()
+        update = env.registry.update
+
+        def full_disk(name, **fields):
+            if "stamp_version" in fields and fields.get("updating", 1) is None:
+                raise RegistryError("the manager's registry cannot be written: No space left on device")
+            return update(name, **fields)
+
+        with mock.patch.object(env.registry, "update", side_effect=full_disk):
+            job = await env.job(await env.send("POST", "/api/instances/garage/update", {"version": "0.25.1"}))
+        self.assertIn("warning", job["result"])
+        self.assertEqual(env.registry.get("garage")["version"], "0.25.0")  # behind, its flag still set
+        env.stub.releases.append("0.25.3")
+        env.stub.fail[("POST", "/store/addons/local_hri_garage/update")] = "pull failed"
+        job = await env.job(await env.send("POST", "/api/instances/garage/update", {"version": "0.25.3"}))
+        self.assertEqual(job["state"], "failed")
+        entry = env.registry.get("garage")
+        self.assertEqual((entry["version"], entry["updating"]), ("0.25.1", None))  # the first update is recorded
+        self.assertEqual(self.config("garage")["version"], "0.25.1")
+
     async def test_a_failed_update_clears_its_flag(self):
         env = self.env
         await self.create()
