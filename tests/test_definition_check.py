@@ -322,6 +322,37 @@ class FlowCheckTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("local_hri_garage", env.stub.installed)
         self.assertTrue(env.registry.get("garage")["tampered"]["uninstalled"])
 
+    async def test_a_definition_the_manager_did_not_write_is_flagged_and_repaired(self):
+        """At rest, a writer bumps the version and adds a privilege, keeping the marker: the Supervisor's own Update
+        button (or auto-update) would install it without the manager. The row says so, the manager refuses everything
+        but Repair, Stop and Delete, and Repair writes the manager's definition again."""
+        env = self.env
+        self.assertEqual((await self.create())["state"], "succeeded")
+        config = self.config()
+        with open(os.path.join(self.folder(), "config.yaml"), "w", encoding="utf-8") as fh:
+            yaml.safe_dump({**config, "version": "0.25.9", "privileged": ["SYS_ADMIN"]}, fh)
+        await env.sv.reload_store()
+        _, data = await env.get("/api/instances")
+        (row,) = data["instances"]
+        self.assertIn("the store offers a definition the manager did not write (0.25.9", row["problem"])
+        self.assertIn("do not update from the Supervisor's app page", row["problem"])
+        self.assertEqual(row["actions"], ["repair", "stop", "delete"])
+        for path, body in (("start", {}), ("restart", {}), ("update", {"version": "0.25.1"}), ("finish", {})):
+            with self.subTest(action=path):
+                status, answer = await env.send("POST", f"/api/instances/garage/{path}", body)
+                self.assertEqual(status, 400, answer)
+                self.assertIn("did not write", answer["error"])
+        job = await env.job(await env.send("POST", "/api/instances/garage/repair"))
+        self.assertEqual(job["state"], "succeeded", job)
+        repaired = self.config()
+        self.assertEqual(repaired["version"], "0.25.0")
+        self.assertNotIn("privileged", repaired)
+        _, data = await env.get("/api/instances")
+        self.assertNotIn("did not write", data["instances"][0]["problem"] or "")
+        self.assertFalse(data["instances"][0]["update_available"])
+        status, answer = await env.send("POST", "/api/instances/garage/repair")  # nothing foreign any more
+        self.assertEqual(status, 400)
+
     def installed_as(self, **fields):
         """What the Supervisor holds of the installed app, changed behind the manager's back."""
         self.env.stub.installed["local_hri_garage"]["definition"].update(fields)

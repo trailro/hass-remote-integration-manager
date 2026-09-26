@@ -197,8 +197,13 @@ next start records it. The manager does not downgrade.
 
 ![The Update dialog of the instance garage: from 0.25.1, a version to choose, Cancel or Update](docs/images/update-dialog.png)
 
-The Supervisor's own **Update** button on the instance's app page appears only while the manager is updating it:
-updates go through the manager, which is what moves the definition.
+**Never update an instance with the Supervisor's own Update button** (on its app page, or its auto-update). That
+button installs whatever `hri_<name>/` holds at that moment, without any of the manager's checks. It shows while the
+manager is updating the instance (its new definition is in place a moment before the install), and whenever the
+folder holds another version than the installed one: a definition someone else wrote there, which the manager's
+page then flags ("the store offers a definition the manager did not write"), with Repair to write the manager's
+definition again. Updates go through the manager's **Update**, which moves the definition and checks what the
+Supervisor installs.
 
 A release instance records the commit its release tag named. When the manager downloads the same tag again (a
 Repair, or rewriting the definition) and the tag names another commit, it refuses and flags the instance "tag
@@ -376,10 +381,16 @@ narrows itself, in code, and the tests pin it:
   as not checked, and kept installed (an uninstall would drop its options); before an install or update, the same
   refuses it. **Check again** on its row (or **Repair**, for an instance without its folder) checks it again and
   clears the mark when it passes; the manager also checks, at its start, an app installed while it was not watching
-  (an update it had stopped waiting for). What is
-  left: a store reload by someone else between the manager's last check and the Supervisor's start of the install
-  (both within the same moment), of a folder changed in between; the check after the install still catches every
-  key the Supervisor reports. Root on the host can change anything and is outside this model.
+  (an update it had stopped waiting for).
+
+  These checks cover **the manager's own installs and updates**. The Supervisor's own Update button on an app's page,
+  and its auto-update, install whatever the folder holds, without them: the manager cannot stop that. What it does:
+  on every list it compares the version the store offers for each instance with the one it recorded, and flags a
+  definition it did not write, refusing to start, update or finish it until **Repair** writes its own definition
+  again (or **Delete** removes the instance); the check after an install or update still covers every key the
+  Supervisor reports. What is left: a store reload by someone else between the manager's last check and the
+  Supervisor's start of an install (both within the same moment), of a folder changed in between. Root on the host
+  can change anything and is outside this model.
 - **No secrets passed on.** The Supervisor includes an app's options in its info (an HRI instance's options hold its
   password); the manager keeps only a list of harmless fields and never shows or logs options. A Supervisor error
   that quotes an app's options (invalid options: `… Got {…}`) is replaced by its error key and the app's slug. The
