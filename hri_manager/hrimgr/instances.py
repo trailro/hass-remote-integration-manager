@@ -43,6 +43,11 @@ AUTO_USER = "automatic repair"
 # an install the manager stopped waiting for, the Supervisor may finish later (it installs as a task of its own): its
 # registry entry is not forgotten before the install call's own timeout has passed
 INTERRUPTED_GRACE = 3600.0
+# a git definition is HRI's whole source tree in the local apps folder, which others can write, and a build runs its
+# Dockerfile: it is installed only right after the manager downloaded and wrote it, never from what the folder holds
+GIT_NOT_INSTALLED = ("{name} is a git build whose definition is not installed: the manager builds a git instance only "
+                     "from a fresh download of its branch or tag, never from the tree left in the local apps folder. "
+                     "Delete it (its /config folder is kept) and create it again from its branch or tag")
 
 
 class InvalidRequest(ValueError):
@@ -368,7 +373,9 @@ class Manager:
             entry["actions"] = (["stop"] if app and app.get("state") == "started" else []) + ["delete"]
             entry["problem"] = "; ".join(problems)
             return entry
-        if app is None:
+        if app is None and known is not None and known.get("channel") == "git":
+            problems.append(GIT_NOT_INSTALLED.format(name=name))
+        elif app is None:
             problems.append("defined, but not installed: Install installs and starts it")
             actions.append("install")
         else:
@@ -563,6 +570,8 @@ class Manager:
         options and the start)."""
         managed = await self.managed(name)
         self._refuse_marked(name, managed.entry)
+        if action == "install" and managed.entry.get("channel") == "git":
+            raise InvalidRequest(GIT_NOT_INSTALLED.format(name=name))
         return self.jobs.start(name, action, user, lambda job: self._setup(job, managed, install=action == "install"))
 
     def pending_setup(self) -> list[str]:

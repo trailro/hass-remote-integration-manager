@@ -88,7 +88,9 @@ Supervisor's stop timeout). Three cases are left for you to finish, and the page
 - the manager stopped after the install but before the options and the start: the instance offers **Finish setup**,
   which turns on start at boot, the Watchdog and the panel, and starts it (the manager's log names such instances when
   it starts);
-- a definition without its app (restored alone) offers **Install**.
+- a definition without its app (restored alone) offers **Install** for a release. A git instance is never installed
+  from the tree left in the local apps folder (others can write it, and a build runs its Dockerfile): **Delete** it,
+  keeping its `/config` folder, and create it again from its branch or tag.
 
 If an instance of the same name was deleted before with its `/config` folder kept, the new one reuses that folder
 (its Home Assistant, integration and credentials) but not the old options: set its password and `ingress_users` again.
