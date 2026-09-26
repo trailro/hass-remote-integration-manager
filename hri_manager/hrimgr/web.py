@@ -13,7 +13,8 @@ app's ingress (``panel_admin`` only hides the panel), so every request, page and
 - Core says whether that id is an administrator (corews.py: ``config/auth/list`` through the Supervisor's proxy);
   when Core cannot say, the request is refused: the guard fails closed;
 - ``allowed_users`` narrows the administrators further, keyed on the verified id: the id itself, or the login name
-  or display name Core reports for it.  The user name header is shown and logged, never trusted.
+  Core reports for it (never the display name, which any administrator can change).  A list whose entries are all
+  blank refuses everyone.  The user name header is shown and logged, never trusted.
 
 A state-changing request needs ``X-Requested-With: fetch`` and a JSON body, which a form or a cross-site page cannot
 send without a CORS preflight this app never answers.  Every URL the page uses is relative: ingress serves it under a
@@ -126,6 +127,10 @@ async def _identify(request: web.Request, settings: Settings, users: CoreUsers) 
     if not user.is_admin:
         _LOGGER.warning("refused %s: Home Assistant user %r (%r) is not an administrator", where, shown[:64], name[:64])
         return _refuse(403, "HRI Manager is for Home Assistant administrators only.")
+    if settings.allowed_users_unusable:
+        _LOGGER.warning("refused %s: allowed_users has entries, but none names a user", where)
+        return _refuse(403, "HRI Manager's allowed_users option has entries, but none is a user id or login name, so it "
+                            "refuses everyone. Correct it on the app's Configuration tab.")
     # the id, verified with Core, and what Core says about it: never the user name header
     if settings.allowed_users and not user.matches(settings.allowed_users):
         _LOGGER.warning("refused %s: Home Assistant user %r (%r) is not in allowed_users", where, shown[:64], name[:64])

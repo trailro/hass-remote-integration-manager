@@ -177,11 +177,51 @@ class AccessTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(got, 200)  # alice's id: Core says her username is alice, whatever the header says
         got, _ = await self.status_of(client, "GET", "/api/status", ingress(ALICE_ID, None))
         self.assertEqual(got, 200)
-        client = await self.env.client_with(self, allowed_users=frozenset({"olga"}))  # Core's display name: Olga
+
+    async def test_allowed_users_never_matches_the_display_name(self):
+        """Any administrator can change anyone's display name: an entry matches the id or the login name only."""
+        client = await self.env.client_with(self, allowed_users=frozenset({"olga"}))
+        self.env.stub.users[0] = {**core_user(ALICE_ID, "alice", groups=("system-admin",)), "name": "Olga"}
         self.env.stub.users[2] = {**core_user(OLGA_ID, None, owner=True, groups=()), "name": "Olga"}
         self.env.users._users = None
+        for uid in (ALICE_ID, OLGA_ID):  # alice renamed Olga; olga without a login name (an external login)
+            with self.subTest(uid=uid):
+                got, _ = await self.status_of(client, "GET", "/api/status", ingress(uid, None))
+                self.assertEqual(got, 403)
+        client = await self.env.client_with(self, allowed_users=frozenset({OLGA_ID.casefold()}))
         got, _ = await self.status_of(client, "GET", "/api/status", ingress(OLGA_ID, None))
-        self.assertEqual(got, 200)  # no login name (an external login): matched by the name Core has
+        self.assertEqual(got, 200)  # by her id
+
+    async def test_an_allowed_users_list_naming_nobody_refuses_everyone(self):
+        client = await self.env.client_with(self, allowed_users=frozenset(), allowed_users_unusable=True)
+        status, text = await self.status_of(client, "GET", "/api/status", ingress(ALICE_ID, "alice"))
+        self.assertEqual(status, 403)
+        self.assertIn("allowed_users option has entries, but none is a user id or login name", text)
+
+    async def test_a_hanging_core_is_asked_once_for_every_waiting_request(self):
+        """Not one 15 s timeout per waiting request, one after the other; and not again for a few seconds."""
+        now = [100.0]
+        users = CoreUsers("ws://127.0.0.1:9/core/websocket", "t", clock=lambda: now[0])
+        asked = []
+
+        async def hangs():
+            asked.append(now[0])
+            await asyncio.sleep(0.1)
+            raise CoreError("no answer from Core's websocket in 15 s")
+
+        users._fetch = hangs
+        start = asyncio.get_running_loop().time()
+        results = await asyncio.gather(*(users.user(ALICE_ID) for _ in range(4)), return_exceptions=True)
+        self.assertTrue(all(isinstance(r, CoreError) for r in results), results)
+        self.assertEqual(len(asked), 1)
+        self.assertLess(asyncio.get_running_loop().time() - start, 0.3)
+        with self.assertRaises(CoreError):
+            await users.user(ALICE_ID)
+        self.assertEqual(len(asked), 1)  # the failure is remembered for a moment
+        now[0] += corews.FAILURE_TTL
+        with self.assertRaises(CoreError):
+            await users.user(ALICE_ID)
+        self.assertEqual(len(asked), 2)
 
     async def test_only_the_allow_listed_messages_reach_core(self):
         client = await self.env.client_with(self)

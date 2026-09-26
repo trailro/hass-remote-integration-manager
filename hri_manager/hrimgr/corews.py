@@ -9,7 +9,9 @@ authenticates the app by its Supervisor token and needs ``homeassistant_api: tru
 
 A hard allow-list, as for the Supervisor: only the auth message and the ``config/auth/list`` command are ever sent
 (``check_message``, called by the one function that sends).  The connection is opened for that one question and
-closed.  The answer is cached for ``ttl`` seconds and fetched again once for an id it does not hold.  Anything
+closed.  The answer is cached for ``ttl`` seconds and fetched again once for an id it does not hold; one question at a
+time, whose answer every request waiting meanwhile takes, and a failed question is not asked again for
+``failure_ttl`` seconds (a hanging Core would otherwise make each waiting request wait its own timeout).  Anything
 unexpected (Core unreachable, the token refused, an answer of another shape, an unknown id) raises ``CoreError``,
 which the web guard turns into 403: it fails closed."""
 
@@ -31,6 +33,7 @@ LIST_TYPE = "config/auth/list"
 ALLOWED_TYPES = frozenset({AUTH_TYPE, LIST_TYPE})
 ADMIN_GROUP = "system-admin"  # homeassistant/auth/const.py GROUP_ID_ADMIN
 DEFAULT_TTL = 60.0
+FAILURE_TTL = 5.0
 TIMEOUT = 15.0
 MAX_MESSAGE = 4 * 1024 * 1024
 MAX_OTHER_MESSAGES = 20  # events or pings before the answer: more than this is not the answer coming
@@ -52,8 +55,9 @@ class User:
     is_admin: bool
 
     def matches(self, allowed: frozenset[str]) -> bool:
-        """Whether ``allowed`` (casefolded) names this user by id, login name or display name, as Core reports them."""
-        return any(v is not None and v.casefold() in allowed for v in (self.id, self.username, self.name))
+        """Whether ``allowed`` (casefolded) names this user by id or login name, as Core reports them.  Never the
+        display name: any administrator can change anyone's."""
+        return any(v is not None and v.casefold() in allowed for v in (self.id, self.username))
 
 
 def check_message(message: Any) -> None:
@@ -97,7 +101,7 @@ class CoreUsers:
     """Home Assistant's users, as Core knows them, cached for a short time."""
 
     def __init__(self, url: str, token: str, *, session: aiohttp.ClientSession | None = None, ttl: float = DEFAULT_TTL,
-                 timeout: float = TIMEOUT, clock: Callable[[], float] = time.monotonic):
+                 timeout: float = TIMEOUT, clock: Callable[[], float] = time.monotonic, failure_ttl: float = FAILURE_TTL):
         self._url = url
         self._token = token
         self._session = session
@@ -107,6 +111,8 @@ class CoreUsers:
         self._clock = clock
         self._users: dict[str, User] | None = None
         self._fetched = 0.0
+        self._failure_ttl = failure_ttl
+        self._failure: tuple[str, float] | None = None  # the last question's error, and when
         self._generation = 0
         self._lock = asyncio.Lock()
         self.fetches = 0
@@ -133,10 +139,20 @@ class CoreUsers:
             return self._users[user_id]
         generation = self._generation
         async with self._lock:
-            # a request waiting here while another fetched uses that answer: one fetch, not one per request
-            if self._generation == generation or not self._fresh():
-                users = await self._fetch()
-                self._users, self._fetched = users, self._clock()
+            if self._generation != generation:
+                # another request asked while this one waited: its answer, or its failure, is this one's too
+                if self._failure is not None:
+                    raise CoreError(self._failure[0])
+            else:
+                if self._failure is not None and self._clock() - self._failure[1] < self._failure_ttl:
+                    raise CoreError(self._failure[0])
+                try:
+                    fetched = await self._fetch()
+                except CoreError as err:
+                    self._failure = (str(err), self._clock())
+                    self._generation += 1
+                    raise
+                self._users, self._fetched, self._failure = fetched, self._clock(), None
                 self._generation += 1
             users = self._users
         if user_id not in users:
