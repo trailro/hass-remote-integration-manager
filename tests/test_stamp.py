@@ -280,6 +280,24 @@ class CopySaveTest(unittest.TestCase):
                 self.assertEqual(os.listdir(root), [])
 
 
+class CopyTidyTest(unittest.TestCase):
+    def test_what_a_save_killed_midway_left_is_tidied(self):
+        """C-7: a save renames the previous copy aside, then the new one into place; killed in between, the previous
+        one is the only copy (put back), otherwise what is left goes."""
+        root = tmpdir(self)
+        for rel in (".tmp-garage-0123abcd/config.yaml", ".old-garage-0123abcd/config.yaml", "garage/config.yaml",
+                    ".old-attic-0123abcd/config.yaml", ".tmp-attic-89abcdef/config.yaml", ".other/x"):
+            os.makedirs(os.path.join(root, os.path.dirname(rel)), exist_ok=True)
+            with open(os.path.join(root, rel), "wb") as fh:
+                fh.write(rel.encode())
+        done = copies.tidy(root)
+        self.assertEqual(sorted(os.listdir(root)), [".other", "attic", "garage"])
+        with open(os.path.join(root, "attic", "config.yaml"), "rb") as fh:
+            self.assertEqual(fh.read(), b".old-attic-0123abcd/config.yaml")
+        self.assertEqual(len(done), 4)
+        self.assertEqual(copies.tidy(os.path.join(root, "missing")), [])
+
+
 class CopySourceTest(unittest.TestCase):
     """A copy holds the bytes the build wrote; read from a folder only for an old definition, never through a link."""
 
@@ -289,6 +307,17 @@ class CopySourceTest(unittest.TestCase):
                           ("translations/en.yaml.bak", False), ("translations/secrets.yaml", False)):
             with self.subTest(rel=rel):
                 self.assertIs(copies.is_copied(rel, "release"), kept)
+
+    def test_the_build_and_the_copy_take_the_same_translations(self):
+        """C-6: one rule for a translation's name: what the build takes from HRI's app/ is what a copy keeps."""
+        files = hri_files("0.25.0")
+        for rel in ("translations/config.yaml", "translations/options.json", "translations/pt-BR.yaml",
+                    "translations/en.yaml.bak"):
+            files[f"app/{rel}"] = b"configuration: {}\n"
+        with tarsafe.open_archive(make_tarball("hri", files, sha_of("x"))) as archive:
+            taken = {rel for rel in stamp.app_extras(archive) if rel.startswith("translations/")}
+        self.assertEqual(taken, {"translations/en.yaml", "translations/pt-BR.yaml"})
+        self.assertTrue(all(copies.is_copied(rel, "release") for rel in taken))
 
     def test_an_old_definition_is_read_without_following_links(self):
         base, outside = tmpdir(self), tmpdir(self)

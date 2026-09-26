@@ -99,6 +99,23 @@ class TarSafeTest(unittest.TestCase):
         self.assertTrue(archive.tar.closed)
         archive.close()  # twice: nothing happens
 
+    def test_an_archive_refused_after_it_was_opened_is_closed(self):
+        """C-5: refused after tarfile opened it (two top folders, a name of two kinds): the TarFile is closed too, not
+        left to the garbage collector."""
+        opened = []
+        real_open = tarfile.open
+
+        def recording(*args, **kw):
+            opened.append(real_open(*args, **kw))
+            return opened[-1]
+
+        for data in (make_tarball(TOP, {"a": b"1"}, extra=[member("other/x", data=b"x")]),
+                     make_tarball(TOP, {"a": b"1"}, extra=[member(f"{TOP}/a", tarfile.DIRTYPE)])):
+            with self.subTest(), mock.patch.object(tarfile, "open", side_effect=recording):
+                with self.assertRaises(tarsafe.UnsafeArchive):
+                    tarsafe.open_archive(data)
+            self.assertTrue(opened[-1].closed)
+
     def test_caps(self):
         with mock.patch.object(tarsafe, "MAX_MEMBERS", 3), self.assertRaises(tarsafe.UnsafeArchive):
             tarsafe.open_archive(make_tarball(TOP, {str(i): b"" for i in range(5)}))
@@ -165,6 +182,23 @@ class TarSafeTest(unittest.TestCase):
         os.symlink("/", os.path.join(dest, "a"))  # a link planted where a folder will be written
         with self.assertRaises(Exception):
             tarsafe.extract(archive, dest)
+
+
+class CommitArchiveTest(unittest.IsolatedAsyncioTestCase):
+    async def test_an_archive_of_another_commit_is_closed(self):
+        """C-5: codeload served another commit than the one asked for: refused, and the archive (up to 256 MB
+        spooled) closed at once."""
+        from hrimgr.github import GitHub, GitHubError
+
+        gh = GitHub(os.path.join(tmpdir(self), "releases.json"), "", "http://127.0.0.1:9/gh", "http://127.0.0.1:9/cl")
+        self.addAsyncCleanup(gh.close)
+        archive = tarsafe.open_archive(make_tarball(TOP, {"a": b"a"}, sha_of("other")))
+        with mock.patch.object(gh, "commit_on_ref", new=mock.AsyncMock()), \
+                mock.patch.object(gh, "_get", new=mock.AsyncMock(return_value=b"")), \
+                mock.patch.object(tarsafe, "open_archive", return_value=archive):
+            with self.assertRaises(GitHubError):
+                await gh.tarball_of_commit(sha_of("asked"), "branch", "main")
+        self.assertTrue(archive.tar.closed and archive.fileobj.closed)
 
 
 if __name__ == "__main__":

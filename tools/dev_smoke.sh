@@ -21,7 +21,8 @@ VOL=$P-local
 IMG=$P:local
 SHOTS=${1:-}
 # Playwright 1.46's image, pinned by digest: its browsers (chromium-1129) are the ones playwright==1.46.0 drives, and
-# it carries no Python package, so that one is installed in it.  Change both together
+# it carries no Python package, so that one is installed in it.  Change both together.  That install is pinned by
+# version, not by hash (accepted: only in the throwaway screenshot container, never in the app's image or CI)
 PLAYWRIGHT=${PLAYWRIGHT_IMAGE:-mcr.microsoft.com/playwright/python@sha256:98e88016a5705def757564f70469e80161c4e4dbf787bbe35a710fabb70bb7da}
 PLAYWRIGHT_PIP=${PLAYWRIGHT_PIP:-1.46.0}
 PORT=${HRI_MGR_DEV_PORT:-18099}
