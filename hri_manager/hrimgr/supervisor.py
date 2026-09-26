@@ -83,6 +83,25 @@ LIST_FIELDS = ("slug", "name", "version", "version_latest", "update_available", 
                "detached", "available", "build")
 
 
+# the Supervisor's texts for an app's invalid options quote the options (". Got {...}"): an instance's password
+OPTIONS_ERROR_KEYS = frozenset({"app_configuration_invalid_error", "addon_configuration_invalid_error"})
+
+
+def safe_message(answer: Any, path: str) -> str | None:
+    """The Supervisor's error text, or, when it may quote an app's options, a generic one with the error key and the
+    app's slug only."""
+    if not isinstance(answer, dict):
+        return None
+    message, key = answer.get("message"), answer.get("error_key")
+    message = message if isinstance(message, str) else None
+    key = key if isinstance(key, str) else None
+    if key in OPTIONS_ERROR_KEYS or (message and ". Got " in message):
+        found = re.search(r"/(local_hri_[a-z0-9_]+)", path)
+        return (f"the Supervisor refused the configuration of {found.group(1) if found else 'the app'} "
+                f"({key or 'invalid options'}); its message is not shown because it quotes the app's options")
+    return message
+
+
 class NotAllowed(Exception):
     """A call outside the allow-list: refused before anything was sent."""
 
@@ -182,7 +201,7 @@ class SupervisorClient:
         except (UnicodeDecodeError, ValueError):
             answer = {}
         if status >= 400 or not isinstance(answer, dict) or answer.get("result") != "ok":
-            message = answer.get("message") if isinstance(answer, dict) else None
+            message = safe_message(answer, path)
             raise SupervisorError(f"{method} {path}: {message or f'HTTP {status}'}", status)
         return answer.get("data")
 

@@ -283,6 +283,26 @@ class AllowListTest(unittest.TestCase):
         with mock.patch.object(supervisor, "MAX_ANSWER", 100), self.assertRaises(supervisor.SupervisorError):
             asyncio.run(SupervisorClient("http://s", "t", session=RecordingSession(body=body)).list_apps())
 
+    def test_an_error_that_quotes_the_options_is_replaced(self):
+        """The Supervisor's text for invalid options ends with ". Got {options}": an instance's password."""
+        g = self.garage
+        bodies = [
+            b'{"result":"error","message":"App local_hri_garage has invalid options: expected bool. Got {\'password\': \'child-secret\'}",'
+            b'"error_key":"app_configuration_invalid_error"}',
+            b'{"result":"error","message":"App has invalid options: x. Got {\'password\': \'child-secret\'}"}',
+            b'{"result":"error","message":"child-secret","error_key":"addon_configuration_invalid_error"}',
+            b'{"result":"error","message":"x. Got child-secret","error_key":["not", "a", "string"]}',
+        ]
+        for body in bodies:
+            client = SupervisorClient("http://s", "t", session=RecordingSession(status=400, body=body))
+            with self.subTest(body=body[:60]), self.assertRaises(supervisor.SupervisorError) as ctx:
+                asyncio.run(client.start(g))
+            text = str(ctx.exception)
+            self.assertNotIn("child-secret", text)
+            self.assertNotIn("Got", text)
+            self.assertIn("local_hri_garage", text)
+            self.assertIn("configuration", text)
+
     def test_errors_are_reported_with_the_supervisor_message(self):
         client = SupervisorClient("http://s", "t", session=RecordingSession(status=400, body=b'{"result":"error","message":"App is not installed"}'))
         with self.assertRaises(supervisor.SupervisorError) as ctx:
