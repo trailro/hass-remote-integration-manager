@@ -135,6 +135,54 @@ class TreeTest(unittest.TestCase):
                 with self.assertRaises(children.DefinitionChanged):
                     children.check_tree(self.root, "garage", self.manifest)
 
+    def test_a_sub_folder_swapped_for_a_link_while_it_is_read_is_never_followed(self):
+        """R2-16: the walk goes by folder descriptors; a sub-folder swapped for a link to elsewhere after the listing
+        is refused or recorded as the link it is, and nothing outside the folder is opened or named."""
+        folder = os.path.join(self.root, "hri_garage")
+        translations = os.path.join(folder, "translations")
+        outside = tmpdir(self)
+        with open(os.path.join(outside, "secret"), "wb") as fh:
+            fh.write(b"not the manager's")
+        real_islink, real_stat, swapped = os.path.islink, os.stat, []
+
+        def swap():
+            if not swapped:
+                swapped.append(True)
+                os.rename(translations, os.path.join(self.root, "moved"))
+                os.symlink(outside, translations)
+
+        # right after the walk found translations to be a real folder, by whichever check it makes
+        def islink_then_swap(path):
+            result = real_islink(path)
+            if str(path) == translations and not result:
+                swap()
+            return result
+
+        def stat_then_swap(path, *args, **kw):
+            result = real_stat(path, *args, **kw)
+            if kw.get("follow_symlinks") is False and path in ("translations", translations) and not swapped:
+                swap()
+            return result
+
+        with mock.patch("os.path.islink", side_effect=islink_then_swap), \
+                mock.patch("os.stat", side_effect=stat_then_swap):
+            try:
+                manifest = children.digest_tree(folder)
+            except children.UnsafePath:
+                manifest = {}
+        self.assertTrue(swapped)
+        self.assertFalse(any("secret" in k for k in manifest), manifest)
+        with self.assertRaises(children.DefinitionChanged):
+            children.check_tree(self.root, "garage", self.manifest)
+
+    def test_a_tree_too_deep_is_refused_not_a_crash(self):
+        path = os.path.join(self.root, "hri_garage")
+        for _ in range(children.MAX_DEPTH + 2):
+            path = os.path.join(path, "d")
+        os.makedirs(path)
+        with self.assertRaises(children.DefinitionChanged):
+            children.check_tree(self.root, "garage", self.manifest)
+
 
 class FlowCheckTest(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
