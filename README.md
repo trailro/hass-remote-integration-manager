@@ -182,7 +182,8 @@ has moved it to `apps/local` (an upstream issue of the Supervisor, not of this a
     `CHANGELOG.md` and translations; a few kilobytes), so Repair needs nothing from GitHub;
   - a git instance: the copy holds its stamped `config.yaml` and the commit it was built from, not the source tree
     (that would be megabytes); Repair downloads the source of that commit again, so the definition matches the
-    installed app and nothing needs rebuilding.
+    installed app and nothing needs rebuilding. It first asks GitHub whether the commit is on HRI's own branch or
+    tag the instance was built from (codeload serves forks' commits under HRI's name too), and refuses it otherwise.
 
   Repair uses a copy only when it is the copy of that instance (the registry's instance id and channel) at the
   installed version, and its config is one the manager writes (at its start the manager copies every definition it

@@ -24,7 +24,7 @@ import time
 from typing import Any
 
 from . import VERSION, children, copies, names, stamp, tarsafe
-from .github import GitHub, GitHubError, latest_stable
+from .github import GitHub, GitHubError, NotHRICommit, latest_stable
 from .jobs import Busy, Job, JobFailed, Jobs, NeedsAttention, TagMoved
 from .registry import Registry, RegistryError
 from .supervisor import NotAllowed, SupervisorClient, SupervisorError
@@ -881,9 +881,11 @@ class Manager:
                                      f"(recorded: {', '.join(s[:12] for s in recorded) or 'none'})")
             if copy is not None and copy.sha != sha:
                 copy = None  # the copy's config is of another commit
-            job.log(f"downloading hass-remote-integration at commit {sha[:12]}, the installed one")
+            job.log(f"checking that commit {sha[:12]}, the installed one, is on HRI's {ref[0]} {ref[1]}, and downloading it")
             try:
-                archive, source = await self.gh.tarball_of_commit(sha)
+                archive, source = await self.gh.tarball_of_commit(sha, *ref)
+            except NotHRICommit as err:
+                raise NeedsAttention(f"{err}: not a commit of HRI's {ref[0]} {ref[1]}") from None
             except GitHubError as err:
                 if "not found" in str(err):
                     raise NeedsAttention(f"commit {sha[:12]}, the installed one, cannot be downloaded: {err}") from None
