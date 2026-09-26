@@ -15,6 +15,7 @@ import yaml
 
 from hrimgr import copies, names, stamp, tarsafe
 
+from . import APP_DIR
 from .env import Env
 from .fakes.tarballs import hri_files, make_tarball, sha_of
 from .helpers import FIXTURE_0252, FIXTURE_CONFIG, tmpdir
@@ -101,6 +102,19 @@ class StampTest(unittest.TestCase):
         # in another folder than the tree's root: not HRI's entrypoint
         moved = {**without, "tools/entrypoint.py": b"APP_DYNAMIC_PORT = True\n"}
         self.assertFalse(stamp.reads_dynamic_port(archive(moved)))
+
+
+class PageTest(unittest.TestCase):
+    def test_the_page_offers_it_on_create_update_and_rebuild_and_shows_it(self):
+        static = APP_DIR / "hrimgr" / "static"
+        html, js = (static / "index.html").read_text(encoding="utf-8"), (static / "mgr.js").read_text(encoding="utf-8")
+        for needle in ('id="c-hn"', 'id="cf-hn-row"', 'id="cf-hn"', "mDNS, SSDP and broadcast",
+                       "unless the app has a password", "the sidebar panel keeps working"):
+            self.assertIn(needle, html)
+        self.assertIn("bluetooth, host_network}", js)  # the create form's body, both channels
+        self.assertEqual(js.count("host_network: c.hostNetwork"), 2)  # Update and Rebuild
+        self.assertEqual(js.count("hostNetwork: !!i.host_network"), 2)
+        self.assertIn(">Host network</span>", js)  # the row's badge
 
 
 class HostNetworkFlowTest(unittest.IsolatedAsyncioTestCase):
