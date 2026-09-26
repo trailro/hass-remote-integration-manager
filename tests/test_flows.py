@@ -297,6 +297,17 @@ class FlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(job["state"], "succeeded", job)
         self.assertIsNone(env.registry.get("garage"))
 
+    async def test_a_build_the_builder_refuses_leaves_no_registry_entry(self):
+        env = self.env
+        for what, patch in (("a second app", mock.patch.object(stamp, "find_configs", return_value=["config.yaml", "docs/config.yaml"])),
+                            ("stamp's own refusal", mock.patch.object(stamp, "build_release", side_effect=ValueError("unknown channel 'x'")))):
+            with self.subTest(what=what), patch:
+                job = await self.create()
+                self.assertEqual(job["state"], "failed", job)
+                self.assertIn("the definition was not written", job["error"])
+                self.assertIsNone(env.registry.get("garage"))
+                self.assertEqual(os.listdir(env.local_apps), [])
+
     async def test_an_install_the_supervisor_refuses_is_rolled_back_and_forgotten(self):
         env = self.env
         env.stub.fail[("POST", "/store/addons/local_hri_garage/install")] = "Not enough free space"

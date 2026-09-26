@@ -49,6 +49,11 @@ class InvalidRequest(ValueError):
     pass
 
 
+# what writing a definition folder may raise, the builder's own refusals (JobFailed: more than one app; ValueError:
+# stamp's) among them: every write path undoes its registry change on any of these
+WRITE_ERRORS = (stamp.TemplateError, children.UnsafePath, children.NotManaged, RegistryError, OSError, JobFailed, ValueError)
+
+
 REGISTRY_FIELDS = ("name", "slug", "channel", "version", "ref_kind", "ref", "sha", "instance_id", "created_at", "updated_at",
                    "stamp_version", "created_by", "updated_by", "history")
 HISTORY_KEYS = ("channel", "version", "ref_kind", "ref", "sha", "updated_at", "event", "by")
@@ -735,7 +740,7 @@ class Manager:
                                               self._builder(job, archive, channel, name, version, sha, marker, source,
                                                             built=built),
                                               self.registry)
-        except (stamp.TemplateError, children.UnsafePath, children.NotManaged, RegistryError, OSError) as err:
+        except WRITE_ERRORS as err:
             await asyncio.to_thread(self._forget, name, marker["instance_id"])
             raise JobFailed(f"the definition was not written: {err}") from None
         await self._save_copy(job, managed)
@@ -948,7 +953,7 @@ class Manager:
             replacement = await asyncio.to_thread(
                 children.replace, managed, self._builder(job, archive, channel, managed.name, version, sha, new_marker, source,
                                                          built=built))
-        except (stamp.TemplateError, children.UnsafePath, children.NotManaged, OSError) as err:
+        except WRITE_ERRORS as err:
             await self._clear_updating(managed.name)
             raise JobFailed(f"the definition was not written: {err}") from None
         expected = stamp.expected_view(built["config"], managed.slug)
@@ -1220,8 +1225,7 @@ class Manager:
             managed = await asyncio.to_thread(
                 children.write_new, self.root, name,
                 self._builder(job, archive, channel, name, version, sha, marker, source, copy=copy), self.registry)
-        except (stamp.TemplateError, children.UnsafePath, children.NotManaged, RegistryError, OSError, JobFailed) as err:
-            # JobFailed: the builder's own refusal (more than one app)
+        except WRITE_ERRORS as err:
             await asyncio.to_thread(self._restore_entry, name, entry, marker["instance_id"])
             raise JobFailed(f"the definition was not written: {err}") from None
         self._clear_auto(name, keep_job=job.id)  # an automatic repair's own note stays: it succeeded
@@ -1278,7 +1282,7 @@ class Manager:
             managed = await asyncio.to_thread(
                 children.write_new, self.root, name,
                 self._builder(job, archive, channel, name, version, sha, marker, source, built=built), self.registry)
-        except (stamp.TemplateError, children.UnsafePath, children.NotManaged, RegistryError, OSError, JobFailed) as err:
+        except WRITE_ERRORS as err:
             await asyncio.to_thread(self._restore_entry, name, entry, marker["instance_id"])
             raise JobFailed(f"the definition was not written: {err}") from None
         expected = stamp.expected_view(built["config"], slug)
