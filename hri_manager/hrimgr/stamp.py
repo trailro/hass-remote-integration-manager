@@ -246,8 +246,10 @@ def is_app_config(rel: str) -> bool:
             and not any(p.startswith(".") or p == "rootfs" for p in parts))
 
 
-def build_git(archive: tarsafe.Archive, dest: str, name: str, version: str, sha: str, source: str) -> tuple[dict, list[str]]:
+def build_git(archive: tarsafe.Archive, dest: str, name: str, version: str, sha: str, source: str,
+              config: dict | None = None) -> tuple[dict, list[str]]:
     """Fill ``dest`` with a git instance: HRI's whole tree, built by the Supervisor from its root Dockerfile.
+    ``config``: the stamped config to write (Repair, from the manager's copy) instead of stamping the tree's own.
 
     Refused when the tree's root has a file the Supervisor would use to build or confine the app (``BUILD_FILES_RE``).
     Every file the store would read as an app (``is_app_config``: app/config.yaml, and any other config.*) goes, and
@@ -260,7 +262,8 @@ def build_git(archive: tarsafe.Archive, dest: str, name: str, version: str, sha:
     if build_files:
         raise TemplateError(f"the tree has {', '.join(tarsafe.show(r) for r in build_files)} at its root, which the "
                             "Supervisor would use to build or confine the app instead of HRI's Dockerfile: refused")
-    config = stamp(_template(archive), name, version, "git")
+    stamped = stamp(_template(archive), name, version, "git")
+    config = stamped if config is None else config
     extras = _app_extras(archive)
     tarsafe.extract(archive, dest)
     notes = [f"skipped link {tarsafe.show(rel)}" for rel in archive.skipped]

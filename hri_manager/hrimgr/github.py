@@ -4,7 +4,9 @@ Two fixed hosts, no redirects followed: api.github.com for the release list and 
 rate limit) and codeload.github.com for tarballs (never with the token: HRI is public).  A git ref is a branch or a
 tag of HRI itself (names.validate_ref), checked to exist in HRI's repository with the API before anything is
 downloaded, and fetched with its full ``refs/heads/`` or ``refs/tags/`` path: codeload also serves pull requests and
-forks' commits under HRI's name, which a short name could reach.  The release list is cached in /data for an hour,
+forks' commits under HRI's name, which a short name could reach.  One exception, for Repair only: the commit a git
+instance was built from, which the manager recorded itself (from HRI's branch or tag, in its own /data) and never
+takes from a request; the archive must name that very commit.  The release list is cached in /data for an hour,
 and the instances list reads only the cache, so GitHub being unreachable never stops the page."""
 
 from __future__ import annotations
@@ -169,6 +171,21 @@ class GitHub:
             raise GitHubError(f"no answer from GitHub in {int(timeout)} s") from None
         except aiohttp.ClientError as err:
             raise GitHubError(f"GitHub unreachable: {err.__class__.__name__}") from None
+
+    async def tarball_of_commit(self, sha: str) -> tuple[tarsafe.Archive, str]:
+        """The source of a commit the manager recorded when it built an instance from HRI's branch or tag (Repair of
+        a git instance at its installed commit), checked to be that commit."""
+        if not isinstance(sha, str) or not names.SHA_RE.fullmatch(sha):
+            raise GitHubError("not a commit the manager recorded")
+        url = f"{self._codeload}/{names.HRI_REPO}/tar.gz/{sha}"
+        try:
+            data = await self._get(url, {}, tarsafe.MAX_COMPRESSED, 300)
+        except GitHubError as err:
+            raise GitHubError(f"commit {sha[:12]}: {err}") from None
+        archive = await asyncio.to_thread(tarsafe.open_archive, data)
+        if archive.sha != sha:
+            raise GitHubError(f"the archive of commit {sha[:12]} names another commit")
+        return archive, url
 
     def tarball_url(self, kind: str, ref: str) -> str:
         names.validate_ref(kind, ref)

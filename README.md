@@ -48,7 +48,8 @@ The manager then, as a job whose log the page shows:
 1. downloads that release's source from GitHub and takes its `app/` folder (config, docs, translations);
 2. records the instance in its registry (`/data/instances.json`) and writes the instance's definition to
    `hri_<name>/` in the local apps folder, stamped for this instance (below), with a marker file
-   `.hri-manager.json`;
+   `.hri-manager.json`; a copy of the definition goes to its own `/data/definitions/<name>/` (see
+   [Backups](#backups));
 3. reloads the Supervisor's store and waits for `local_hri_<name>` to appear;
 4. installs it (the Supervisor pulls HRI's image), turns on **Start on boot**, the **Watchdog** and **Show in
    sidebar**, and starts it.
@@ -156,13 +157,23 @@ backup **leaves the local apps folder out**: the backup still names the folder `
 has moved it to `apps/local` (an upstream issue of the Supervisor, not of this app). So:
 
 - **After a full restore**, instances come back **detached**: installed and running, but without a definition, so they
-  cannot be updated. The manager lists each with **Repair**, which writes its definition again: a release instance
-  from that release on GitHub; a git instance from its branch or tag, which must still exist (when the branch has
-  moved on, the definition is written for its current commit and **Rebuild** installs it).
+  cannot be updated. The manager lists each with **Repair**, which writes its definition again.
 - **After a partial restore of an instance without the local apps folder**: the same.
 - The manager's own **registry** of the instances it created (`/data/instances.json`: each instance's channel, branch
-  or tag, commit and id) is in the manager's `/data`, which **is** in the manager's own backup. Restore the manager
-  with the instances and Repair works from the registry, for the git channel too.
+  or tag, commit and id) and a **copy of each definition** (`/data/definitions/<name>/`) are in the manager's
+  `/data`, which **is** in the manager's own backup. Restore the manager with the instances and Repair works from
+  them:
+  - a release instance: its whole definition is in the copy (the stamped `config.yaml`, HRI's `DOCS.md`,
+    `CHANGELOG.md` and translations; a few kilobytes), so Repair needs nothing from GitHub;
+  - a git instance: the copy holds its stamped `config.yaml` and the commit it was built from, not the source tree
+    (that would be megabytes); Repair downloads the source of that commit again, so the definition matches the
+    installed app and nothing needs rebuilding.
+
+  Repair uses a copy only when it is the copy of that instance (the registry's instance id and channel) at the
+  installed version, and its config is one the manager writes. Otherwise, or when the manager has no copy (an
+  instance created by 0.1.0, until its next update), Repair downloads from GitHub: a release from its tag; a git
+  instance from its branch or tag, which must still exist (when the branch has moved on, the definition is written
+  for its current commit and **Rebuild** installs it).
 
 Repair is offered only for an app the Supervisor reports as detached **and** that the manager's registry holds (an
 instance this manager created), and runs only if, after a store reload, the store still has no definition of its
@@ -213,8 +224,8 @@ narrows itself, in code, and the tests pin it:
   that quotes an app's options (invalid options: `… Got {…}`) is replaced by its error key and the app's slug. The
   Supervisor token and the optional GitHub token are never logged: the log formatter removes them from every line,
   tracebacks included.
-- **Files.** Writes stay inside `hri_<name>/` of the local apps folder: built in a hidden temporary folder and renamed
-  into place, no symlink followed, YAML written with a safe dumper. Source archives from GitHub are checked before
+- **Files.** Writes stay inside `hri_<name>/` of the local apps folder and the manager's own `/data`: built in a hidden
+  temporary folder and renamed into place, no symlink followed, YAML written with a safe dumper. Source archives from GitHub are checked before
   anything is written (no absolute paths, no `..`, no hard links or devices, links only to files of the same
   archive, size and count caps; the gzip layer is unpacked as a capped stream first, so a huge tar header is refused
   too), outside the event loop.
