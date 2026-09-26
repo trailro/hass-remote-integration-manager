@@ -1378,6 +1378,11 @@ class FlowTest(unittest.IsolatedAsyncioTestCase):
         register(env.registry, marker("garage"))
         job = await env.job(await env.send("POST", "/api/instances/garage/repair"))
         self.assertEqual(job["state"], "failed")
+        # its definition declares an instance's slug outside hri_garage/: a decoy, refused before anything else
+        self.assertIn("'my_garage/config.yaml' in the local apps folder declares the slug 'hri_garage'", job["error"])
+        self.assertFalse(os.path.lexists(self.folder("garage")))
+        with mock.patch.object(env.manager, "_refuse_decoys", new=mock.AsyncMock()):  # and past that, not detached
+            job = await env.job(await env.send("POST", "/api/instances/garage/repair"))
         self.assertIn("not detached", job["error"])
         self.assertFalse(os.path.lexists(self.folder("garage")))
 

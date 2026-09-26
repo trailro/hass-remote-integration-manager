@@ -8,9 +8,10 @@ Fixes from a second external review (of 0.1.2). Still **experimental**.
   folder and keys each app by the slug inside the file, the last one found winning: a file in any other folder that
   declared `slug: hri_<name>`, with its own image or a map of Home Assistant's configuration (neither reported by the
   Supervisor), could be installed and started by the manager's own Install or Update and listed as healthy. The
-  manager now searches the folder by the Supervisor's own rule, refuses to create, install, update, rebuild, repair or
-  start while such a file is there, checks again right after an install or update (and contains what was installed
-  if one appeared), and lists every decoy with its path under Other HRI apps.
+  manager now searches the folder by the Supervisor's own rule, refuses to create, install, update, rebuild or repair
+  while such a file is there (before it writes, removes or reloads anything) and to start the instance it names,
+  checks again right after an install or update (and contains what was installed if a decoy of that instance
+  appeared), and lists every decoy with its path under Other HRI apps.
 - **A new definition is checked against what the manager wrote**, not taken from the folder when the build returns: a
   file planted during the build (a `Dockerfile.<arch>`, a `config.yaml` with another image) refuses the write. The
   build folder is `0700`. Install of a restored definition refuses a `Dockerfile.<arch>`, `build.*` or `apparmor.txt`.

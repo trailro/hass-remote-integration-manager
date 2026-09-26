@@ -801,6 +801,7 @@ class Manager:
         """The store offers a definition the manager did not write: the folder goes (out of the store's sight), and
         Repair writes the manager's definition of the installed version again, and checks the installed app."""
         await self._refuse_marked_now(managed.name, check=True)
+        await self._refuse_decoys()  # before the folder is removed and the store reloaded
         job.log(f"{names.folder_name(managed.name)} holds a definition the manager did not write: removing it")
         try:
             await asyncio.to_thread(children.remove, managed)
@@ -2053,6 +2054,8 @@ class Manager:
 
     async def _repair_installed(self, job: Job, name: str, user: str) -> dict:
         slug = names.supervisor_slug(name)
+        # a Repair writes a definition and reloads the store, as an install does: not while a decoy is there
+        await self._refuse_decoys()
         entry, info = await self._detached(job, name)
         version = str(info.get("version") or "")
         channel = self.installed_channel(info)
