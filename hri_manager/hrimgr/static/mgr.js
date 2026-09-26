@@ -93,7 +93,7 @@ function actionsCell(i) {
   let out = link ? `<a class="btn" href="${esc(link.href)}" target="${link.target}" rel="noopener">Open</a>` : '';
   if (busy) return out + ` <button data-job="${esc(i.job.id)}">${esc(i.job.action)}…</button>`;
   for (const a of i.actions || []) {
-    const label = a === 'update' && i.channel === 'git' ? 'Rebuild' : LABELS[a] || a;
+    const label = (i.labels || {})[a] || (a === 'update' && i.channel === 'git' ? 'Rebuild' : LABELS[a] || a);
     out += `<button data-act="${esc(a)}" data-name="${esc(i.name)}"${a === 'delete' ? ' class="danger"' : ''}>${esc(label)}</button>`;
   }
   return out;

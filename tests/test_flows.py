@@ -383,6 +383,8 @@ class FlowTest(unittest.IsolatedAsyncioTestCase):
         entry = env.registry.get("garage")
         self.assertEqual((entry["version"], entry["updating"]), ("0.25.1", None))
         self.assertTrue(entry["tampered"]["pending"])  # checked by the manager before anything else is done with it
+        await env.manager.jobs.wait_all()  # the start's check, as a job
+        self.assertIsNone(env.registry.get("garage")["tampered"])
         await env.sv.reload_store()
         _, data = await env.get("/api/instances")
         self.assertFalse(data["instances"][0]["update_available"])  # no downgrade offered
