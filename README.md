@@ -20,14 +20,16 @@ release you choose. On a plain Docker install you do not need this: run one HRI 
 - Home Assistant OS with Supervisor **2026.07.1 or newer** (the `local_apps` folder mapping), Core 2025.10 or newer
   (HRI's own floor).
 - HRI **0.25.0 or newer** for instances: the first HRI release that runs as an app with a sidebar panel.
-- Internet access to GitHub (the release list and the source of the release you install) and to ghcr.io (HRI's
-  image, pulled by the Supervisor).
+- Internet access to GitHub (the release list and the source of the release you install) and to ghcr.io (the
+  manager's and HRI's images, pulled by the Supervisor).
 
 ## Install
 
 1. **Settings > Apps > App Store**, menu **⋮ > Repositories**, add
    `https://github.com/trailro/hass-remote-integration-manager`.
-2. Install **HRI Manager**. The Supervisor builds it on your machine (a small Python image); this takes a minute.
+2. Install **HRI Manager**. The Supervisor pulls its image, `ghcr.io/trailro/hass-remote-integration-manager`
+   (amd64 and aarch64), so the manager's backups do not hold a locally built image (0.1.0 was built on your machine,
+   and its backups carried that image as `image.tar`).
 3. On its **Info** tab, turn on **Show in sidebar** (the Supervisor leaves it off for a newly installed app, so
    there is no sidebar entry until you do), then **Start** it.
 4. Open **HRI Manager** in the sidebar (or **Open web UI** on its Info tab). It is for Home Assistant
@@ -257,7 +259,8 @@ narrows itself, in code, and the tests pin it:
   ingress app, the panel shares Home Assistant's origin with other apps' panels.
 
 What remains: the token itself has the manager role, so code running inside this app's container could use it. The
-image contains only the manager (Python, aiohttp, PyYAML), built on your machine from this repository. And the
+image contains only the manager (Python, aiohttp, PyYAML), built from this repository by its Image workflow and
+published on ghcr.io. And the
 socket check trusts the hassio network: another app with the `NET_RAW` capability could spoof the Supervisor's
 address there (ARP spoofing), a risk of the platform that every ingress app shares.
 
@@ -265,12 +268,10 @@ address there (ARP spoofing), a risk of the platform that every ingress app shar
 
 - Home Assistant OS only; one manager per system.
 - Instances need HRI 0.25.0 or newer; the manager does not downgrade.
-- The manager's image is built on your machine (no published image yet).
 - Instances created by hand, and the single published HRI app, are not managed.
 
 ## Roadmap
 
-- Published images for the manager (no build on the device).
 - Adopting the single published HRI app as an instance.
 - A helper to publish an instance's port.
 
@@ -291,7 +292,9 @@ update / delete through the page's API and takes screenshots; see its header.
 
 CI runs the unit tests on Python 3.13 and 3.14, the app linter on the manager and on an instance stamped from HRI's
 template, the Supervisor's own schema checks of both (`.github/app_supervisor_check.py`, against a pinned Supervisor
-release) and a build of the image.
+release) and a build of the image for amd64 and arm64. A published release runs the Image workflow
+(`.github/workflows/image.yml`): it pushes the image for both architectures to ghcr.io and only then moves the app's
+version on `main` (see `CLAUDE.md`, Release checklist).
 
 ## License
 

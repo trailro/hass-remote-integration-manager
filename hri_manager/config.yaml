@@ -1,6 +1,10 @@
 # HRI Manager: creates, updates and removes instances of hass-remote-integration as local apps.  Reference: DOCS.md
 # and the README.
 name: HRI Manager
+# version, and the image: line below it once there is one, are written only by the Image workflow's app-version job
+# (.github/workflows/image.yml), after that version's image is on ghcr.io and anyone can pull it: never by hand, never
+# in a release (the store would offer a version whose image does not exist).  Without an image: line the Supervisor
+# builds this folder's Dockerfile on the device.
 version: "0.1.0"
 slug: hri_manager
 description: Run several hass-remote-integration instances on one Home Assistant OS, one integration each
@@ -13,10 +17,6 @@ homeassistant: "2025.10.0"
 arch:
   - aarch64
   - amd64
-# No image: the Supervisor builds this folder's Dockerfile on the device (a small Python image, built once per
-# version).  Published images are on the roadmap: they need a registry workflow and move the version the same way
-# HRI's Image workflow does.
-#
 # The manager role is what installing, updating and removing local apps needs.  It also allows much more (any app,
 # backups, the host): the code restricts itself to an allow-list of calls (hrimgr/supervisor.py), and changes only
 # the apps it created, recognised by the marker in their folder

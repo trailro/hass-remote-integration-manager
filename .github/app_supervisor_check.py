@@ -30,6 +30,7 @@ ROOT = HERE.parent
 FIXTURE = ROOT / "tests" / "fixtures" / "hri_v0.25.0"
 CONFIG_PARENT = PurePath("/data/app_configs")
 HRI_FOLDER = CONFIG_PARENT / "5c53de3b_hass_remote_integration"
+MANAGER_IMAGE = "ghcr.io/trailro/hass-remote-integration-manager"
 # HRI's live state, which a backup must keep (relative to its folder)
 STATE_FILES = ("configuration.yaml", ".storage/core.config_entries", ".storage/core.device_registry",
                "integration_manager/settings.json", "integration_manager/state.json", "integration_manager/mqtt.json",
@@ -178,6 +179,12 @@ class Check:
             if path.suffix in FILE_SUFFIX_CONFIGURATION:
                 self.translations(f"hri_manager/translations/{path.name}", read_json_or_yaml_file(path), config)
         self.options("hri_manager default options (AppOptions)", config)
+        # as the Image workflow's app-version job leaves it once the first image is published
+        with_image = self.validate("hri_manager/config.yaml with the image: line of the app-version job",
+                                   {**raw, "image": MANAGER_IMAGE})
+        if with_image is not None:
+            self.section("with the image line, the Supervisor pulls instead of building",
+                         [] if with_image.get("image") == MANAGER_IMAGE else [f"image {with_image.get('image')!r}"])
 
         template = stamp.parse_template((FIXTURE / "app_config.yaml").read_bytes())
         tr = read_json_or_yaml_file(FIXTURE / "app_translations_en.yaml")

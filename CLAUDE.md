@@ -36,6 +36,19 @@ Keep venvs out of the repo. Check the exit code, never `| tail` the runner. All 
 `hri-mgr-dev-*` containers; see its header.
 
 ## Release checklist
-Version in `hri_manager/config.yaml`, `hrimgr/__init__.py` and `hri_manager/CHANGELOG.md` together (a test
-checks) → CI green (unit tests, app linter, the Supervisor's own schema check of the app and of a stamped
-instance) → docs match the code.
+1. Version in `hrimgr/__init__.py` and `hri_manager/CHANGELOG.md` together (a test checks), and the README's status
+   line. **Never `version` or `image:` in `hri_manager/config.yaml`**: the Image workflow's `app-version` job writes
+   both, after it pushed that version's image and an anonymous pull of it works (`.github/workflows/image.yml`,
+   `tests/test_image_workflow.py`). The store offers an update as soon as `main` names a new version; a version
+   ahead of its image breaks every install and update (HRI had this bug). Until the first image exists the file has
+   no `image:` line and the Supervisor builds the folder on the device.
+2. CI green: unit tests, app linter, the Supervisor's own checks of the app and of stamped instances (schema, backup
+   filter), the image built for amd64 and arm64.
+3. Docs match the code.
+4. Merge, then publish the GitHub release `vX.Y.Z` from `main`. The Image workflow checks that the tag's
+   `__init__.py` says X.Y.Z, builds amd64 + arm64, pushes `ghcr.io/trailro/hass-remote-integration-manager:X.Y.Z`
+   (`:X.Y` and `:latest` for the newest stable), checks an anonymous pull, then commits the version (and the first
+   time the `image:` line) to `main`. Pre-releases get an image but never move the version.
+5. The first release with an image only: the new ghcr.io package is private, so the anonymous-pull step fails and
+   nothing moves. Make the package public (its settings, Change visibility), then re-run the failed `app-version` job.
+6. Check the store offers the new version and that updating pulls the image instead of building.
