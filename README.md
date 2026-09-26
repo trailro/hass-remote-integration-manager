@@ -394,8 +394,9 @@ registry, the administrator check, the secrets kept out of answers and logs.
     same rule. A decoy is a file that declares a slug of the manager's (`hri_…`, compared as host names), other than a
     folder's own `hri_<name>/config.yaml` declaring `hri_<name>`; so is any such file that is a link (the Supervisor
     resolves it from its own mount of the folder, where it may reach a file the manager cannot see), or that the
-    manager cannot read (a FIFO, a file too large). While a decoy is there the manager installs, updates, rebuilds or
-    repairs nothing; one that names an instance also stops its Start. The page lists each with its path and what to
+    manager cannot read (a FIFO, a file too large). While a decoy is there the manager creates, installs, updates,
+    rebuilds or repairs nothing (each refuses before it writes, removes or reloads anything); one that names an
+    instance also stops its Start. The page lists each with its path and what to
     do. Before the reload that precedes an install or update, the manager makes the folder's own modification time
     the newest (and refuses while a file is dated in the future), so the store reads the folder again instead of
     keeping what it read before.

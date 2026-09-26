@@ -1158,6 +1158,31 @@ class DecoyFlowTest(FlowBase):
             stamp.decoys(root)
         self.assertIn("'many/f", str(ctx.exception))
 
+    async def test_repair_is_refused_while_a_decoy_is_there(self):
+        """F5: Repair writes a definition and reloads the store, as an install does: refused while any decoy is there,
+        before it writes or removes anything."""
+        env = self.env
+        self.assertEqual((await self.create())["state"], "succeeded")
+        config = self.config()
+        self.decoy(rel="x/config.yaml", slug="hri_attic", name="HRI Attic")
+        # a folder the manager did not write (a foreign version): Repair would remove it and write its own
+        with open(os.path.join(self.folder(), "config.yaml"), "w", encoding="utf-8") as fh:
+            yaml.safe_dump({**config, "version": "0.25.9"}, fh)
+        since = len(env.stub.calls)
+        job = await env.job(await env.send("POST", "/api/instances/garage/repair"))
+        self.assertEqual(job["state"], "failed", job)
+        self.assertIn("'x/config.yaml' in the local apps folder declares", job["error"])
+        self.assertEqual(self.config()["version"], "0.25.9")  # not removed
+        self.assertNotIn(("POST", "/store/reload", {}), env.stub.calls[since:])
+        # an instance whose folder is gone (a restore): nothing written
+        shutil.rmtree(self.folder())
+        since = len(env.stub.calls)
+        job = await env.job(await env.send("POST", "/api/instances/garage/repair"))
+        self.assertEqual(job["state"], "failed", job)
+        self.assertIn("'x/config.yaml' in the local apps folder declares", job["error"])
+        self.assertFalse(os.path.exists(self.folder()))
+        self.assertNotIn(("POST", "/store/reload", {}), env.stub.calls[since:])
+
     async def test_update_is_refused_while_a_decoy_of_the_new_version_appears(self):
         env = self.env
         self.assertEqual((await self.create())["state"], "succeeded")
