@@ -82,7 +82,8 @@ RULES: tuple[Rule, ...] = (
 
 # what an app's info may show: no options, no network details of other kinds
 INFO_FIELDS = ("slug", "name", "version", "version_latest", "update_available", "state", "boot", "watchdog",
-               "ingress", "ingress_url", "ingress_panel", "detached", "available", "url", "repository", "build")
+               "ingress", "ingress_url", "ingress_panel", "detached", "available", "url", "repository", "build",
+               "host_dbus")
 LIST_FIELDS = ("slug", "name", "version", "version_latest", "update_available", "state", "repository", "url",
                "detached", "available", "build")
 
