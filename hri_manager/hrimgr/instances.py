@@ -61,7 +61,8 @@ class InvalidRequest(ValueError):
 
 # what writing a definition folder may raise, the builder's own refusals (JobFailed: more than one app; ValueError:
 # stamp's) among them: every write path undoes its registry change on any of these
-WRITE_ERRORS = (stamp.TemplateError, children.UnsafePath, children.NotManaged, RegistryError, OSError, JobFailed, ValueError)
+WRITE_ERRORS = (stamp.TemplateError, children.UnsafePath, children.NotManaged, children.DefinitionChanged, RegistryError,
+                OSError, JobFailed, ValueError)
 
 
 REGISTRY_FIELDS = ("name", "slug", "channel", "version", "ref_kind", "ref", "sha", "instance_id", "created_at", "updated_at",
@@ -1452,6 +1453,12 @@ class Manager:
         folder = children.child_path(self.root, managed.name)
         manifest = children.digest_tree(folder)
         try:
+            # what the Supervisor would build or confine the app with instead of what the manager writes (the
+            # manager writes none of them; build_git refuses a tree with one)
+            build_files = sorted(rel for rel in manifest if "/" not in rel and stamp.BUILD_FILES_RE.fullmatch(rel))
+            if build_files:
+                raise copies.CopyError(f"it holds {', '.join(tarsafe.show(r) for r in build_files)}, which the Supervisor "
+                                       "would use to build or confine the app")
             raw = copies.read_file(os.path.join(folder, "config.yaml"))
             if manifest.get("config.yaml", "").split(" ")[0] != "sha256:" + hashlib.sha256(raw).hexdigest():
                 raise copies.CopyError("its config.yaml changed while it was read")
