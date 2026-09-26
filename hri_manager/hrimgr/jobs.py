@@ -32,6 +32,10 @@ class Tampered(JobFailed):
     """The Supervisor installed another definition than the one the manager wrote: the app is uninstalled at once."""
 
 
+class Unverified(JobFailed):
+    """The Supervisor no longer reports a field the manager checks: the app is stopped and marked, not uninstalled."""
+
+
 class NeedsAttention(JobFailed):
     """Repair cannot get the exact source of the installed version: nothing was written, and the instance waits for
     the user (Update or Rebuild, Delete, or Repair again once the cause is gone); automatic repair leaves it alone."""

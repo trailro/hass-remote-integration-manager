@@ -291,6 +291,46 @@ class FlowCheckTest(unittest.IsolatedAsyncioTestCase):
         job = await env.job(await env.send("POST", "/api/instances/garage/stop"))
         self.assertEqual(job["state"], "succeeded", job)
 
+    def unreported(self, key):
+        """A Supervisor whose app info no longer carries ``key`` (its API changed)."""
+        env = self.env
+        read = env.sv.app_definition
+
+        async def without(slug):
+            return {k: v for k, v in (await read(slug)).items() if k != key}
+
+        return mock.patch.object(env.sv, "app_definition", side_effect=without)
+
+    async def test_a_field_the_supervisor_stops_reporting_stops_and_marks_without_uninstalling(self):
+        env = self.env
+        with self.unreported("privileged"):
+            job = await self.create()
+        self.assertEqual(job["state"], "failed", job)
+        self.assertIn("does not report privileged", job["error"])
+        self.assertIn("a change of the Supervisor's API?", job["error"])
+        self.assertIn("kept installed, with its options and data", job["error"])
+        self.assertNotIn("uninstall", [p.rsplit("/", 1)[-1] for m, p, _ in env.stub.calls if m == "POST"])
+        self.assertIn("local_hri_garage", env.stub.installed)
+        self.assertTrue(os.path.isdir(self.folder()))
+        mark = env.registry.get("garage")["tampered"]
+        self.assertEqual((mark["unverified"], mark["uninstalled"]), (True, False))
+        _, data = await env.get("/api/instances")
+        self.assertEqual(data["instances"][0]["actions"], ["delete"])
+
+    async def test_an_update_the_supervisor_cannot_report_is_recorded_stopped_and_marked(self):
+        env = self.env
+        self.assertEqual((await self.create())["state"], "succeeded")
+        with self.unreported("host_dbus"):
+            job = await env.job(await env.send("POST", "/api/instances/garage/update", {"version": "0.25.1"}))
+        self.assertEqual(job["state"], "failed", job)
+        self.assertIn("does not report host_dbus", job["error"])
+        app = env.stub.installed["local_hri_garage"]
+        self.assertEqual((app["version"], app["state"]), ("0.25.1", "stopped"))  # updated, stopped, not uninstalled
+        entry = env.registry.get("garage")
+        self.assertEqual((entry["version"], entry["updating"], entry["tampered"]["unverified"]), ("0.25.1", None, True))
+        self.assertEqual(sorted(os.listdir(env.local_apps)), ["hri_garage"])
+        self.assertEqual(self.config()["version"], "0.25.1")
+
     async def test_a_definition_changed_before_the_store_reads_it_is_refused(self):
         env = self.env
         write_new = children.write_new

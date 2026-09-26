@@ -366,7 +366,10 @@ narrows itself, in code, and the tests pin it:
   the instance's row. Stop and uninstall go through the same allow-list, which needs the instance's marker: if the
   writer broke the marker, they are refused, and the job and the row say plainly that the app was NOT stopped or
   uninstalled, with what to do by hand (Settings > Apps). A marked instance is never started, installed, updated or
-  repaired by the manager; Stop and Delete stay, and Delete (or Forget) clears the mark. What is
+  repaired by the manager; Stop and Delete stay, and Delete (or Forget) clears the mark. A field the Supervisor no
+  longer reports at all is not a difference but most likely a change of its API: the app is then stopped and marked
+  as not checked, and kept installed (an uninstall would drop its options); before an install or update, the same
+  refuses it. A newer manager may read the new answer. What is
   left: a store reload by someone else between the manager's last check and the Supervisor's start of the install
   (both within the same moment), of a folder changed in between; the check after the install still catches every
   key the Supervisor reports. Root on the host can change anything and is outside this model.

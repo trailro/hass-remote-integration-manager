@@ -28,7 +28,7 @@ import yaml
 
 from . import VERSION, children, copies, names, stamp, tarsafe
 from .github import GitHub, GitHubError, NotHRICommit, latest_stable
-from .jobs import Busy, Job, JobFailed, Jobs, NeedsAttention, TagMoved, Tampered
+from .jobs import Busy, Job, JobFailed, Jobs, NeedsAttention, TagMoved, Tampered, Unverified
 from .registry import Registry, RegistryError
 from .supervisor import NotAllowed, SupervisorClient, SupervisorError
 
@@ -816,12 +816,16 @@ class Manager:
             installing = True
             await self.sv.install(managed)
             installing = False
-            await self._verify_installed(job, managed, expected)
+            missing = await self._verify_installed(job, managed, expected)
+            if missing:
+                raise await self._hold(job, managed, missing)
             await self._finish_setup(job, managed)
         except asyncio.CancelledError:
             job.log("the manager is stopping: rolling back")
             await self._shielded(job, self._rollback_create(job, managed, interrupted=True), "the rollback")
             raise
+        except Unverified:
+            raise  # installed and kept: not rolled back
         except Tampered as err:
             mark = await self._contain(job, managed, str(err))
             if mark["uninstalled"]:
@@ -869,6 +873,12 @@ class Manager:
         what the manager stamped (``expected``: stamp.expected_view), and the folder is still what it wrote.
         JobFailed otherwise: nothing is installed or updated."""
         problems = stamp.view_differences(await self.sv.store_definition(managed.slug), expected, stamp.STORE_VIEW)
+        if problems and all(p.endswith(" not reported") for p in problems):
+            message = (f"the Supervisor's store does not report {', '.join(p.split()[0] for p in problems)} of "
+                       f"{managed.slug}, so the manager cannot check its definition (a change of the Supervisor's "
+                       "API?): refused, nothing installed or updated; a newer manager may read it")
+            _LOGGER.error("%s", message)
+            raise JobFailed(message)
         if problems:
             message = (f"the Supervisor's store holds another definition of {managed.slug} than the one the manager "
                        f"wrote ({'; '.join(problems)}): refused, nothing installed or updated. Someone changed "
@@ -879,14 +889,39 @@ class Manager:
         await self._check_tree(managed.slug, manifest)
         job.log("the store's definition is the one the manager wrote")
 
-    async def _verify_installed(self, job: Job, managed: children.Managed, expected: dict) -> None:
-        """Right after an install or update: the installed app reports what the manager stamped.  Tampered
-        otherwise; the caller uninstalls it at once."""
-        problems = stamp.view_differences(await self.sv.app_definition(managed.slug), expected, stamp.INSTALLED_VIEW)
-        if problems:
+    async def _verify_installed(self, job: Job, managed: children.Managed, expected: dict) -> list[str]:
+        """Right after an install or update: the installed app reports what the manager stamped.  Tampered for a
+        field that differs (the caller contains it); the fields the Supervisor did not report at all, returned: that
+        is a change of its API, not tampering, and the caller stops and marks the app without uninstalling it."""
+        view = await self.sv.app_definition(managed.slug)
+        problems = stamp.view_differences(view, expected, stamp.INSTALLED_VIEW)
+        missing = [key for key in stamp.INSTALLED_VIEW if key not in view]
+        changed = [p for p in problems if not p.endswith(" not reported")]
+        if changed:
             raise Tampered(f"the Supervisor installed another definition of {managed.slug} than the one the manager "
-                           f"wrote ({'; '.join(problems)})")
-        job.log("the installed definition is the one the manager wrote")
+                           f"wrote ({'; '.join(changed)})")
+        if not missing:
+            job.log("the installed definition is the one the manager wrote")
+        return missing
+
+    async def _hold(self, job: Job, managed: children.Managed, missing: list[str]) -> Unverified:
+        """An installed app the manager could not check: marked, stopped (through the marker gate), kept installed
+        with its options and data.  The error for the job."""
+        mark = {"reason": (f"the Supervisor does not report {', '.join(missing)} of the installed {managed.slug}, so "
+                           "the manager could not check it (a change of the Supervisor's API?)"),
+                "at": children.now_iso(), "unverified": True, "uninstalled": False, "stopped": False, "failure": None}
+        await self._set_mark(managed.name, mark)
+        try:
+            if (await self.sv.app_info(managed.slug)).get("state") == "started":
+                job.log("stopping it")
+                await self.sv.stop(managed)
+            mark["stopped"] = True
+        except Exception as err:  # noqa: BLE001 - reported in the mark and the job
+            mark["failure"] = str(err) or err.__class__.__name__
+        await self._set_mark(managed.name, mark)
+        message = f"{mark['reason']}: {self._mark_text(managed.slug, mark)}"
+        _LOGGER.error("%s", message)
+        return Unverified(message)
 
     async def _set_mark(self, name: str, mark: dict) -> None:
         try:
@@ -923,6 +958,10 @@ class Manager:
     @staticmethod
     def _mark_text(slug: str, mark: dict) -> str:
         """What a mark means for the user: done, or what to do by hand."""
+        if mark.get("unverified"):
+            return (f"it was {'stopped' if mark.get('stopped') else 'NOT stopped (' + str(mark.get('failure'))[:200] + ')'}"
+                    " and is kept installed, with its options and data. A newer manager may read the Supervisor's "
+                    f"answer; until then Delete it, or start {slug} yourself in Settings > Apps if you trust it")
         if mark.get("uninstalled"):
             return "it was stopped and uninstalled at once (its /config folder is kept)"
         folder = names.folder_name(slug[len(names.SLUG_PREFIX):])
@@ -1070,6 +1109,7 @@ class Manager:
             await self._clear_updating(managed.name)
             raise JobFailed(f"the definition was not written: {err}") from None
         expected = stamp.expected_view(built["config"], managed.slug)
+        missing: list[str] = []
         try:
             managed = await asyncio.to_thread(children.load_managed, self.root, managed.name, self.registry)
             await self._wait_store(job, managed.slug, version, replacement.manifest)
@@ -1077,7 +1117,7 @@ class Manager:
                 await self._verify_store(job, managed, expected, replacement.manifest)
                 job.log(f"updating {info.get('version')} -> {version}" + (" (building)" if channel == "git" else ""))
                 await self.sv.update(managed)
-                await self._verify_installed(job, managed, expected)
+                missing = await self._verify_installed(job, managed, expected)
             after = await self.sv.app_info(managed.slug)
             if after.get("version") != version:
                 raise JobFailed(f"the Supervisor reports {after.get('version')} after the update, not {version}")
@@ -1108,6 +1148,8 @@ class Manager:
             job.log(f"warning: {warning}")
             _LOGGER.warning("%s: %s", managed.name, warning)
         await self._save_copy(job, managed, bluetooth, built["files"])
+        if missing:  # updated and recorded, as far as the manager can tell: stopped and marked, not uninstalled
+            raise await self._hold(job, managed, missing)
         if restamp:
             job.log(f"the definition is stamped by this manager now (stamping {marker.get('stamp_version')} -> "
                     f"{stamp.STAMP_VERSION}); the Supervisor applies it to the running app at its next version change "
@@ -1157,7 +1199,9 @@ class Manager:
                 await self._verify_store(job, managed, expected, manifest)
                 job.log("installing")
                 await self.sv.install(managed)
-                await self._verify_installed(job, managed, expected)
+                missing = await self._verify_installed(job, managed, expected)
+                if missing:
+                    raise await self._hold(job, managed, missing)
             elif not installed:
                 raise JobFailed(f"{managed.slug} is not installed: Install it")
             await self._finish_setup(job, managed)
@@ -1415,7 +1459,7 @@ class Manager:
             await self._verify_store(job, managed, expected, managed.manifest)
             job.log(f"updating {installed} -> {version}" + (" (building)" if channel == "git" else ""))
             await self.sv.update(managed)
-            await self._verify_installed(job, managed, expected)
+            missing = await self._verify_installed(job, managed, expected)
             after = await self.sv.app_info(slug)
             if after.get("version") != version:
                 raise JobFailed(f"the Supervisor reports {after.get('version')} after the update, not {version}")
@@ -1437,6 +1481,8 @@ class Manager:
             raise
         self._clear_auto(name)
         await self._save_copy(job, managed, bluetooth, built["files"])
+        if missing:
+            raise await self._hold(job, managed, missing)
         return {"version": version, "state": after.get("state")}
 
     async def _adopt_installed_commit(self, job: Job, name: str, entry: dict, info: dict, ref: tuple[str, str], archive,
