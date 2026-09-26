@@ -11,7 +11,7 @@ from unittest import mock
 
 import yaml
 
-from hrimgr import children, stamp
+from hrimgr import VERSION, children, stamp
 
 from .env import Env
 from .fakes.tarballs import sha_of
@@ -748,7 +748,7 @@ class FlowTest(unittest.IsolatedAsyncioTestCase):
     async def test_status(self):
         status, data = await self.env.get("/api/status")
         self.assertEqual(status, 200)
-        self.assertEqual((data["version"], data["supervisor"], data["homeassistant"], data["role"]), ("0.1.0", "2026.09.3", "2026.9.3", "manager"))
+        self.assertEqual((data["version"], data["supervisor"], data["homeassistant"], data["role"]), (VERSION, "2026.09.3", "2026.9.3", "manager"))
         self.assertTrue(data["role_ok"] and data["map_ok"] and data["dev"])
         self.assertEqual(data["problems"], [])
 

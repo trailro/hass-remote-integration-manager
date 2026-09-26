@@ -9,7 +9,7 @@ version: "0.1.0"
 slug: hri_manager
 description: Run several hass-remote-integration instances on one Home Assistant OS, one integration each
 url: https://github.com/trailro/hass-remote-integration-manager
-# experimental in 0.1.0: the manager holds the manager role and writes local apps; it earns "stable" after a
+# experimental: the manager holds the manager role and writes local apps; it earns "stable" after a
 # release cycle on real installs
 stage: experimental
 # the same floor as hass-remote-integration, whose instances this creates
