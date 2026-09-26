@@ -1,0 +1,13 @@
+{
+ "answer": {
+  "error_key": "store_app_not_found_error",
+  "extra_fields": {
+   "app": "local_hri_nosuch"
+  },
+  "message": "App local_hri_nosuch does not exist in the store",
+  "result": "error"
+ },
+ "method": "GET",
+ "path": "/store/addons/local_hri_nosuch",
+ "status": 404
+}

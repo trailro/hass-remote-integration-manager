@@ -1,0 +1,9 @@
+{
+ "answer": {
+  "message": "App local_hri_nosuch does not exist",
+  "result": "error"
+ },
+ "method": "GET",
+ "path": "/addons/local_hri_nosuch/info",
+ "status": 404
+}

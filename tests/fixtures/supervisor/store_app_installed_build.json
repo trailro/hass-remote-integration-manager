@@ -1,0 +1,45 @@
+{
+ "answer": {
+  "data": {
+   "advanced": false,
+   "apparmor": "default",
+   "arch": [
+    "aarch64",
+    "amd64"
+   ],
+   "auth_api": false,
+   "available": true,
+   "build": true,
+   "description": "Run one Home Assistant integration in its own container, mirrored to your Home Assistant over MQTT",
+   "detached": false,
+   "docker_api": false,
+   "documentation": true,
+   "full_access": false,
+   "hassio_api": false,
+   "hassio_role": "default",
+   "homeassistant": "2025.10.0",
+   "homeassistant_api": false,
+   "host_network": false,
+   "host_pid": false,
+   "icon": false,
+   "ingress": true,
+   "installed": true,
+   "logo": false,
+   "long_description": "(the app's README.md, trimmed for the fixture)",
+   "name": "HRI Lab",
+   "rating": 7,
+   "repository": "local",
+   "signed": false,
+   "slug": "local_hri_lab",
+   "stage": "stable",
+   "update_available": false,
+   "url": "https://github.com/trailro/hass-remote-integration",
+   "version": "0.0.0-cb11571c2cd6",
+   "version_latest": "0.0.0-cb11571c2cd6"
+  },
+  "result": "ok"
+ },
+ "method": "GET",
+ "path": "/store/addons/local_hri_lab",
+ "status": 200
+}

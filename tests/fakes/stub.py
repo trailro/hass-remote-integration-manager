@@ -6,7 +6,12 @@ Paths: ``/sv/...`` is the Supervisor (the manager's supervisor URL is ``http://h
 behind its proxy at ``/sv/core/websocket`` (only ``auth`` and ``config/auth/list``), ``/gh/...`` the GitHub API,
 ``/cl/...`` codeload.  The Supervisor part reads the local apps folder on ``POST /store/reload`` the way the real
 one does (every config.* outside dot folders; slug ``local_<slug>``), and answers only the endpoints the manager's
-allow-list names; everything else is a 404 recorded in ``unexpected``.  ``/_stub/...`` is for the tests' eyes only."""
+allow-list names; everything else is a 404 recorded in ``unexpected``.  ``/_stub/...`` is for the tests' eyes only.
+
+Its answers have the keys, the value types and the meaning of a real Supervisor's: each is built on an answer captured
+from one (tests/fixtures/supervisor/, Supervisor 2026.09.2), and tests/test_stub_shapes.py compares the two.  In
+particular ``GET /store/addons/<slug>`` says ``version``: the INSTALLED version (None when not installed), and
+``version_latest``: the version of the definition the store read."""
 
 from __future__ import annotations
 
@@ -20,6 +25,19 @@ import yaml
 from aiohttp import web
 
 from .tarballs import hri_files, make_tarball, sha_of
+
+SUPERVISOR_FIXTURES = pathlib.Path(__file__).resolve().parent.parent / "fixtures" / "supervisor"
+
+
+def captured(name: str) -> dict:
+    """A real Supervisor's answer (tests/fixtures/supervisor/<name>): {method, path, status, answer}."""
+    return json.loads((SUPERVISOR_FIXTURES / name).read_text(encoding="utf-8"))
+
+
+# the templates every answer is built on: all the keys a real Supervisor sends, with values of their types
+STORE_APP = captured("store_app_installed.json")["answer"]["data"]
+LIST_APP = next(a for a in captured("addons.json")["answer"]["data"]["addons"] if a["slug"] == "local_hri_garage")
+APP_INFO = captured("app_info.json")["answer"]["data"]
 
 CONFIG_SUFFIXES = (".yaml", ".yml", ".json")
 BODY_KEY = web.RequestKey("body", dict)
@@ -54,8 +72,8 @@ def ok(data=None) -> web.Response:
     return web.json_response({"result": "ok", "data": data if data is not None else {}})
 
 
-def err(message: str, status: int = 400) -> web.Response:
-    return web.json_response({"result": "error", "message": message}, status=status)
+def err(message: str, status: int = 400, **extra) -> web.Response:
+    return web.json_response({"result": "error", "message": message, **extra}, status=status)
 
 
 class Stub:
@@ -96,18 +114,28 @@ class Stub:
             if not isinstance(data, dict) or "slug" not in data or "version" not in data:
                 continue
             slug = f"local_{data['slug']}"
+            readme = path.parent / "README.md"
             found[slug] = {"slug": slug, "name": data.get("name"), "version": str(data["version"]), "url": data.get("url"),
-                           "image": data.get("image"), "options": data.get("options") or {}, "folder": str(path.parent)}
+                           "image": data.get("image"), "options": data.get("options") or {}, "folder": str(path.parent),
+                           # the Supervisor's long_description: the README.md next to the config, if any
+                           "readme": readme.read_text(encoding="utf-8") if readme.is_file() else None}
         return found
 
+    def _detached(self, slug: str) -> bool:
+        """The Supervisor's is_detached: installed, and no definition of it in the store (local_hri_foreign stands for a
+        local app defined in a folder the stub does not scan)."""
+        return slug.startswith("local_") and slug not in self.store and slug != "local_hri_foreign"
+
     def _app_view(self, slug: str) -> dict:
+        """An installed app as GET /addons lists it."""
         app = self.installed[slug]
         store = self.store.get(slug)
-        view = {k: v for k, v in app.items() if k != "options"}
-        view["detached"] = slug.startswith("local_") and slug not in self.store and slug != "local_hri_foreign"
-        view["version_latest"] = store["version"] if store else app["version"]
-        view["update_available"] = bool(store and store["version"] != app["version"])
-        return view
+        return {**LIST_APP, "slug": slug, "name": app["name"], "version": app["version"], "state": app["state"],
+                "url": app.get("url"), "repository": app["repository"], "build": bool(app.get("build", False)),
+                "detached": self._detached(slug), "available": True,
+                # a detached app's latest version is its installed one (data_store falls back to the app's own data)
+                "version_latest": store["version"] if store else app["version"],
+                "update_available": bool(store and store["version"] != app["version"])}
 
     @web.middleware
     async def _auth(self, request: web.Request, handler):
@@ -134,16 +162,28 @@ class Stub:
         if slug == "self":
             return await self.self_info(request)
         if slug not in self.installed:
-            return err("App is not installed")
+            return err(f"App {slug} does not exist", 404)
         app = self.installed[slug]
-        return ok({**self._app_view(slug), "options": app.get("options", {}), "ingress": True,
-                   "ingress_url": app.get("ingress_url"), "ingress_panel": app.get("ingress_panel", False)})
+        view = self._app_view(slug)
+        detached = view["detached"]
+        return ok({**APP_INFO, **{k: view[k] for k in ("slug", "name", "version", "version_latest", "update_available",
+                                                         "state", "url", "repository", "build", "detached", "available")},
+                   "hostname": slug.replace("_", "-"), "dns": [f"{slug.replace('_', '-')}.local.hass.io"],
+                   "options": app.get("options", {}), "boot": app.get("boot", "auto"), "watchdog": app.get("watchdog", False),
+                   "ingress_panel": app.get("ingress_panel", False),
+                   "ingress_url": app.get("ingress_url", APP_INFO["ingress_url"]),
+                   "ingress_entry": app.get("ingress_url", APP_INFO["ingress_url"]).rstrip("/"),
+                   # a detached app has no store source: no README, icon, logo, changelog or documentation
+                   "long_description": None if detached else (self.store.get(slug) or {}).get("readme"),
+                   "icon": False if detached else APP_INFO["icon"], "logo": False if detached else APP_INFO["logo"],
+                   "changelog": False if detached else APP_INFO["changelog"],
+                   "documentation": False if detached else APP_INFO["documentation"]})
 
     async def addon_action(self, request):
         slug, action = request.match_info["slug"], request.match_info["action"]
         body = request.get(BODY_KEY) or {}
         if slug not in self.installed:
-            return err("App is not installed")
+            return err(f"App {slug} does not exist", 404)
         app = self.installed[slug]
         if action == "options":
             app.update({k: v for k, v in body.items() if k in ("boot", "watchdog", "ingress_panel")})
@@ -169,17 +209,21 @@ class Stub:
         slug = request.match_info["slug"]
         store = self.store.get(slug)
         if not store:
-            return err("App does not exist", 404)
+            return err(f"App {slug} does not exist in the store", 404, error_key="store_app_not_found_error",
+                       extra_fields={"app": slug})
         app = self.installed.get(slug)
-        return ok({"slug": slug, "name": store["name"], "version": store["version"], "installed": app is not None,
-                   "available": True, "update_available": bool(app and app["version"] != store["version"]),
-                   "build": store["image"] is None, "url": store["url"]})
+        # version: the installed app's (None when not installed); version_latest: the definition's
+        return ok({**STORE_APP, "slug": slug, "name": store["name"], "repository": "local", "url": store["url"],
+                   "installed": app is not None, "version": app["version"] if app else None,
+                   "version_latest": store["version"], "available": True, "detached": False, "long_description": store["readme"],
+                   "update_available": bool(app and app["version"] != store["version"]), "build": store["image"] is None})
 
     async def store_action(self, request):
         slug, action = request.match_info["slug"], request.match_info["action"]
         store = self.store.get(slug)
         if not store:
-            return err("App does not exist", 404)
+            return err(f"App {slug} does not exist in the store", 404, error_key="store_app_not_found_error",
+                       extra_fields={"app": slug})
         # the real Supervisor runs an install or update as a job of its own: a client that stops waiting (the manager
         # stopped) does not stop it
         return await asyncio.shield(asyncio.ensure_future(self._store_action(slug, action, store)))

@@ -1,0 +1,180 @@
+{
+ "answer": {
+  "data": {
+   "addons": [
+    {
+     "advanced": false,
+     "arch": [
+      "aarch64",
+      "amd64"
+     ],
+     "available": true,
+     "build": true,
+     "description": "Run one Home Assistant integration in its own container, mirrored to your Home Assistant over MQTT",
+     "documentation": true,
+     "homeassistant": "2025.10.0",
+     "icon": false,
+     "installed": true,
+     "logo": false,
+     "name": "hass-remote-integration",
+     "repository": "local",
+     "slug": "local_hass_remote_integration",
+     "stage": "stable",
+     "update_available": false,
+     "url": "https://github.com/trailro/hass-remote-integration",
+     "version": "0.25.1",
+     "version_latest": "0.25.1"
+    },
+    {
+     "advanced": false,
+     "arch": [
+      "aarch64",
+      "amd64"
+     ],
+     "available": true,
+     "build": false,
+     "description": "An Open Source MQTT broker",
+     "documentation": true,
+     "homeassistant": null,
+     "icon": true,
+     "installed": true,
+     "logo": true,
+     "name": "Mosquitto broker",
+     "repository": "core",
+     "slug": "core_mosquitto",
+     "stage": "stable",
+     "update_available": false,
+     "url": "https://github.com/home-assistant/addons/tree/master/mosquitto",
+     "version": "7.1.1",
+     "version_latest": "7.1.1"
+    },
+    {
+     "advanced": false,
+     "arch": [
+      "aarch64",
+      "amd64"
+     ],
+     "available": true,
+     "build": false,
+     "description": "Run one Home Assistant integration in its own container, mirrored to your Home Assistant over MQTT",
+     "documentation": true,
+     "homeassistant": "2025.10.0",
+     "icon": false,
+     "installed": false,
+     "logo": false,
+     "name": "hass-remote-integration",
+     "repository": "51904d72",
+     "slug": "51904d72_hass_remote_integration",
+     "stage": "stable",
+     "update_available": false,
+     "url": "https://github.com/trailro/hass-remote-integration",
+     "version": null,
+     "version_latest": "0.25.0"
+    },
+    {
+     "advanced": false,
+     "arch": [
+      "aarch64",
+      "amd64"
+     ],
+     "available": true,
+     "build": true,
+     "description": "Run several hass-remote-integration instances on one Home Assistant OS, one integration each",
+     "documentation": true,
+     "homeassistant": "2025.10.0",
+     "icon": false,
+     "installed": true,
+     "logo": false,
+     "name": "HRI Manager",
+     "repository": "c59fe581",
+     "slug": "c59fe581_hri_manager",
+     "stage": "experimental",
+     "update_available": false,
+     "url": "https://github.com/trailro/hass-remote-integration-manager",
+     "version": "0.1.0",
+     "version_latest": "0.1.0"
+    },
+    {
+     "advanced": false,
+     "arch": [
+      "aarch64",
+      "amd64"
+     ],
+     "available": true,
+     "build": true,
+     "description": "Run one Home Assistant integration in its own container, mirrored to your Home Assistant over MQTT",
+     "documentation": true,
+     "homeassistant": "2025.10.0",
+     "icon": false,
+     "installed": true,
+     "logo": false,
+     "name": "HRI Lab",
+     "repository": "local",
+     "slug": "local_hri_lab",
+     "stage": "stable",
+     "update_available": false,
+     "url": "https://github.com/trailro/hass-remote-integration",
+     "version": "0.0.0-cb11571c2cd6",
+     "version_latest": "0.0.0-cb11571c2cd6"
+    },
+    {
+     "advanced": false,
+     "arch": [
+      "aarch64",
+      "amd64"
+     ],
+     "available": true,
+     "build": false,
+     "description": "Run one Home Assistant integration in its own container, mirrored to your Home Assistant over MQTT",
+     "documentation": true,
+     "homeassistant": "2025.10.0",
+     "icon": false,
+     "installed": true,
+     "logo": false,
+     "name": "HRI Garage",
+     "repository": "local",
+     "slug": "local_hri_garage",
+     "stage": "stable",
+     "update_available": false,
+     "url": "https://github.com/trailro/hass-remote-integration",
+     "version": "0.25.0",
+     "version_latest": "0.25.0"
+    }
+   ],
+   "repositories": [
+    {
+     "maintainer": "you",
+     "name": "Local apps",
+     "slug": "local",
+     "source": "local",
+     "url": "https://home-assistant.io/hassio"
+    },
+    {
+     "maintainer": "Home Assistant",
+     "name": "Official apps",
+     "slug": "core",
+     "source": "core",
+     "url": "https://home-assistant.io/addons"
+    },
+    {
+     "maintainer": "trailro",
+     "name": "hass-remote-integration",
+     "slug": "51904d72",
+     "source": "https://github.com/trailro/hass-remote-integration",
+     "url": "https://github.com/trailro/hass-remote-integration"
+    },
+    {
+     "maintainer": "trailro",
+     "name": "HRI Manager",
+     "slug": "c59fe581",
+     "source": "https://github.com/trailro/hass-remote-integration-manager",
+     "url": "https://github.com/trailro/hass-remote-integration-manager"
+    }
+   ]
+  },
+  "result": "ok"
+ },
+ "method": "GET",
+ "path": "/store",
+ "status": 200
+}
