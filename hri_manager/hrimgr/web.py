@@ -259,7 +259,7 @@ async def api_releases(request: web.Request) -> web.Response:
 @_handled
 async def api_create(request: web.Request) -> web.Response:
     body = await _body(request)
-    return _job(_manager(request).create(body, request[USER_KEY]))
+    return _job(await _manager(request).create(body, request[USER_KEY]))
 
 
 @_handled

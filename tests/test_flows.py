@@ -301,6 +301,47 @@ class FlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(job["state"], "succeeded", job)
         self.assertIsNone(env.registry.get("garage"))
 
+    async def test_a_create_waits_for_an_install_that_may_still_finish(self):
+        """R2-11: re-creating the name within the grace would overwrite the entry, and the old install could finish
+        as an app the manager no longer knows."""
+        env = self.env
+
+        async def lost(managed):
+            raise SupervisorError(f"POST /store/addons/{managed.slug}/install: ServerDisconnectedError")
+
+        with mock.patch.object(env.sv, "install", side_effect=lost):
+            job = await self.create()
+        entry = env.registry.get("garage")
+        self.assertTrue(entry["interrupted"])
+        status, body = await env.send("POST", "/api/instances", {"name": "garage", "channel": "release", "version": "0.25.0"})
+        self.assertEqual(status, 400, body)
+        self.assertIn("may still finish it", body["error"])
+        self.assertEqual(env.registry.get("garage")["instance_id"], entry["instance_id"])  # not overwritten
+
+    async def test_a_rollback_that_cannot_ask_the_supervisor_says_what_it_left(self):
+        """R2-11: the install got no clean answer and the Supervisor cannot be asked whether it installed it: the
+        definition goes, the entry is kept as install interrupted, and the job says so instead of a rollback it did
+        not finish."""
+        env = self.env
+        list_apps, calls = env.sv.list_apps, []
+
+        async def first_only(*args):
+            calls.append(True)
+            if len(calls) > 1:
+                raise SupervisorError("GET /addons: ServerDisconnectedError")
+            return await list_apps()
+
+        async def lost(managed):
+            raise SupervisorError(f"POST /store/addons/{managed.slug}/install: ServerDisconnectedError")
+
+        with mock.patch.object(env.sv, "install", side_effect=lost), \
+                mock.patch.object(env.sv, "list_apps", side_effect=first_only):
+            job = await self.create()
+        self.assertEqual(job["state"], "failed")
+        self.assertIn("could not be asked whether it installed", job["error"])
+        self.assertEqual(os.listdir(env.local_apps), [])
+        self.assertTrue(env.registry.get("garage")["interrupted"])
+
     async def test_a_build_the_builder_refuses_leaves_no_registry_entry(self):
         env = self.env
         for what, patch in (("a second app", mock.patch.object(stamp, "find_configs", return_value=["config.yaml", "docs/config.yaml"])),
