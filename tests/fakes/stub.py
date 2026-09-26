@@ -287,8 +287,9 @@ class Stub:
                 return err("App is already installed")
             options = dict(store["options"])
             options["password"] = "child-secret-password"  # what an instance's options may hold: never shown
+            # boot: the definition's, auto by default (apps/app.py boot, apps/validate.py), until the user sets one
             self.installed[slug] = {"slug": slug, "name": store["name"], "version": store["version"], "state": "stopped",
-                                    "boot": "manual", "watchdog": False, "ingress_panel": False, "url": store["url"],
+                                    "boot": "auto", "watchdog": False, "ingress_panel": False, "url": store["url"],
                                     "repository": "local", "build": store["image"] is None, "image": store["image"],
                                     "options": options,
                                     "ingress_url": f"/api/hassio_ingress/{secrets.token_urlsafe(16)}/",
