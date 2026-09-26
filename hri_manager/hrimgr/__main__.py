@@ -52,6 +52,7 @@ def main() -> int:
         async def close(_app: web.Application) -> None:
             for task in background:
                 task.cancel()
+            await asyncio.gather(*background, return_exceptions=True)
             for job in jobs.recent():
                 if job.task and not job.task.done():
                     job.task.cancel()
@@ -63,9 +64,9 @@ def main() -> int:
         async def report(_app: web.Application) -> None:
             for name in manager.pending_setup():
                 log.warning("instance %s: its create stopped before its setup finished; the page offers Finish setup", name)
-            # instances left detached by a restore get their definitions written again (in the background: the page
-            # is served meanwhile)
-            background.append(asyncio.get_running_loop().create_task(manager.auto_repair_check()))
+            # instances left detached by a restore get their definitions written again, by a loop of its own (the
+            # page is served meanwhile, and nobody needs to open it)
+            background.append(asyncio.get_running_loop().create_task(manager.auto_repair_loop()))
 
         app.on_startup.append(report)
         app.on_cleanup.append(close)

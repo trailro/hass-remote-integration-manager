@@ -12,6 +12,8 @@ from unittest import mock
 from hrimgr import instances
 from hrimgr.github import GitHubError
 
+manager_clock = instances.time.monotonic
+
 from .env import Env
 from .helpers import tmpdir
 
@@ -87,19 +89,58 @@ class AutoRepairTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(env.changing_calls(), [])  # a repair writes files and reloads the store: nothing else
 
     async def test_at_most_every_few_minutes(self):
+        """A list with nothing to repair does not start the clock: the Supervisor restores the manager first and the
+        instances after it, one by one."""
         env = self.env
         await self.create("garage")
+        await self.create("attic")
         env.manager.auto_repair_interval = instances.AUTO_REPAIR_INTERVAL
-        await env.get("/api/instances")  # the first check: nothing to repair
-        await self.restore_without_the_local_apps_folder()
+        await env.get("/api/instances")  # the manager restored and started first: nothing to repair yet
+        shutil.rmtree(self.folder("garage"))  # then the instance's restore
+        await env.sv.reload_store()
         _, data = await env.get("/api/instances")
-        self.assertEqual(data["instances"][0]["actions"], ["repair"])  # within the interval: offered, not started
-        self.assertIsNone(data["instances"][0]["job"])
+        row = next(i for i in data["instances"] if i["name"] == "garage")
+        self.assertEqual(row["job"]["action"], "repair")  # at once, not 5 minutes later
+        await self.wait_jobs()
+        shutil.rmtree(self.folder("attic"))
+        await env.sv.reload_store()
+        _, data = await env.get("/api/instances")
+        row = next(i for i in data["instances"] if i["name"] == "attic")
+        self.assertEqual((row["actions"], row["job"]), (["repair"], None))  # within the interval of a started repair
         env.manager._auto_checked -= instances.AUTO_REPAIR_INTERVAL + 1
         _, data = await env.get("/api/instances")
-        self.assertEqual(data["instances"][0]["job"]["action"], "repair")
+        row = next(i for i in data["instances"] if i["name"] == "attic")
+        self.assertEqual(row["job"]["action"], "repair")
         await self.wait_jobs()
+        self.assertTrue(os.path.isdir(self.folder("attic")))
+
+    async def test_a_background_loop_repairs_without_the_page(self):
+        """Nobody opens the page after a restore: the manager's own loop, every interval, repairs; it respects each
+        instance's back-off, and stops cleanly."""
+        env = self.env
+        manager = env.manager
+        await self.create("garage")
+        manager.auto_repair_interval = 0.05
+        loop = asyncio.get_running_loop().create_task(manager.auto_repair_loop())
+        await asyncio.sleep(0.1)  # its first rounds: nothing to repair
+        await self.restore_without_the_local_apps_folder()
+        for _ in range(200):
+            if os.path.isdir(self.folder("garage")):
+                break
+            await asyncio.sleep(0.02)
         self.assertTrue(os.path.isdir(self.folder("garage")))
+        # an instance in its back-off is not tried, whatever the loop's pace
+        await self.wait_jobs()
+        shutil.rmtree(self.folder("garage"))
+        await env.sv.reload_store()
+        manager.auto_backoff["garage"] = {"failures": 1, "delay": 3600, "next": manager_clock() + 3600,
+                                          "error": "x", "at": "t"}
+        repairs = len([j for j in manager.jobs.recent() if j.action == "repair"])
+        await asyncio.sleep(0.3)
+        self.assertEqual(len([j for j in manager.jobs.recent() if j.action == "repair"]), repairs)
+        loop.cancel()
+        await asyncio.gather(loop, return_exceptions=True)
+        self.assertTrue(loop.cancelled())
 
     async def test_a_failed_automatic_repair_is_shown_and_tried_again(self):
         """GitHub unreachable: shown, and tried again at a later check."""
@@ -207,7 +248,7 @@ class AutoRepairTest(unittest.IsolatedAsyncioTestCase):
         os.makedirs(os.path.join(env.local_apps, "hri_stranger"))  # a folder the registry does not hold
         with open(os.path.join(env.local_apps, "hri_stranger", "config.yaml"), "w") as fh:
             fh.write("slug: hri_stranger\nname: x\nversion: '1'\n")
-        await env.manager.auto_repair_check()
+        await env.manager.auto_repair_loop()  # no interval here: its first round only
         self.assertEqual(sorted(os.listdir(copy_dir)), ["CHANGELOG.md", "DOCS.md", "config.yaml", "copy.json", "translations"])
         self.assertEqual(os.listdir(os.path.join(env.data, "definitions")), ["garage"])
 
@@ -215,7 +256,7 @@ class AutoRepairTest(unittest.IsolatedAsyncioTestCase):
         env = self.env
         await self.create("garage")
         await self.restore_without_the_local_apps_folder()
-        await env.manager.auto_repair_check()
+        await env.manager.auto_repair_loop()  # one round, which starts nothing
         self.assertEqual([j for j in env.manager.jobs.recent() if j.action == "repair"], [])
 
 
