@@ -360,8 +360,13 @@ class Manager:
                       user: str) -> dict:
         slug = names.supervisor_slug(name)
         job.log(f"checking that {slug} is free")
-        if any(a.get("slug") == slug for a in await self.sv.list_apps()):
+        apps = await self.sv.list_apps()
+        if any(a.get("slug") == slug for a in apps):
             raise JobFailed(f"an app {slug} is already installed")
+        # the Supervisor names an app's host after its slug, _ written as -: local_hri_a-b and local_hri_a_b collide
+        clash = next((a.get("slug") for a in apps if isinstance(a.get("slug"), str) and names.host_key(a["slug"]) == names.host_key(slug)), None)
+        if clash:
+            raise JobFailed(f"the app {clash} is installed, and its host name is the one {slug} would get: choose another name")
         if os.path.lexists(os.path.join(self.root, names.folder_name(name))):
             raise JobFailed(f"the local apps folder already has {names.folder_name(name)}")
         await self.sv.reload_store()

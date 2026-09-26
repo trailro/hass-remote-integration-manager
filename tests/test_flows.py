@@ -342,6 +342,17 @@ class FlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(job["state"], "failed")
         self.assertFalse(os.path.lexists(self.folder("garage")))
 
+    async def test_a_name_whose_host_name_is_taken_is_refused(self):
+        """The Supervisor names an app's host after its slug with _ as -: local_hri_a-b and local_hri_a_b collide."""
+        env = self.env
+        env.stub.installed["local_hri_a-b"] = {"slug": "local_hri_a-b", "name": "Hand-made", "version": "1", "state": "started",
+                                               "url": "https://example.com", "repository": "local"}
+        job = await self.create("a_b")
+        self.assertEqual(job["state"], "failed")
+        self.assertIn("host name", job["error"])
+        self.assertEqual(os.listdir(env.local_apps), [])
+        self.assertEqual(env.changing_calls(), [])
+
     async def test_foreign_apps_are_never_changed(self):
         env = self.env
         for action in ("start", "stop", "restart", "update", "repair"):

@@ -67,6 +67,11 @@ def name_from_slug(slug: object) -> str | None:
     return None if name in RESERVED else name
 
 
+def host_key(slug: str) -> str:
+    """What two slugs share when their apps would get the same host name (the Supervisor writes _ as -)."""
+    return slug.lower().replace("_", "-")
+
+
 def display_name(name: str) -> str:
     return "HRI " + " ".join(word.capitalize() for word in name.split("_") if word)
 
