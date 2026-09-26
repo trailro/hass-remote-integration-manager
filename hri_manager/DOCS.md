@@ -74,11 +74,15 @@ Keep the manager in the same backups: its `/data` holds the registry and the cop
 
 The app has the Supervisor's **manager** role, which could stop or remove any app. The manager's code allows itself
 only the calls listed in the README's security section, and changes only the apps it created (their folder carries
-its marker, and its own registry in `/data` agrees). It checks what it installs against what it wrote, which catches
-accidental or simple changes to the local apps folder around its own installs and updates; it cannot stop someone who
-can write that folder (the addons share, SSH, an app that maps it) from installing things through the Supervisor's own
-buttons. Do not give that access to anyone you would not let install apps. Its UI is reachable only through Home Assistant, and only by Home Assistant's administrators: the panel
-is hidden from other users, and the app checks it on its side too, on every request (it asks Home Assistant, and
-refuses when it cannot).
+its marker, and its own registry in `/data` agrees).
+
+**Who is trusted.** Anyone who can write the local apps folder as root (the addons share, SSH, an app that maps it) is
+fully trusted: they can install anything through the Supervisor's own buttons, and have links, file dates and timing
+on their side. The manager's checks of what it installs are defence in depth, best effort against them: they catch
+accidents, simple tampering and many deliberate attempts, and guarantee nothing against that person. Do not give that
+access to anyone you do not trust. What holds against everyone else (users who are not administrators, the network)
+is the allow-list of Supervisor calls, and the administrator check: the manager's UI is reachable only through Home
+Assistant, and only by Home Assistant's administrators (the panel is hidden from other users, and the app checks it on
+its side too, on every request: it asks Home Assistant, and refuses when it cannot).
 
 Full documentation: [README](https://github.com/trailro/hass-remote-integration-manager/blob/main/README.md).
