@@ -167,7 +167,8 @@ class GitHub:
             data = await self._get(url, {}, tarsafe.MAX_COMPRESSED, 300)
         except GitHubError as err:
             raise GitHubError(f"{kind} {ref}: {err}") from None
-        return tarsafe.open_archive(data), url
+        # unpacking and checking an archive of up to 64 MiB compressed takes a while: not on the event loop
+        return await asyncio.to_thread(tarsafe.open_archive, data), url
 
 
 def parse_releases(raw: Any) -> list[dict]:

@@ -85,6 +85,41 @@ class TarSafeTest(unittest.TestCase):
         with mock.patch.object(tarsafe, "MAX_COMPRESSED", 10), self.assertRaises(tarsafe.UnsafeArchive):
             tarsafe.open_archive(make_tarball(TOP, {"a": b"1"}))
 
+    def test_headers_count_against_the_unpacked_cap(self):
+        """A pax header of megabytes (or gigabytes) is no file: the gzip layer is unpacked with a cap first."""
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode="w:gz", format=tarfile.PAX_FORMAT) as tar:
+            top = tarfile.TarInfo(TOP)
+            top.type = tarfile.DIRTYPE
+            tar.addfile(top)
+            info = tarfile.TarInfo(f"{TOP}/a")
+            info.pax_headers = {"comment": "x" * (4 * 1024 * 1024)}
+            tar.addfile(info, io.BytesIO(b""))
+        data = buf.getvalue()
+        self.assertLess(len(data), 64 * 1024)  # a small download
+        with mock.patch.object(tarsafe, "MAX_TOTAL", 1024 * 1024), mock.patch.object(tarsafe, "HEADER_SLACK", 1024 * 1024), \
+                self.assertRaises(tarsafe.UnsafeArchive) as ctx:
+            tarsafe.open_archive(data)
+        self.assertIn("unpacks to more", str(ctx.exception))
+        self.assertEqual(sorted(tarsafe.open_archive(data).files), ["a"])  # under the real caps it is fine
+
+    def test_truncated_or_trailing_data_is_refused(self):
+        data = make_tarball(TOP, {"a": b"1"})
+        for bad in (data[:-10], data + b"garbage", data + data):
+            with self.assertRaises(tarsafe.UnsafeArchive):
+                tarsafe.open_archive(bad)
+        tarsafe.open_archive(data + b"\0" * 16)
+
+    def test_member_names_in_messages_are_cut_and_quoted(self):
+        name = f"{TOP}/x\nFAKE LOG LINE" + "y" * 500
+        data = make_tarball(TOP, {"a": b"1"}, extra=[member(name, tarfile.FIFOTYPE)])
+        with self.assertRaises(tarsafe.UnsafeArchive) as ctx:
+            tarsafe.open_archive(data)
+        message = str(ctx.exception)
+        self.assertNotIn("\n", message)
+        self.assertIn("\\n", message)
+        self.assertLess(len(message), 200)
+
     def test_not_a_tarball(self):
         for data in (b"", b"not gzip", io.BytesIO().getvalue()):
             with self.assertRaises(tarsafe.UnsafeArchive):

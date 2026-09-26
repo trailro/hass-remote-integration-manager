@@ -3,17 +3,21 @@
 A tarball from codeload.github.com has one top folder (``<repo>-<ref>/``) and a pax global header whose comment is
 the commit's SHA.  Every member is checked before anything is written: a relative POSIX name under the top folder,
 no ``..``, no absolute path, only folders, regular files and symlinks; hard links, devices and FIFOs refuse the
-whole archive; count and sizes are capped.  Files are written by this module (never ``TarFile.extract``), so their
+whole archive; count and sizes are capped.  The gzip layer is unpacked first, as a stream capped at ``MAX_TOTAL`` plus
+``HEADER_SLACK`` for the tar headers (a pax or GNU long-name header can claim gigabytes that ``tarfile`` would hold
+in memory), and the caller runs all of it in a thread.  Member names in messages are cut and quoted (``show``).
+Files are written by this module (never ``TarFile.extract``), so their
 modification time is the time of writing: the Supervisor notices a changed local app by the newest mtime in the
 folder, and a file dated in the future would hide every later change.  A symlink is recreated only when it points
 at a regular file of the same archive; any other link is skipped and reported."""
 
 from __future__ import annotations
 
-import io
 import os
 import posixpath
 import tarfile
+import tempfile
+import zlib
 from dataclasses import dataclass, field
 
 from . import children, names
@@ -22,6 +26,8 @@ MAX_COMPRESSED = 64 * 1024 * 1024
 MAX_TOTAL = 256 * 1024 * 1024
 MAX_FILE = 64 * 1024 * 1024
 MAX_MEMBERS = 20000
+HEADER_SLACK = 32 * 1024 * 1024  # tar headers and padding: about 1 KiB per member at most, for MAX_MEMBERS
+SPOOL = 16 * 1024 * 1024  # an unpacked archive larger than this goes to a temporary file instead of memory
 
 
 class UnsafeArchive(Exception):
@@ -47,27 +53,70 @@ class Archive:
         info = self.files[rel]
         fh = self.tar.extractfile(info)
         if fh is None:
-            raise UnsafeArchive(f"{rel} cannot be read")
+            raise UnsafeArchive(f"{show(rel)} cannot be read")
         data = fh.read(MAX_FILE + 1)
         if len(data) != info.size:
-            raise UnsafeArchive(f"{rel} is not the size its header says")
+            raise UnsafeArchive(f"{show(rel)} is not the size its header says")
         return data
 
 
 def _clean(name: str) -> str:
     if not name or "\0" in name or "\\" in name or name.startswith("/"):
-        raise UnsafeArchive(f"refused member name {name!r}")
+        raise UnsafeArchive(f"refused member name {show(name)}")
     parts = [p for p in name.split("/") if p not in ("", ".")]
     if any(p == ".." for p in parts) or not parts:
-        raise UnsafeArchive(f"refused member name {name!r}")
+        raise UnsafeArchive(f"refused member name {show(name)}")
     return "/".join(parts)
 
 
+def gunzip(data: bytes):
+    """The tar inside a .tar.gz, unpacked as a stream and refused past MAX_TOTAL + HEADER_SLACK: a file object."""
+    limit = MAX_TOTAL + HEADER_SLACK
+    out = tempfile.SpooledTemporaryFile(max_size=SPOOL)
+    size = 0
+    inflater = zlib.decompressobj(wbits=31)  # gzip only
+    tail = data
+    try:
+        while True:
+            piece = inflater.decompress(tail, limit + 1 - size)
+            size += len(piece)
+            if size > limit:
+                raise UnsafeArchive("the archive unpacks to more than the manager accepts")
+            out.write(piece)
+            tail = inflater.unconsumed_tail
+            if inflater.eof or (not tail and not piece):
+                break
+    except zlib.error as err:
+        out.close()
+        raise UnsafeArchive(f"not a readable .tar.gz: {err}") from None
+    except BaseException:
+        out.close()
+        raise
+    if not inflater.eof:
+        out.close()
+        raise UnsafeArchive("not a readable .tar.gz: it ends too early")
+    if inflater.unused_data.strip(b"\0"):
+        out.close()
+        raise UnsafeArchive("the archive has more data after its end")
+    out.seek(0)
+    return out
+
+
 def open_archive(data: bytes) -> Archive:
+    """Check and open a .tar.gz; blocking (the caller runs it in a thread)."""
     if len(data) > MAX_COMPRESSED:
         raise UnsafeArchive("the archive is larger than the manager accepts")
+    fileobj = gunzip(data)
     try:
-        tar = tarfile.open(fileobj=io.BytesIO(data), mode="r:gz")
+        return _open(fileobj)
+    except BaseException:
+        fileobj.close()
+        raise
+
+
+def _open(fileobj) -> Archive:
+    try:
+        tar = tarfile.open(fileobj=fileobj, mode="r:")
         members = []
         for info in tar:
             members.append(info)
@@ -95,12 +144,12 @@ def open_archive(data: bytes) -> Archive:
             archive.dirs.append(rel)
         elif info.isreg():
             if info.size > MAX_FILE:
-                raise UnsafeArchive(f"{rel} is larger than the manager accepts")
+                raise UnsafeArchive(f"{show(rel)} is larger than the manager accepts")
             total += info.size
             if total > MAX_TOTAL:
                 raise UnsafeArchive("the archive unpacks to more than the manager accepts")
             if rel in archive.files:
-                raise UnsafeArchive(f"{rel} is in the archive twice")
+                raise UnsafeArchive(f"{show(rel)} is in the archive twice")
             archive.files[rel] = info
         elif info.issym():
             target = info.linkname
@@ -113,7 +162,7 @@ def open_archive(data: bytes) -> Archive:
                 continue
             links[rel] = resolved
         else:
-            raise UnsafeArchive(f"{rel}: hard links, devices and FIFOs are refused")
+            raise UnsafeArchive(f"{show(rel)}: hard links, devices and FIFOs are refused")
     for rel, resolved in links.items():
         if resolved in archive.files:
             archive.links[rel] = resolved
