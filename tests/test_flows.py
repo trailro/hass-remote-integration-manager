@@ -199,15 +199,17 @@ class FlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(os.path.isdir(self.folder("garage")))
         self.assertTrue(env.registry.get("garage")["setup_complete"])
 
-    async def _cancel_when(self, job_id: str, line: str) -> dict:
-        """Cancel a job (as the manager's stop does) once its log shows ``line``; its final state."""
+    async def _cancel_when(self, job_id: str, line: str, call: str | None = None) -> dict:
+        """Cancel a job (as the manager's stop does) once its log shows ``line`` and, when given, the fake Supervisor
+        has received the POST ``call``; its final state."""
         job = self.env.manager.jobs.get(job_id)
         for _ in range(500):
-            if any(line in l["msg"] for l in job.lines):
+            if any(line in l["msg"] for l in job.lines) and (
+                    call is None or any(m == "POST" and p == call for m, p, _ in self.env.stub.calls)):
                 break
             await asyncio.sleep(0.01)
         else:
-            raise AssertionError(f"the job never logged {line!r}: {job.lines}")
+            raise AssertionError(f"the job never logged {line!r} (or the call {call} never came): {job.lines}")
         job.task.cancel()
         await asyncio.gather(job.task, return_exceptions=True)
         return job.as_dict()
@@ -229,7 +231,7 @@ class FlowTest(unittest.IsolatedAsyncioTestCase):
         env = self.env
         env.stub.delay = 0.3
         status, body = await env.send("POST", "/api/instances", {"name": "garage", "channel": "release", "version": "0.25.0"})
-        await self._cancel_when(body["job"]["id"], "installing")
+        await self._cancel_when(body["job"]["id"], "installing", "/store/addons/local_hri_garage/install")
         self.assertEqual(os.listdir(env.local_apps), [])
         for _ in range(100):  # the stub completes the install it was asked for
             if "local_hri_garage" in env.stub.installed:
