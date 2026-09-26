@@ -347,15 +347,25 @@ narrows itself, in code, and the tests pin it:
   hold is listed as not managed and gets no action, and a `local_hri_*` app without a marker is left alone.
 - **It installs only what it wrote.** The same writer could change `hri_<name>/config.yaml` after the manager wrote
   it and before the Supervisor reads it (the store reads the folder again at every reload), and the manager's own
-  install or update would then install, say, `hassio_role: admin`. So the manager hashes every file it writes and
-  checks them again before each store reload and right before the install or update; before the install or update
-  it compares the store's parsed definition (`GET /store/addons/local_hri_<name>`) with what it stamped, and after
-  it the installed app's (`GET /addons/local_hri_<name>/info`): role, Supervisor, Core and auth APIs, full access,
-  Docker API, host network, PID, IPC, UTS and D-Bus, privileges, devices, `uart`/`usb`/`gpio`/`video`/`audio`,
-  kernel modules, AppArmor, ingress, ports, version, name, URL and whether it has an image. A difference before the
-  install or update refuses it; a difference after it uninstalls the app at once (its `/config` folder kept), marks
-  the instance and says so in the job, the log and the instance's row. The Supervisor reports neither `map` nor
-  `image` in either answer (and the store not the device keys either): those rest on the file hashes.
+  install or update would then install, say, `hassio_role: admin`. Two checks stand against that:
+  - **the folder is untouched since the manager wrote it.** For every file, folder and link of `hri_<name>/`, and
+    for the folder itself, the manager records its content hash, its inode and its change time when it writes it,
+    and checks them again before each store reload, after the store has read it and right before the install or
+    update. The change time moves on every write, rename, link or permission change, and no program can set it back:
+    a `config.yaml` swapped just for the Supervisor's reading and put back afterwards, byte for byte, is caught. This
+    covers every key, those the Supervisor never reports (`map`, `image`, `environment`, `tmpfs`, `services`,
+    `backup_pre`...) included;
+  - **the Supervisor reports what the manager stamped.** Before the install or update it compares the store's parsed
+    definition (`GET /store/addons/local_hri_<name>`) with it, and after it the installed app's
+    (`GET /addons/local_hri_<name>/info`): role, Supervisor, Core and auth APIs, full access, Docker API, host network,
+    PID, IPC, UTS and D-Bus, privileges, devices, `uart`/`usb`/`gpio`/`video`/`audio`, kernel modules, AppArmor,
+    ingress, ports, version, name, URL and whether it has an image.
+
+  A difference before the install or update refuses it; a difference after it stops and uninstalls the app at once
+  (its `/config` folder kept), marks the instance and says so in the job, the log and the instance's row. What is
+  left: a store reload by someone else between the manager's last check and the Supervisor's start of the install
+  (both within the same moment), of a folder changed in between; the check after the install still catches every
+  key the Supervisor reports. Root on the host can change anything and is outside this model.
 - **No secrets passed on.** The Supervisor includes an app's options in its info (an HRI instance's options hold its
   password); the manager keeps only a list of harmless fields and never shows or logs options. A Supervisor error
   that quotes an app's options (invalid options: `… Got {…}`) is replaced by its error key and the app's slug. The
