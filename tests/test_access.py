@@ -137,13 +137,29 @@ class AccessTest(unittest.IsolatedAsyncioTestCase):
         client = await self.env.client_with(self, allowed_users=frozenset({"alice", OLGA_ID.casefold()}))
         for headers, status in ((ingress(ALICE_ID, "alice"), 200), (ingress(ALICE_ID, "ALICE"), 200),
                                 (ingress(OLGA_ID, "not-listed"), 200), (ingress(OLGA_ID, None), 200),
-                                (ingress(BOB_ID, "alice"), 403)):
+                                (ingress(BOB_ID, "alice"), 403), (ingress(DAVE_ID, "alice"), 403)):
             with self.subTest(headers=headers):
                 got, _ = await self.status_of(client, "GET", "/api/status", headers)
                 self.assertEqual(got, status)
         client = await self.env.client_with(self, allowed_users=frozenset({"olga"}))
         got, _ = await self.status_of(client, "GET", "/api/status", ingress(ALICE_ID, "alice"))
         self.assertEqual(got, 403)  # an administrator, but not listed
+
+    async def test_allowed_users_keys_on_the_verified_id(self):
+        """The user name header is not trusted for allowed_users: the id is, with the username and name Core reports
+        for that id."""
+        client = await self.env.client_with(self, allowed_users=frozenset({"alice"}))
+        got, _ = await self.status_of(client, "GET", "/api/status", ingress(OLGA_ID, "alice"))
+        self.assertEqual(got, 403)  # olga, an administrator, naming herself alice
+        got, _ = await self.status_of(client, "GET", "/api/status", ingress(ALICE_ID, "someone-else"))
+        self.assertEqual(got, 200)  # alice's id: Core says her username is alice, whatever the header says
+        got, _ = await self.status_of(client, "GET", "/api/status", ingress(ALICE_ID, None))
+        self.assertEqual(got, 200)
+        client = await self.env.client_with(self, allowed_users=frozenset({"olga"}))  # Core's display name: Olga
+        self.env.stub.users[2] = {**core_user(OLGA_ID, None, owner=True, groups=()), "name": "Olga"}
+        self.env.users._users = None
+        got, _ = await self.status_of(client, "GET", "/api/status", ingress(OLGA_ID, None))
+        self.assertEqual(got, 200)  # no login name (an external login): matched by the name Core has
 
     async def test_only_the_allow_listed_messages_reach_core(self):
         client = await self.env.client_with(self)

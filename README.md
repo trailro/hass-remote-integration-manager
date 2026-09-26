@@ -227,7 +227,9 @@ narrows itself, in code, and the tests pin it:
   administrators group). A small client with its own allow-list (`hrimgr/corews.py`) can send only the
   authentication and that one command. The answer is cached for a minute. If Home Assistant cannot answer, the
   answer has an unexpected shape or the user is unknown, the request gets 403: the check fails closed.
-  `allowed_users` narrows the administrators further. State-changing requests need `X-Requested-With: fetch` and a
+  `allowed_users` narrows the administrators further, keyed on the verified id: an entry matches the id, or the
+  login name or display name Core reports for that id; the `X-Remote-User-Name` header is shown and logged, never
+  trusted. State-changing requests need `X-Requested-With: fetch` and a
   JSON body; the page's policy allows only its own scripts and styles and framing by Home Assistant. Like every
   ingress app, the panel shares Home Assistant's origin with other apps' panels.
 

@@ -47,8 +47,13 @@ class NotAllowedMessage(CoreError):
 @dataclass(frozen=True)
 class User:
     id: str
-    username: str | None
+    username: str | None  # the Home Assistant login name (None for a user without one, e.g. an external login)
+    name: str | None  # the display name
     is_admin: bool
+
+    def matches(self, allowed: frozenset[str]) -> bool:
+        """Whether ``allowed`` (casefolded) names this user by id, login name or display name, as Core reports them."""
+        return any(v is not None and v.casefold() in allowed for v in (self.id, self.username, self.name))
 
 
 def check_message(message: Any) -> None:
@@ -76,15 +81,15 @@ def parse_users(result: Any) -> dict[str, User]:
         if not isinstance(entry, dict):
             raise CoreError("config/auth/list answered an entry that is not an object")
         uid, owner, active, groups = entry.get("id"), entry.get("is_owner"), entry.get("is_active"), entry.get("group_ids")
-        username = entry.get("username")
+        username, display = entry.get("username"), entry.get("name")
         if (not isinstance(uid, str) or not uid or type(owner) is not bool or type(active) is not bool
                 or not isinstance(groups, list) or not all(isinstance(g, str) for g in groups)
-                or not (username is None or isinstance(username, str))):
+                or not (username is None or isinstance(username, str)) or not (display is None or isinstance(display, str))):
             raise CoreError("config/auth/list answered a user without id, is_owner, is_active or group_ids")
         if uid in users:
             raise CoreError("config/auth/list answered the same id twice")
         # homeassistant/auth/models.py User.is_admin
-        users[uid] = User(uid, username, owner or (active and ADMIN_GROUP in groups))
+        users[uid] = User(uid, username, display, owner or (active and ADMIN_GROUP in groups))
     return users
 
 

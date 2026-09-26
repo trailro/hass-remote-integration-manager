@@ -8,6 +8,7 @@ import unittest
 from hrimgr import web as mgrweb
 
 from .env import USER, Env
+from .fakes.stub import ALICE_ID
 from .helpers import tmpdir
 
 
@@ -40,11 +41,14 @@ class GuardTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(resp.status, 403)
 
     async def test_allowed_users(self):
-        client = await self.client_with(allowed_users=frozenset({"alice"}))
-        for user, status in (("alice", 200), ("ALICE", 200), ("bob", 403), ("", 403), ("alice ", 403)):
-            with self.subTest(user=user):
-                resp = await client.get("/", headers={"X-Remote-User-Name": user})
-                self.assertEqual(resp.status, status)
+        """Keyed on the verified id (tests/test_access.py has the rest): the name header changes nothing."""
+        for allowed, status in ((frozenset({"alice"}), 200), (frozenset({ALICE_ID}), 200), (frozenset({"bob"}), 403),
+                                (frozenset({"olga", "dave"}), 403)):
+            client = await self.client_with(allowed_users=allowed)
+            for header in ("alice", "bob", ""):
+                with self.subTest(allowed=allowed, header=header):
+                    resp = await client.get("/", headers={"X-Remote-User-Name": header})
+                    self.assertEqual(resp.status, status)
 
     async def test_state_changes_need_fetch_and_json(self):
         client = self.env.client

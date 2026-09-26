@@ -30,11 +30,11 @@ the manager in the same backups: its `/data` holds the registry that Repair work
 
 ## Options
 
-- `allowed_users`: narrows who may use the manager, by Home Assistant user name or user id (either, compared
-  without case). The manager is always for administrators only, whatever this option says: it asks Home Assistant
-  on every request, and a user who is not an administrator gets 403 even with the panel's address. Empty: every
-  administrator. A user name counts only when the request carries exactly one; users without a Home Assistant
-  login name (for example external logins) are matched by their id.
+- `allowed_users`: narrows who may use the manager. The check keys on the user id Home Assistant's ingress gives
+  (verified with Home Assistant): an entry matches that id, or the login name or display name Home Assistant
+  reports for it (compared without case). The user name a request carries is never trusted for this. The manager is
+  always for administrators only, whatever this option says: a user who is not one gets 403 even with the panel's
+  address. Empty: every administrator.
 - `github_token`: optional, raises GitHub's rate limit for the release list. A token without any scope is enough.
 - `debug`: more detail in the log.
 

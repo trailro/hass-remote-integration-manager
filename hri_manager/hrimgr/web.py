@@ -8,7 +8,8 @@ app's ingress (``panel_admin`` only hides the panel), so every request, page and
   arrives as a second value, so a request with more than one id (or more than one ``X-Remote-User-Name``) is refused;
 - Core says whether that id is an administrator (corews.py: ``config/auth/list`` through the Supervisor's proxy);
   when Core cannot say, the request is refused: the guard fails closed;
-- ``allowed_users`` narrows the administrators further, by user id or user name.
+- ``allowed_users`` narrows the administrators further, keyed on the verified id: the id itself, or the login name
+  or display name Core reports for it.  The user name header is shown and logged, never trusted.
 
 A state-changing request needs ``X-Requested-With: fetch`` and a JSON body, which a form or a cross-site page cannot
 send without a CORS preflight this app never answers.  Every URL the page uses is relative: ingress serves it under a
@@ -46,7 +47,7 @@ READ_ONLY = frozenset({"GET", "HEAD"})
 MAX_BODY = 64 * 1024
 SETTINGS_KEY = web.AppKey("settings", Settings)
 MANAGER_KEY = web.AppKey("manager", Manager)
-USER_KEY = web.RequestKey("user", str)  # the Home Assistant user name of the request (its id when it has none)
+USER_KEY = web.RequestKey("user", str)  # who asks, for jobs and logs: Core's login name, else display name, else id
 
 
 def _asset_version() -> str:
@@ -104,14 +105,15 @@ async def _identify(request: web.Request, settings: Settings, users: CoreUsers) 
         _LOGGER.warning("refused %s: could not check the user with Home Assistant: %s", where, err)
         return _refuse(403, "HRI Manager could not check with Home Assistant that you are an administrator, so it "
                             "refuses the request. Try again in a moment; the app's log says why.")
+    shown = user.username or user.name or user_id
     if not user.is_admin:
-        _LOGGER.warning("refused %s: Home Assistant user %r is not an administrator", where, name[:64] or user_id)
+        _LOGGER.warning("refused %s: Home Assistant user %r (%r) is not an administrator", where, shown[:64], name[:64])
         return _refuse(403, "HRI Manager is for Home Assistant administrators only.")
-    if settings.allowed_users and user_id.casefold() not in settings.allowed_users \
-            and (not name or name.casefold() not in settings.allowed_users):
-        _LOGGER.warning("refused %s: Home Assistant user %r is not in allowed_users", where, name[:64] or user_id)
+    # the id, verified with Core, and what Core says about it: never the user name header
+    if settings.allowed_users and not user.matches(settings.allowed_users):
+        _LOGGER.warning("refused %s: Home Assistant user %r (%r) is not in allowed_users", where, shown[:64], name[:64])
         return _refuse(403, "This Home Assistant user may not use HRI Manager (the app's allowed_users option).")
-    return name or user_id
+    return shown
 
 
 def make_guard(settings: Settings, users: CoreUsers):
