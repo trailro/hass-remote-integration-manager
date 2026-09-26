@@ -963,6 +963,15 @@ class Manager:
         if keep_job is None or self.auto_repairs.get(name, {}).get("job") != keep_job:
             self.auto_repairs.pop(name, None)
 
+    async def _undo_registry(self, job: Job, fn, *args) -> None:
+        """A registry change undone after a refused write, best effort: its own failure (a full /data) is logged and
+        never replaces the error the job reports."""
+        try:
+            await asyncio.to_thread(fn, *args)
+        except RegistryError as err:
+            job.log(f"the manager's registry was not put back: {err}")
+            _LOGGER.error("%s", err)
+
     def _forget(self, name: str, instance_id: str) -> None:
         """Drop the registry's entry of ``name``, and the copy of its definition, when it is still that instance."""
         entry = self.registry.get(name)
@@ -1075,7 +1084,7 @@ class Manager:
                                                             on_built=self._record_config(name)),
                                               self.registry)
         except WRITE_ERRORS as err:
-            await asyncio.to_thread(self._forget, name, marker["instance_id"])
+            await self._undo_registry(job, self._forget, name, marker["instance_id"])
             raise JobFailed(f"the definition was not written: {err}") from None
         await self._save_copy(job, managed, bluetooth, built["files"])
         expected = stamp.expected_view(built["config"], slug)
@@ -1356,13 +1365,19 @@ class Manager:
             # an earlier update's flag, still set (its record failed): settled first, or this update's own flag, and
             # its rollback, would lose what it names
             try:
-                note = await asyncio.to_thread(children.settle_update, self.registry, managed.name, managed.entry,
-                                               managed.marker, info.get("version"))
+                notes = await asyncio.to_thread(children.settle_instance, self.root, self.registry, managed.name,
+                                                info.get("version"))
                 managed = await asyncio.to_thread(children.load_managed, self.root, managed.name, self.registry)
-            except (RegistryError, children.NotManaged) as err:
+                aside = await asyncio.to_thread(lambda: [e for e in os.listdir(self.root)
+                                                         if e.startswith(f"{children.OLD_PREFIX}{managed.name}-")])
+            except (RegistryError, children.NotManaged, children.UnsafePath, OSError) as err:
                 raise JobFailed(str(err)) from None
-            if note:
+            for note in notes:
                 job.log(note)
+            if aside:
+                # this update would set its own previous definition aside and leave that one to be deleted
+                raise JobFailed(f"an earlier update of {managed.name} left its previous definition aside ({aside[0]}) "
+                                f"and it could not be settled ({'; '.join(notes)[:300]}): nothing was written")
             # an update recorded late is marked to be checked first: this one must not record over that mark
             await self._refuse_marked_now(managed.name)
         marker = managed.marker
@@ -1867,7 +1882,7 @@ class Manager:
                               bluetooth=bluetooth, on_built=self._record_config(name)),
                 self.registry)
         except WRITE_ERRORS as err:
-            await asyncio.to_thread(self._restore_entry, name, entry, marker["instance_id"])
+            await self._undo_registry(job, self._restore_entry, name, entry, marker["instance_id"])
             raise JobFailed(f"the definition was not written: {err}") from None
         self._clear_auto(name, keep_job=job.id)  # an automatic repair's own note stays: it succeeded
         await self._save_copy(job, managed, bluetooth, built["files"])
@@ -1944,7 +1959,7 @@ class Manager:
                               on_built=self._record_config(name)),
                 self.registry)
         except WRITE_ERRORS as err:
-            await asyncio.to_thread(self._restore_entry, name, entry, marker["instance_id"])
+            await self._undo_registry(job, self._restore_entry, name, entry, marker["instance_id"])
             raise JobFailed(f"the definition was not written: {err}") from None
         expected = stamp.expected_view(built["config"], slug)
         try:
