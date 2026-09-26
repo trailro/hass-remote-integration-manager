@@ -13,7 +13,9 @@ supervisord) and runs what the Supervisor runs when it reads an app:
     channels (a release keeps the image, a git build has none and a 0.0.0-<sha> version);
   - App._is_excluded_by_filter over the instance's folder as the Supervisor names it (local_hri_<name>): every path
     HRI's own backup_exclude leaves out of its folder (<repo>_hass_remote_integration) is left out of the
-    instance's, and what HRI keeps is kept.
+    instance's, and what HRI keeps is kept;
+  - the same filter over three release instances side by side (app_configs/local_hri_<name>/ each, as on one
+    machine): none of them keeps a venv, HRI's own backups or a log, and each keeps its state files.
 
 Every section runs and prints its problems; the exit status is 1 when any section failed."""
 
@@ -32,6 +34,13 @@ CONFIG_PARENT = PurePath("/data/app_configs")
 HRI_FOLDER = CONFIG_PARENT / "5c53de3b_hass_remote_integration"
 MANAGER_IMAGE = "ghcr.io/trailro/hass-remote-integration-manager"
 # HRI's live state, which a backup must keep (relative to its folder)
+# what no instance's backup may hold (relative to its folder): the installed Home Assistant (about 800 MB), HRI's
+# own backups, logs
+DISPOSABLE = ("venv-current", "venv-current/lib/python3.14/site-packages/homeassistant/__init__.py",
+              "venv-2026.9.3/bin/python", "backups/hri-backup-20260926.zip", "integration_manager/backups/pre-update.zip",
+              "home-assistant.log", "home-assistant.log.1", "integration_manager/process.log",
+              "integration_manager/ha-install.log", ".storage/core.restore_state.log", "deps/lib/x.py")
+INSTANCES = ("garage", "lab", "boiler_room")
 STATE_FILES = ("configuration.yaml", ".storage/core.config_entries", ".storage/core.device_registry",
                "integration_manager/settings.json", "integration_manager/state.json", "integration_manager/mqtt.json",
                "custom_components/ramses_cc/manifest.json", "integration_manager/versions/x/1.0/custom_components/x/__init__.py")
@@ -160,6 +169,34 @@ class Check:
             problems.append(f"only {out} sample paths are left out by HRI's own filter: the samples are wrong")
         self.section(f"{title} ({len(samples)} paths, {out} left out)", problems)
 
+    def instances_side_by_side(self, template: dict) -> None:
+        from supervisor.apps.app import App
+
+        from hrimgr import stamp
+
+        import yaml
+
+        stamped = {name: yaml.safe_load(stamp.dump(stamp.stamp(template, name, "0.25.0", "release"), "check"))
+                   for name in INSTANCES}
+        problems, left_out = [], 0
+        for name, config in stamped.items():
+            folder = CONFIG_PARENT / f"local_hri_{name}"
+            app = SimpleNamespace(backup_exclude=config.get("backup_exclude") or [])
+
+            def excluded(rel: str) -> bool:
+                parts = PurePath(rel).parts
+                return any(App._is_excluded_by_filter(app, folder, "config", PurePath("config", *parts[:i]))
+                           for i in range(1, len(parts) + 1))
+
+            for rel in DISPOSABLE:
+                if excluded(rel):
+                    left_out += 1
+                else:
+                    problems.append(f"local_hri_{name}/{rel} is kept in the instance's backup")
+            problems += [f"local_hri_{name}/{rel}: live state left out" for rel in STATE_FILES if excluded(rel)]
+        self.section(f"{len(INSTANCES)} release instances side by side: no venv, HRI backups or logs kept, state kept "
+                     f"({left_out} paths left out)", problems)
+
     def run(self) -> int:
         from supervisor.const import FILE_SUFFIX_CONFIGURATION
         from supervisor.utils.common import read_json_or_yaml_file
@@ -211,6 +248,7 @@ class Check:
             self.translations(f"{label}: HRI's translations", tr, stamped)
             self.options(f"{label}: default options (AppOptions)", stamped)
             self.backup_filter(f"{label}: backup_exclude under {CONFIG_PARENT / 'local_hri_garage'}", template, stamped, "local_hri_garage")
+        self.instances_side_by_side(template)
         return 1 if self.failed else 0
 
 
