@@ -13,12 +13,13 @@ from unittest import mock
 
 import yaml
 
-from hrimgr import copies, names, stamp, tarsafe
+from hrimgr import children, copies, instances, names, stamp, tarsafe
+from hrimgr.registry import RegistryError
 
 from . import APP_DIR
 from .env import Env
 from .fakes.tarballs import hri_files, make_tarball, sha_of
-from .helpers import FIXTURE_0252, FIXTURE_CONFIG, tmpdir
+from .helpers import FIXTURE_0252, FIXTURE_CONFIG, marker, new_registry, register, tmpdir
 
 
 def template() -> dict:
@@ -118,6 +119,32 @@ class StampTest(unittest.TestCase):
         # in another folder than the tree's root: not HRI's entrypoint
         moved = {**without, "tools/entrypoint.py": b"APP_DYNAMIC_PORT = True\n"}
         self.assertFalse(stamp.reads_dynamic_port(archive(moved)))
+
+
+class SettleTest(unittest.TestCase):
+    def test_the_flag_names_the_definition_in_place_only_with_its_accesses(self):
+        """A restamp at the installed version that turns an access on or off and stopped before its swap: the flag has
+        the version, commit and stamping of the definition in place, not its access.  Recorded as if it had been
+        written, the record would contradict the definition in place and refuse every later check of it."""
+        self.assertEqual(children.ACCESS_FIELDS, tuple(instances.ACCESS))
+        for access in children.ACCESS_FIELDS:
+            for on in (True, False):
+                with self.subTest(access=access, on=on):
+                    reg = new_registry(self)
+                    m = marker("garage", **{access: not on})
+                    register(reg, m)
+                    fields = {k: m[k] for k in ("version", "sha")}
+                    reg.update("garage", **{access: not on}, updating={"at": "t", "fields": {**fields, access: on}})
+                    note = children.settle_update(reg, "garage", reg.get("garage"), m, "0.25.0")
+                    self.assertIn("changed nothing", note)
+                    entry = reg.get("garage")
+                    self.assertEqual((entry[access], entry["updating"], entry.get("tampered")), (not on, None, None))
+                    # the definition the flag names: recorded, marked to be checked
+                    reg.update("garage", updating={"at": "t", "fields": {**fields, access: on}})
+                    note = children.settle_update(reg, "garage", reg.get("garage"), {**m, access: on}, "0.25.0")
+                    self.assertIn("had finished", note)
+                    self.assertIs(reg.get("garage")[access], on)
+                    self.assertTrue(reg.get("garage")["tampered"]["unverified"])
 
 
 class PageTest(unittest.TestCase):
@@ -676,6 +703,62 @@ class HostNetworkFlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Update it at its installed version with Host network off", job["error"])
         self.assertEqual(self.config()["ingress_port"], 0)
         self.assertIs(env.registry.get("garage")["host_network"], True)
+
+    async def test_the_update_finish_setup_names_for_off_works(self):
+        """The state Finish setup refuses to follow in place: the record says on, the app has it off, and the flag of
+        a restamp to off at the installed version (the admin's choice, stopped before its swap: the definition in place
+        is still the one with Host network) names the change.  The Update it names goes ahead: the flag does not name
+        the definition in place, so it records nothing and no check is owed; the definition is written from HRI's
+        template again with HRI's own port, and Finish setup then completes."""
+        env = self.env
+        await self.lagging_record(on=False)
+        self.manager_made_it(on=False)
+        env.registry.update("garage", setup_complete=False)
+        job = await env.job(await env.send("POST", "/api/instances/garage/finish"))
+        self.assertEqual(job["state"], "failed", job)
+        self.assertIn("Update it at its installed version with Host network off", job["error"])
+        job = await self.update(version="0.26.0", host_network=False)
+        self.assertEqual(job["state"], "succeeded", job)
+        self.assertTrue(job["result"]["restamped"])
+        self.assert_off()
+        entry = env.registry.get("garage")
+        self.assertEqual((entry.get("updating"), entry.get("tampered")), (None, None))
+        self.assertIs(self.installed_host_network(), False)
+        self.assertNotIn("Host network", (await self.row())["problem"] or "")
+        job = await env.job(await env.send("POST", "/api/instances/garage/finish"))
+        self.assertEqual(job["state"], "succeeded", job)
+        self.assertIs(env.registry.get("garage")["setup_complete"], True)
+
+    async def test_an_update_to_off_recorded_late_is_recorded_then_checked(self):
+        """An Update to a newer release with Host network off whose record failed (a full /data): the flag names the
+        definition in place.  The next Update records it, marked to be checked, and says Check again; that check
+        passes, and nothing about Host network is left to do."""
+        env = self.env
+        await self.create(host_network=True)
+        update = env.registry.update
+
+        def record_fails(name, **fields):
+            if fields.get("updating", 0) is None and "version" in fields:
+                raise RegistryError("the manager's registry cannot be written: No space left on device")
+            return update(name, **fields)
+
+        with mock.patch.object(env.registry, "update", side_effect=record_fails):
+            job = await self.update(version="0.26.1", host_network=False)
+        self.assertEqual(job["state"], "succeeded", job)
+        self.assertIn("its flag lets the next start record the update", job["result"]["warning"])
+        entry = env.registry.get("garage")
+        self.assertEqual((entry["version"], entry["host_network"]), ("0.26.0", True))
+        self.assertIs(self.installed_host_network(), False)
+        job = await self.update(version="0.26.1", host_network=False)
+        self.assertEqual(job["state"], "failed", job)
+        self.assertIn("Check again", job["error"])
+        entry = env.registry.get("garage")
+        self.assertEqual((entry["version"], entry["host_network"]), ("0.26.1", False))
+        job = await env.job(await env.send("POST", "/api/instances/garage/finish"))  # Check again
+        self.assertEqual(job["state"], "succeeded", job)
+        self.assertIsNone(env.registry.get("garage").get("tampered"))
+        self.assert_off()
+        self.assertNotIn("Host network", (await self.row())["problem"] or "")
 
     async def test_only_true_or_false(self):
         env = self.env

@@ -39,6 +39,8 @@ TMP_PREFIX = ".hri-tmp-"  # a folder being built
 OLD_PREFIX = ".hri-old-"  # the previous definition during an update, until it succeeds
 DEL_PREFIX = ".hri-del-"  # a folder being deleted
 CHANNELS = ("release", "git")
+# an instance's accesses to the host (instances.ACCESS), recorded in its marker and in an update's flag
+ACCESS_FIELDS = ("bluetooth", "host_network")
 MAX_DEPTH = 64  # folders below a definition's folder (walk): HRI's tree is far shallower
 
 
@@ -684,7 +686,9 @@ def _update_state(real_root: str, name: str, registry: Registry | None, installe
 
 def settle_update(registry: Registry, name: str, entry: dict, marker: dict, installed_version: str | None) -> str | None:
     """An ``updating`` flag left after the swap (no previous definition to put back any more).  When the definition in
-    place (``marker``) is the one the flag names (its version, commit and stamping, from the registry itself) and the
+    place (``marker``) is the one the flag names (its version, commit, stamping and accesses to the host, from the
+    registry itself: a restamp at the same version that changes only an access and stopped before its swap left the
+    previous definition, which the flag does not name) and the
     Supervisor has installed that version, the registry records it now, marked to be checked (pending_mark);
     when the Supervisor has another version, or the definition in place is the registry's own, the flag goes; when
     the installed version is not known (None), nothing changes.  What was done."""
@@ -694,7 +698,7 @@ def settle_update(registry: Registry, name: str, entry: dict, marker: dict, inst
     fields = target.get("fields") if isinstance(target.get("fields"), dict) else {}
 
     def key(d: dict) -> tuple:
-        return d.get("version"), d.get("sha"), d.get("stamp_version")
+        return (d.get("version"), d.get("sha"), d.get("stamp_version"), *(d.get(a) is True for a in ACCESS_FIELDS))
 
     if fields and key(marker) == key(fields):
         if installed_version is None:
