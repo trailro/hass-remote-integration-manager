@@ -13,8 +13,9 @@ Open **HRI Manager** in the sidebar:
   minutes; open its panel to follow it.
 - **Update** takes an instance to a newer release; its options and data stay. **Delete** stops and uninstalls it
   and keeps its data folder unless you tick the box and type its name.
-- **Git ref (testing)** builds HRI from a branch, tag or commit on this machine. For trying a fix before its
-  release; not for production.
+- **Git branch or tag (testing)** builds HRI from a branch or tag of its own repository on this machine: that
+  branch's code and Dockerfile run here. For trying a fix before its release, with a branch you trust; not for
+  production. Commits, pull requests and forks are refused.
 
 Each instance's options (password, `ingress_users`, ...) are set on that app's own **Configuration** tab, as for the
 single hass-remote-integration app. Its port 8087 is off; map one on its **Network** tab if you want it.

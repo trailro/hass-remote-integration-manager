@@ -19,13 +19,14 @@
 <div class="card"><h2>New instance</h2>
  <form id="create" class="form" autocomplete="off">
   <label>Name <input id="c-name" name="name" required maxlength="20" pattern="[a-z][a-z0-9_]{0,19}" placeholder="garage" spellcheck="false"></label>
-  <label>Channel <select id="c-channel"><option value="release">Release</option><option value="git">Git ref (testing)</option></select></label>
+  <label>Channel <select id="c-channel"><option value="release">Release</option><option value="git">Git branch or tag (testing)</option></select></label>
   <label id="c-version-row">HRI version <select id="c-version"><option value="">loading…</option></select></label>
-  <label id="c-ref-row" hidden>Git ref <input id="c-ref" maxlength="100" placeholder="main" spellcheck="false"></label>
+  <label id="c-kind-row" hidden>Branch or tag <select id="c-kind"><option value="branch">Branch</option><option value="tag">Tag</option></select></label>
+  <label id="c-ref-row" hidden>Name <input id="c-ref" maxlength="100" placeholder="main" spellcheck="false"></label>
   <button id="c-go" class="primary" type="submit">Create</button>
  </form>
  <p class="mut small">The app is called <code id="c-slug">local_hri_…</code>, starts at boot with its Watchdog on and shows in the sidebar. Lowercase letters, digits and <code>_</code>, starting with a letter, at most 20.</p>
- <p id="c-git-note" class="warn small" hidden>Testing: the Supervisor builds HRI from the source of that ref on this machine (several minutes). Not for production.</p>
+ <p id="c-git-note" class="warn small" hidden>Testing only: the Supervisor builds that branch or tag of hass-remote-integration on this machine (several minutes), and its code and Dockerfile run here. Use a branch you trust; not for production.</p>
 </div>
 
 <div class="card" id="jobcard" hidden><h2>Job <span id="jobtitle" class="tag"></span></h2>
@@ -43,7 +44,8 @@
   <h3 id="cf-title"></h3>
   <p id="cf-text"></p>
   <label id="cf-version-row" hidden>Version <select id="cf-version"></select></label>
-  <label id="cf-ref-row" hidden>Git ref <input id="cf-ref" maxlength="100" spellcheck="false"></label>
+  <label id="cf-kind-row" hidden>Branch or tag <select id="cf-kind"><option value="branch">Branch</option><option value="tag">Tag</option></select></label>
+  <label id="cf-ref-row" hidden>Name <input id="cf-ref" maxlength="100" spellcheck="false"></label>
   <label id="cf-data-row" class="check" hidden><input type="checkbox" id="cf-data"><span>Also delete the instance's data (its Home Assistant, integration and configuration)</span></label>
   <label id="cf-name-row" hidden><span>Type <b id="cf-name-hint"></b> to confirm</span><input id="cf-name" spellcheck="false" autocomplete="off"></label>
   <div class="row end"><button value="cancel" type="submit">Cancel</button><button id="cf-ok" value="ok" type="submit" class="primary">OK</button></div>

@@ -75,7 +75,9 @@ def main() -> int:
     check("releases from 0.25.0 on", status == 200 and [x["version"] for x in r["releases"]] == ["0.26.0b1", "0.25.1", "0.25.0"], r)
 
     job("create garage (release 0.25.0)", api("POST", "api/instances", {"name": "garage", "channel": "release", "version": "0.25.0"}))
-    job("create lab (git main)", api("POST", "api/instances", {"name": "lab", "channel": "git", "ref": "main"}))
+    job("create lab (git main)", api("POST", "api/instances", {"name": "lab", "channel": "git", "ref_kind": "branch", "ref": "main"}))
+    status, body = api("POST", "api/instances", {"name": "pr", "channel": "git", "ref_kind": "branch", "ref": "pull/1/head"})
+    check("a pull request is not a git ref the manager builds", status == 400, (status, body))
     job("create attic (release 0.25.0)", api("POST", "api/instances", {"name": "attic", "channel": "release", "version": "0.25.0"}))
     job("create tmp1 (release 0.25.0)", api("POST", "api/instances", {"name": "tmp1", "channel": "release", "version": "0.25.0"}))
     status, body = api("POST", "api/instances", {"name": "garage", "channel": "release", "version": "0.25.0"})

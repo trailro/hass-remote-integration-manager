@@ -49,13 +49,27 @@ class VersionTest(unittest.TestCase):
         self.assertFalse(names.supported_version("latest"))
 
     def test_refs(self):
-        for ref in ("main", "release/0.25.0", "v0.25.0", "a" * 40, "fix/some-thing_1"):
+        for kind, ref in (("branch", "main"), ("branch", "release/0.25.0"), ("tag", "v0.25.0"), ("branch", "fix/some-thing_1"),
+                          ("tag", "test-tag"), ("branch", "cafe")):
             with self.subTest(ref=ref):
-                self.assertEqual(names.validate_ref(ref), ref)
-        for ref in ("", "../x", "a..b", "a//b", "/main", "main/", "x.lock", "a b", "a?b", "a#b", "a%2e", "-x", "x" * 101, None):
+                self.assertEqual(names.validate_ref(kind, ref), (kind, ref))
+        for ref in ("", "../x", "a..b", "a//b", "/main", "main/", "x.lock", "a b", "a?b", "a#b", "a%2e", "-x", "x" * 101, None,
+                    "a/.hidden", ".x"):
             with self.subTest(ref=ref):
                 with self.assertRaises(ValueError):
-                    names.validate_ref(ref)
+                    names.validate_ref("branch", ref)
+
+    def test_only_branches_and_tags_of_hri(self):
+        """Not a pull request (anyone can open one), not a commit (a fork's commit is served under HRI's name too),
+        not a full refs/ path (the manager adds refs/heads/ or refs/tags/ itself)."""
+        for kind, ref in (("branch", "refs/pull/1/head"), ("branch", "pull/1/head"), ("branch", "pull/1/merge"),
+                          ("branch", "refs/heads/main"), ("tag", "refs/tags/v0.25.0"), ("branch", "REFS/heads/main"),
+                          ("branch", "a" * 40), ("branch", "abcdef1"), ("tag", "0123456789ABCDEF"), ("commit", "main"),
+                          (None, "main"), ("pull", "1")):
+            with self.subTest(kind=kind, ref=ref), self.assertRaises(ValueError):
+                names.validate_ref(kind, ref)
+        self.assertEqual(names.full_ref("branch", "main"), "refs/heads/main")
+        self.assertEqual(names.full_ref("tag", "v0.25.0"), "refs/tags/v0.25.0")
 
     def test_git_version(self):
         self.assertEqual(names.git_version("0123456789abcdef" * 2 + "01234567"), "0.0.0-0123456")

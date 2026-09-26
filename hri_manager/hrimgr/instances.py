@@ -126,6 +126,7 @@ class Manager:
             "channel": marker.get("channel") if marker else None,
             "version": marker.get("version") if marker else (app.get("version") if app else None),
             "ref": marker.get("ref") if marker else None,
+            "ref_kind": marker.get("ref_kind") if marker else None,
             "sha": marker.get("sha") if marker else None,
             "newer_release": None, "problem": None, "ingress_url": None, "ingress_panel": False,
             "job": job.summary() if job else None, "actions": [],
@@ -155,7 +156,14 @@ class Manager:
         except names.InvalidName as err:
             raise InvalidRequest(str(err)) from None
 
-    def check_create(self, body: dict) -> tuple[str, str, str | None, str | None]:
+    @staticmethod
+    def check_ref(kind: object, ref: object) -> tuple[str, str]:
+        try:
+            return names.validate_ref(kind, ref)
+        except ValueError as err:
+            raise InvalidRequest(str(err)) from None
+
+    def check_create(self, body: dict) -> tuple[str, str, str | None, tuple[str, str] | None]:
         name = self.check_name(body.get("name"))
         channel = body.get("channel", "release")
         if channel == "release":
@@ -166,12 +174,7 @@ class Manager:
                 raise InvalidRequest("Instances need HRI 0.25.0 or newer (the first release that runs as an app).")
             return name, channel, version, None
         if channel == "git":
-            ref = body.get("ref")
-            try:
-                names.validate_ref(ref)
-            except ValueError as err:
-                raise InvalidRequest(str(err)) from None
-            return name, channel, None, ref
+            return name, channel, None, self.check_ref(body.get("ref_kind"), body.get("ref"))
         raise InvalidRequest("The channel is 'release' or 'git'.")
 
     def managed(self, name: str) -> children.Managed:
@@ -192,18 +195,14 @@ class Manager:
 
     def update(self, name: str, body: dict, user: str) -> Job:
         managed = self.managed(name)
-        version, ref = body.get("version"), body.get("ref")
+        version, ref = body.get("version"), None
         if managed.marker["channel"] == "release":
             if version is not None and (not isinstance(version, str) or not names.parse_version(version)):
                 raise InvalidRequest("Choose an HRI release.")
-            ref = None
         else:
             version = None
-            if ref is not None:
-                try:
-                    names.validate_ref(ref)
-                except ValueError as err:
-                    raise InvalidRequest(str(err)) from None
+            if body.get("ref") is not None:
+                ref = self.check_ref(body.get("ref_kind"), body.get("ref"))
         return self.jobs.start(name, "update", user, lambda job: self._update(job, managed, version, ref, user))
 
     def delete(self, name: str, body: dict, user: str) -> Job:
@@ -239,20 +238,27 @@ class Manager:
             await asyncio.sleep(self.poll_interval)
             waited += self.poll_interval
 
-    async def _fetch(self, job: Job, channel: str, version: str | None, ref: str | None):
+    async def _fetch(self, job: Job, channel: str, version: str | None, ref: tuple[str, str] | None):
+        expected = None
         try:
             if channel == "release":
                 job.log(f"downloading hass-remote-integration v{version}")
-                archive, url = await self.gh.tarball(f"v{version}", tag=True)
+                archive, url = await self.gh.tarball("tag", f"v{version}")
             else:
-                job.log(f"downloading hass-remote-integration at {ref}")
-                archive, url = await self.gh.tarball(ref)
+                kind, name = ref
+                job.log(f"checking that hass-remote-integration has the {kind} {name}")
+                expected = await self.gh.resolve_ref(kind, name)
+                job.log(f"downloading hass-remote-integration at the {kind} {name}")
+                archive, url = await self.gh.tarball(kind, name)
         except GitHubError as err:
             raise JobFailed(str(err)) from None
         except Exception as err:  # tarsafe.UnsafeArchive and the like
             raise JobFailed(f"the download was refused: {err}") from None
         if channel == "git" and not archive.sha:
             raise JobFailed("the archive does not say which commit it is")
+        if expected and archive.sha != expected:
+            raise JobFailed(f"the {ref[0]} {ref[1]} moved while it was downloaded ({expected[:12]}, then "
+                            f"{archive.sha[:12]}): try again")
         return archive, url
 
     async def _check_release(self, version: str) -> None:
@@ -263,19 +269,19 @@ class Manager:
         if not any(r["version"] == version for r in releases):
             raise JobFailed(f"hass-remote-integration {version} is not a published release (0.25.0 or newer)")
 
-    def _marker(self, name: str, channel: str, version: str, ref: str, sha: str | None, source: str, user: str,
+    def _marker(self, name: str, channel: str, version: str, ref: tuple[str, str], sha: str | None, source: str, user: str,
                 previous: dict | None = None) -> dict:
         now = children.now_iso()
         marker = {
             "manager": children.MANAGER_ID, "manager_version": VERSION, "name": name, "slug": names.supervisor_slug(name),
-            "channel": channel, "version": version, "ref": ref, "sha": sha, "template_source": source,
-            "created_at": now, "created_by": user, "updated_at": now, "history": [],
+            "channel": channel, "version": version, "ref_kind": ref[0], "ref": ref[1], "sha": sha,
+            "template_source": source, "created_at": now, "created_by": user, "updated_at": now, "history": [],
         }
         if previous:
             marker["created_at"] = previous.get("created_at", now)
             marker["created_by"] = previous.get("created_by", user)
             history = list(previous.get("history") or [])
-            history.append({k: previous.get(k) for k in ("channel", "version", "ref", "sha", "updated_at")})
+            history.append({k: previous.get(k) for k in ("channel", "version", "ref_kind", "ref", "sha", "updated_at")})
             marker["history"] = history[-HISTORY:]
             marker["updated_by"] = user
         return marker
@@ -294,7 +300,8 @@ class Manager:
             return marker
         return build
 
-    async def _create(self, job: Job, name: str, channel: str, version: str | None, ref: str | None, user: str) -> dict:
+    async def _create(self, job: Job, name: str, channel: str, version: str | None, ref: tuple[str, str] | None,
+                      user: str) -> dict:
         slug = names.supervisor_slug(name)
         job.log(f"checking that {slug} is free")
         if any(a.get("slug") == slug for a in await self.sv.list_apps()):
@@ -311,7 +318,7 @@ class Manager:
         if channel == "git":
             version = names.git_version(sha)
             job.log(f"commit {sha[:12]}: version {version} (testing build)")
-        marker = self._marker(name, channel, version, f"v{version}" if channel == "release" else ref, sha, source, user)
+        marker = self._marker(name, channel, version, ("tag", f"v{version}") if channel == "release" else ref, sha, source, user)
         job.log(f"writing {names.folder_name(name)}")
         try:
             managed = await asyncio.to_thread(children.write_new, self.root, name,
@@ -365,7 +372,8 @@ class Manager:
             raise JobFailed(str(err)) from None
         return {"state": info.get("state")}
 
-    async def _update(self, job: Job, managed: children.Managed, version: str | None, ref: str | None, user: str) -> dict:
+    async def _update(self, job: Job, managed: children.Managed, version: str | None, ref: tuple[str, str] | None,
+                      user: str) -> dict:
         marker = managed.marker
         channel = marker["channel"]
         try:
@@ -387,14 +395,14 @@ class Manager:
             if version == marker.get("version") and info.get("version") == version:
                 job.log(f"already at {version}")
                 return {"version": version, "unchanged": True}
-            new_ref = f"v{version}"
+            new_ref = ("tag", f"v{version}")
         else:
-            new_ref = ref or marker.get("ref")
+            new_ref = ref or self.check_ref(marker.get("ref_kind"), marker.get("ref"))
         archive, source = await self._fetch(job, channel, version, new_ref)
         sha = archive.sha
         if channel == "git":
             if sha == marker.get("sha") and info.get("version") == marker.get("version"):
-                job.log(f"{new_ref} is still {sha[:12]}: nothing to rebuild")
+                job.log(f"the {new_ref[0]} {new_ref[1]} is still {sha[:12]}: nothing to rebuild")
                 return {"version": marker.get("version"), "unchanged": True}
             version = names.git_version(sha)
             job.log(f"commit {sha[:12]}: version {version}")
@@ -462,10 +470,11 @@ class Manager:
         version = str(info.get("version") or "")
         git = names.GIT_VERSION_RE.fullmatch(version)
         if names.parse_version(version) and names.supported_version(version):
-            channel, ref = "release", f"v{version}"
+            channel, ref = "release", ("tag", f"v{version}")
             await self._check_release(version)
         elif git:
-            channel, ref = "git", git.group(1)
+            raise JobFailed(f"{slug} is a git build ({version}): the manager does not know which branch or tag it came "
+                            "from, so it cannot write its definition again")
         else:
             raise JobFailed(f"cannot tell which HRI {version!r} is")
         archive, source = await self._fetch(job, channel, version if channel == "release" else None, ref)

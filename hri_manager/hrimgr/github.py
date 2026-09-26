@@ -1,8 +1,10 @@
 """HRI's releases and source tarballs, from GitHub.
 
-Two fixed hosts, no redirects followed: api.github.com for the release list (with the optional token, for the rate
-limit) and codeload.github.com for tarballs (never with the token: HRI is public).  A ref is validated
-(names.validate_ref) and escaped before it becomes part of a URL.  The release list is cached in /data for an hour,
+Two fixed hosts, no redirects followed: api.github.com for the release list and refs (with the optional token, for the
+rate limit) and codeload.github.com for tarballs (never with the token: HRI is public).  A git ref is a branch or a
+tag of HRI itself (names.validate_ref), checked to exist in HRI's repository with the API before anything is
+downloaded, and fetched with its full ``refs/heads/`` or ``refs/tags/`` path: codeload also serves pull requests and
+forks' commits under HRI's name, which a short name could reach.  The release list is cached in /data for an hour,
 and the instances list reads only the cache, so GitHub being unreachable never stops the page."""
 
 from __future__ import annotations
@@ -104,16 +106,39 @@ class GitHub:
             self._save_cache()
             return list(self._cache["releases"])
 
-    async def _fetch_releases(self) -> Any:
+    def _api_headers(self) -> dict:
         headers = {"Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28"}
         if self._token:
             headers["Authorization"] = f"Bearer {self._token}"
-        url = f"{self._api}/repos/{names.HRI_REPO}/releases?per_page=100"
-        data = await self._get(url, headers, MAX_RELEASES_JSON, 30)
+        return headers
+
+    async def _api_json(self, path: str, cap: int, what: str) -> Any:
+        data = await self._get(f"{self._api}/repos/{names.HRI_REPO}/{path}", self._api_headers(), cap, 30)
         try:
             return json.loads(data.decode("utf-8"))
         except (UnicodeDecodeError, ValueError):
-            raise GitHubError("GitHub's release list is not JSON") from None
+            raise GitHubError(f"GitHub's {what} is not JSON") from None
+
+    async def _fetch_releases(self) -> Any:
+        return await self._api_json("releases?per_page=100", MAX_RELEASES_JSON, "release list")
+
+    async def resolve_ref(self, kind: str, ref: str) -> str | None:
+        """Check that a branch or tag exists in HRI's repository; its commit, when GitHub names it directly (an
+        annotated tag names a tag object instead: None)."""
+        names.validate_ref(kind, ref)
+        full = names.full_ref(kind, ref)
+        try:
+            data = await self._api_json(f"git/ref/{quote(full[len('refs/'):], safe='/._-')}", 64 * 1024, "ref")
+        except GitHubError as err:
+            if "not found" in str(err):
+                raise GitHubError(f"{names.HRI_REPO} has no {kind} {ref}") from None
+            raise GitHubError(f"{kind} {ref}: {err}") from None
+        obj = data.get("object") if isinstance(data, dict) else None
+        if not isinstance(data, dict) or data.get("ref") != full or not isinstance(obj, dict):
+            # git/ref/<x> answers only an exact ref; anything else is not the ref asked for
+            raise GitHubError(f"{names.HRI_REPO} has no {kind} {ref}")
+        sha = obj.get("sha")
+        return sha if obj.get("type") == "commit" and isinstance(sha, str) and names.SHA_RE.fullmatch(sha) else None
 
     async def _get(self, url: str, headers: dict, cap: int, timeout: float) -> bytes:
         try:
@@ -131,18 +156,17 @@ class GitHub:
         except aiohttp.ClientError as err:
             raise GitHubError(f"GitHub unreachable: {err.__class__.__name__}") from None
 
-    def tarball_url(self, ref: str, tag: bool = False) -> str:
-        names.validate_ref(ref)
-        path = f"refs/tags/{ref}" if tag else ref
-        return f"{self._codeload}/{names.HRI_REPO}/tar.gz/{quote(path, safe='/._-')}"
+    def tarball_url(self, kind: str, ref: str) -> str:
+        names.validate_ref(kind, ref)
+        return f"{self._codeload}/{names.HRI_REPO}/tar.gz/{quote(names.full_ref(kind, ref), safe='/._-')}"
 
-    async def tarball(self, ref: str, tag: bool = False) -> tuple[tarsafe.Archive, str]:
-        """The source of a tag (``v0.25.0``) or of any ref, checked (tarsafe) and opened; with the URL it came from."""
-        url = self.tarball_url(ref, tag)
+    async def tarball(self, kind: str, ref: str) -> tuple[tarsafe.Archive, str]:
+        """The source of a branch or tag of HRI, checked (tarsafe) and opened; with the URL it came from."""
+        url = self.tarball_url(kind, ref)
         try:
             data = await self._get(url, {}, tarsafe.MAX_COMPRESSED, 300)
         except GitHubError as err:
-            raise GitHubError(f"{'tag' if tag else 'ref'} {ref}: {err}") from None
+            raise GitHubError(f"{kind} {ref}: {err}") from None
         return tarsafe.open_archive(data), url
 
 

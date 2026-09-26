@@ -70,12 +70,20 @@ Only what makes the copy a separate app; everything else is HRI's, as released:
 
 ### Git channel (testing)
 
-**Git ref (testing)** builds HRI from any branch, tag or commit instead of a release: for trying a fix before it is
-released. The manager downloads that ref's source tree into the instance's folder, puts HRI's app definition at its
-root without `image:` (so the Supervisor builds the folder's Dockerfile on your machine, which takes several
-minutes), removes every other `config.yaml/yml/json` and `repository.*` of the tree (the store would read each as
-another app), and gives it the version `0.0.0-<commit>`. HRI's page shows the commit as its build. **Rebuild**
-downloads the ref again and rebuilds when the commit changed. Not for production.
+**Git branch or tag (testing)** builds HRI from a branch or a tag of
+[trailro/hass-remote-integration](https://github.com/trailro/hass-remote-integration) instead of a release: for
+trying a fix before it is released. **A git build runs that branch's code, and builds its Dockerfile, on this
+machine: use it only for testing, and only with a branch or tag you trust.** Only branches and tags of HRI's own
+repository are accepted, by their short name (`main`, `fix/something`, `v0.26.0b1`): never a commit, a pull request
+(`pull/…`: anyone can open one) or a `refs/…` path. The manager checks with GitHub's API that the branch or tag
+exists in HRI's repository before it downloads anything, downloads it by its full name (`refs/heads/…` or
+`refs/tags/…`), and records the commit it got.
+
+The manager downloads that source tree into the instance's folder, puts HRI's app definition at its root without
+`image:` (so the Supervisor builds the folder's Dockerfile on your machine, which takes several minutes), removes
+every other `config.yaml/yml/json` of the tree (the store would read each as another app), and gives it the version
+`0.0.0-<commit>`. HRI's page shows the commit as its build. **Rebuild** downloads the branch or tag again and
+rebuilds when its commit changed. Not for production.
 
 ## Updating
 

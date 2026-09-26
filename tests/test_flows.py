@@ -93,7 +93,7 @@ class FlowTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_git_channel(self):
         env = self.env
-        job = await self.create("lab", channel="git", ref="main")
+        job = await self.create("lab", channel="git", ref_kind="branch", ref="main")
         self.assertEqual(job["state"], "succeeded", job)
         sha = env.stub.refs["main"]
         self.assertEqual(env.stub.installed["local_hri_lab"]["version"], f"0.0.0-{sha[:7]}")
@@ -119,6 +119,28 @@ class FlowTest(unittest.IsolatedAsyncioTestCase):
         job = await env.job(await env.send("DELETE", "/api/instances/lab", {"remove_data": True, "confirm": "lab"}))
         self.assertEqual(job["state"], "succeeded", job)
         self.assertIn(("POST", "/addons/local_hri_lab/uninstall", {"remove_config": True}), env.stub.calls)
+        self.assertEqual(set(env.stub.codeload_paths), {"refs/heads/main"})  # always the full ref
+
+    async def test_git_channel_takes_only_branches_and_tags_of_hri(self):
+        env = self.env
+        for kind, ref in (("branch", "pull/1/head"), ("branch", "refs/pull/1/head"), ("branch", "a" * 40), ("branch", "abcdef1"),
+                          ("commit", "main"), (None, "main"), ("branch", "refs/heads/main")):
+            with self.subTest(kind=kind, ref=ref):
+                status, data = await env.send("POST", "/api/instances", {"name": "lab", "channel": "git", "ref_kind": kind, "ref": ref})
+                self.assertEqual(status, 400, data)
+        job = await self.create("lab", channel="git", ref_kind="branch", ref="no-such-branch")
+        self.assertEqual(job["state"], "failed")
+        self.assertIn("has no branch no-such-branch", job["error"])
+        job = await self.create("lab", channel="git", ref_kind="branch", ref="test-tag")  # a tag, asked as a branch
+        self.assertEqual(job["state"], "failed")
+        self.assertEqual(env.stub.codeload_paths, [])  # nothing downloaded before the ref was found in HRI's repository
+        job = await self.create("lab", channel="git", ref_kind="tag", ref="test-tag")
+        self.assertEqual(job["state"], "succeeded", job)
+        self.assertEqual(env.stub.codeload_paths, ["refs/tags/test-tag"])
+        m = self.marker("lab")
+        self.assertEqual((m["ref_kind"], m["ref"], m["sha"]), ("tag", "test-tag", env.stub.tags["test-tag"]))
+        status, _ = await env.send("POST", "/api/instances/lab/update", {"ref_kind": "branch", "ref": "pull/2/head"})
+        self.assertEqual(status, 400)
 
     async def test_a_failed_install_is_rolled_back(self):
         env = self.env
@@ -134,9 +156,9 @@ class FlowTest(unittest.IsolatedAsyncioTestCase):
     async def test_a_failed_download_writes_nothing(self):
         job = await self.create(version="0.99.0")
         self.assertEqual(job["state"], "failed")
-        job = await self.create("lab", channel="git", ref="no-such-branch")
+        job = await self.create("lab", channel="git", ref_kind="branch", ref="no-such-branch")
         self.assertEqual(job["state"], "failed")
-        self.assertIn("not found", job["error"])
+        self.assertIn("has no branch", job["error"])
         self.assertEqual(os.listdir(self.env.local_apps), [])
         self.assertEqual(self.env.changing_calls(), [])
 

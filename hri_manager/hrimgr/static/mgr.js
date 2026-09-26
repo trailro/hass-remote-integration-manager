@@ -70,7 +70,7 @@ function versionCell(i) {
   return out;
 }
 function channelCell(i) {
-  if (i.channel === 'git') return `<span class="tag warn" title="testing build from source">git · testing</span><span class="sub">${esc(i.ref)} @ ${esc((i.sha || '').slice(0, 7))}</span>`;
+  if (i.channel === 'git') return `<span class="tag warn" title="testing build from source">git · testing</span><span class="sub">${esc(i.ref_kind)} ${esc(i.ref)} @ ${esc((i.sha || '').slice(0, 12))}</span>`;
   if (i.channel === 'release') return '<span class="tag">release</span>';
   return '<span class="tag bad">unknown</span>';
 }
@@ -107,13 +107,14 @@ async function loadInstances() {
   body.querySelectorAll('button[data-job]').forEach(b => { b.onclick = () => watch(b.dataset.job); });
 }
 
-function dialog({title, text, ok, danger, versions, selected, ref, data, name}) {
+function dialog({title, text, ok, danger, versions, selected, ref, refKind, data, name}) {
   const d = $('#confirm');
   $('#cf-title').textContent = title; $('#cf-text').textContent = text;
   const okb = $('#cf-ok'); okb.textContent = ok; okb.className = danger ? 'danger' : 'primary';
   $('#cf-version-row').hidden = !versions;
   if (versions) $('#cf-version').innerHTML = versions.map(v => `<option value="${esc(v.version)}"${v.version === selected ? ' selected' : ''}>${esc(v.version)}${v.prerelease ? ' (pre-release)' : ''}${v.version === latest ? ' (latest)' : ''}</option>`).join('');
   $('#cf-ref-row').hidden = ref === undefined; $('#cf-ref').value = ref || '';
+  $('#cf-kind-row').hidden = ref === undefined; $('#cf-kind').value = refKind || 'branch';
   $('#cf-data-row').hidden = !data; $('#cf-data').checked = false;
   $('#cf-name-row').hidden = true; $('#cf-name').value = ''; $('#cf-name-hint').textContent = name || '';
   const sync = () => {
@@ -124,7 +125,7 @@ function dialog({title, text, ok, danger, versions, selected, ref, data, name}) 
   $('#cf-data').onchange = sync; $('#cf-name').oninput = sync; sync();
   d.returnValue = '';
   return new Promise(resolve => {
-    d.onclose = () => resolve(d.returnValue === 'ok' ? {version: $('#cf-version').value, ref: $('#cf-ref').value.trim(), removeData: $('#cf-data').checked, confirm: $('#cf-name').value} : null);
+    d.onclose = () => resolve(d.returnValue === 'ok' ? {version: $('#cf-version').value, ref: $('#cf-ref').value.trim(), refKind: $('#cf-kind').value, removeData: $('#cf-data').checked, confirm: $('#cf-name').value} : null);
     d.showModal();
   });
 }
@@ -134,9 +135,9 @@ async function act(action, name) {
   let r;
   if (action === 'update') {
     if (i.channel === 'git') {
-      const c = await dialog({title: `Rebuild ${name}`, text: 'Downloads the ref again and rebuilds the app on this machine when its commit changed. The app restarts; its data stays.', ok: 'Rebuild', ref: i.ref || ''});
+      const c = await dialog({title: `Rebuild ${name}`, text: 'Downloads the branch or tag of hass-remote-integration again and, when its commit changed, builds and runs that code on this machine. For testing only. The app restarts; its data stays.', ok: 'Rebuild', ref: i.ref || '', refKind: i.ref_kind});
       if (!c) return;
-      r = await send('POST', `api/instances/${encodeURIComponent(name)}/update`, {ref: c.ref || undefined});
+      r = await send('POST', `api/instances/${encodeURIComponent(name)}/update`, c.ref ? {ref_kind: c.refKind, ref: c.ref} : {});
     } else {
       const choices = releases.filter(x => vcmp(x.version, i.version) >= 0);
       if (!choices.length) { flash('No release at or above ' + i.version + ' is known yet.', 'err'); return; }
@@ -188,14 +189,14 @@ async function watch(id) {
 
 function syncForm() {
   const git = $('#c-channel').value === 'git';
-  $('#c-version-row').hidden = git; $('#c-ref-row').hidden = !git; $('#c-git-note').hidden = !git;
+  $('#c-version-row').hidden = git; $('#c-ref-row').hidden = !git; $('#c-kind-row').hidden = !git; $('#c-git-note').hidden = !git;
   $('#c-slug').textContent = 'local_hri_' + ($('#c-name').value || '…');
 }
 
 $('#create').addEventListener('submit', async ev => {
   ev.preventDefault();
   const name = $('#c-name').value.trim(), channel = $('#c-channel').value;
-  const body = channel === 'git' ? {name, channel, ref: $('#c-ref').value.trim()} : {name, channel, version: $('#c-version').value};
+  const body = channel === 'git' ? {name, channel, ref_kind: $('#c-kind').value, ref: $('#c-ref').value.trim()} : {name, channel, version: $('#c-version').value};
   const b = $('#c-go'); b.disabled = true;
   const r = await send('POST', 'api/instances', body);
   b.disabled = false;

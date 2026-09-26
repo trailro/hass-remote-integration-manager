@@ -13,7 +13,8 @@ First release, **experimental**.
 - Starts, stops, restarts and deletes instances; deleting keeps the instance's data unless you ask (and type its
   name).
 - Repairs an instance whose definition folder went missing after a partial backup restore.
-- A git channel, for testing: builds HRI from any branch, tag or commit on the device.
+- A git channel, for testing: builds HRI from a branch or tag of its own repository on the device (checked to exist
+  there first; never a commit, a pull request or a fork). That branch's code and Dockerfile run on the device.
 - Lists the published hass-remote-integration app, and other local apps named like instances, without touching
   them.
 - Security: the manager role is restricted in code to an allow-list of Supervisor calls, and only apps whose

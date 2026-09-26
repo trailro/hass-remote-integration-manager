@@ -70,7 +70,9 @@ class Stub:
         self.unexpected: list[tuple[str, str]] = []
         self.fail: dict[tuple[str, str], str] = {}  # (method, supervisor path) -> error message, once
         self.releases = ["0.24.0", "0.25.0", "0.25.1", "0.26.0b1"]
-        self.refs = {"main": sha_of("main-1")}
+        self.refs = {"main": sha_of("main-1")}  # branches
+        self.tags = {"test-tag": sha_of("test-tag")}  # tags that are not releases
+        self.codeload_paths: list[str] = []
         self.users: object = [dict(u) for u in USERS]  # what config/auth/list answers (tests put other shapes here)
         self.core_down = False
         self.ws_messages: list[object] = []  # every message the manager sent to Core
@@ -245,25 +247,40 @@ class Stub:
         out.append({"tag_name": "v9.9.9", "draft": True})
         return web.json_response(out)
 
-    def tarball_for(self, ref: str) -> bytes | None:
-        if ref.startswith("refs/tags/v"):
-            version = ref[len("refs/tags/v"):]
-            if version not in self.releases:
-                return None
-            # at a release tag HRI's app/config.yaml still names the previous version
-            return make_tarball(f"hass-remote-integration-{version}", hri_files("0.24.0"), sha_of("tag-" + version))
-        if ref in self.refs:
-            return make_tarball(f"hass-remote-integration-{ref}", hri_files("0.25.0"), self.refs[ref])
-        for sha in self.refs.values():
-            if len(ref) >= 7 and sha.startswith(ref):
-                return make_tarball(f"hass-remote-integration-{sha}", hri_files("0.25.0"), sha)
+    def ref_sha(self, full: str) -> str | None:
+        """The commit of refs/heads/<branch> or refs/tags/<tag>, as HRI's repository has them."""
+        if full.startswith("refs/heads/"):
+            return self.refs.get(full[len("refs/heads/"):])
+        if full.startswith("refs/tags/v") and full[len("refs/tags/v"):] in self.releases:
+            return sha_of("tag-" + full[len("refs/tags/v"):])
+        if full.startswith("refs/tags/"):
+            return self.tags.get(full[len("refs/tags/"):])
         return None
 
+    def tarball_for(self, ref: str) -> bytes | None:
+        """Only full refs: the manager never asks codeload for a short name, a commit or a pull request."""
+        sha = self.ref_sha(ref)
+        if sha is None:
+            return None
+        if ref.startswith("refs/tags/v"):
+            version = ref[len("refs/tags/v"):]
+            # at a release tag HRI's app/config.yaml still names the previous version
+            return make_tarball(f"hass-remote-integration-{version}", hri_files("0.24.0"), sha)
+        return make_tarball(f"hass-remote-integration-{ref.rsplit('/', 1)[-1]}", hri_files("0.25.0"), sha)
+
     async def codeload(self, request):
+        self.codeload_paths.append(request.match_info["ref"])
         data = self.tarball_for(request.match_info["ref"])
         if data is None:
             return web.Response(status=404, text="404: Not Found")
         return web.Response(body=data, content_type="application/x-gzip")
+
+    async def gh_ref(self, request):
+        full = "refs/" + request.match_info["ref"]
+        sha = self.ref_sha(full)
+        if sha is None:
+            return web.json_response({"message": "Not Found"}, status=404)
+        return web.json_response({"ref": full, "object": {"sha": sha, "type": "commit"}})
 
     # ---------------------------------------------------------------- the stub's own
 
@@ -295,6 +312,7 @@ class Stub:
         app.router.add_get("/sv/info", self.info)
         app.router.add_get("/sv/core/websocket", self.core_websocket)
         app.router.add_get("/gh/repos/trailro/hass-remote-integration/releases", self.gh_releases)
+        app.router.add_get("/gh/repos/trailro/hass-remote-integration/git/ref/{ref:.+}", self.gh_ref)
         app.router.add_get("/cl/trailro/hass-remote-integration/tar.gz/{ref:.+}", self.codeload)
         app.router.add_get("/_stub/state", self.stub_state)
         app.router.add_post("/_stub/control", self.stub_control)

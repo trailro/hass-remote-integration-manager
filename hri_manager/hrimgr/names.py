@@ -25,8 +25,11 @@ MIN_VERSION = (0, 25, 0)
 # HRI's release tags: v0.25.0, and pre-releases the way Home Assistant writes them (v0.26.0b1, v0.26.0rc1)
 TAG_RE = re.compile(r"v(\d{1,4})\.(\d{1,4})\.(\d{1,4})(?:(a|b|rc)(\d{1,4}))?")
 VERSION_RE = re.compile(r"(\d{1,4})\.(\d{1,4})\.(\d{1,4})(?:(a|b|rc)(\d{1,4}))?")
-# a git ref the git channel may name: a branch, a tag or a commit
+# the git channel builds a branch or a tag of HRI's own repository, named without refs/: never a commit, a pull
+# request (refs/pull/N/head: anyone can open one) or a fork's commit, which codeload serves under HRI's name too
+REF_KINDS = ("branch", "tag")
 REF_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/-]{0,99}")
+BARE_SHA_RE = re.compile(r"[0-9a-fA-F]{7,40}")
 SHA_RE = re.compile(r"[0-9a-f]{40}")
 GIT_VERSION_RE = re.compile(r"0\.0\.0-([0-9a-f]{7,40})")
 
@@ -95,10 +98,21 @@ def supported_version(version: str) -> bool:
     return parsed is not None and parsed >= (*MIN_VERSION, 1, 0)
 
 
-def validate_ref(ref: object) -> str:
-    if not isinstance(ref, str) or not REF_RE.fullmatch(ref) or ".." in ref or "//" in ref or ref.endswith(("/", ".lock", ".")):
-        raise ValueError("A git ref is a branch, tag or commit: letters, digits and . _ / -, at most 100 characters.")
-    return ref
+def validate_ref(kind: object, ref: object) -> tuple[str, str]:
+    """A branch or a tag of HRI, by its short name: (kind, name), or ValueError."""
+    if kind not in REF_KINDS:
+        raise ValueError("A git ref is a branch or a tag of hass-remote-integration: choose which.")
+    if (not isinstance(ref, str) or not REF_RE.fullmatch(ref) or ".." in ref or "//" in ref
+            or ref.endswith(("/", ".lock", ".")) or any(p.startswith(".") for p in ref.split("/"))):
+        raise ValueError(f"A {kind} name is letters, digits and . _ / -, at most 100 characters.")
+    if ref.lower().startswith(("refs/", "pull/")) or BARE_SHA_RE.fullmatch(ref):
+        raise ValueError(f"Name a {kind} of hass-remote-integration itself: not a commit, a pull request or a full "
+                         "refs/ path.")
+    return kind, ref
+
+
+def full_ref(kind: str, ref: str) -> str:
+    return f"refs/{'heads' if kind == 'branch' else 'tags'}/{ref}"
 
 
 def git_version(sha: str) -> str:
