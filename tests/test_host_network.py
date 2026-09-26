@@ -93,12 +93,28 @@ class StampTest(unittest.TestCase):
         without = {k: v for k, v in hri_files().items() if k != "entrypoint.py"}
         self.assertFalse(stamp.reads_dynamic_port(archive(without)))
         for text in (b"# APP_DYNAMIC_PORT = True\n", b"APP_DYNAMIC_PORT = False\n", b"x = 'APP_DYNAMIC_PORT = True'\n",
-                     b"    APP_DYNAMIC_PORT = True\n", b"APP_DYNAMIC_PORT = True or False\n"):
+                     b"    APP_DYNAMIC_PORT = True\n", b"APP_DYNAMIC_PORT = True or False\n",
+                     # a line of a multi-line string, which a search of the lines would take
+                     b'"""HRI.\n\nAPP_DYNAMIC_PORT = True\n"""\n', b"X = '''\nAPP_DYNAMIC_PORT = True\n'''\n",
+                     # not at the top level
+                     b"if False:\n    APP_DYNAMIC_PORT = True\n", b"def f():\n    APP_DYNAMIC_PORT = True\n",
+                     b"class C:\n    APP_DYNAMIC_PORT = True\n",
+                     # the last assignment decides; a truthy value that is not True; a bare annotation
+                     b"APP_DYNAMIC_PORT = True\nAPP_DYNAMIC_PORT = False\n", b"APP_DYNAMIC_PORT = 1\n",
+                     b"APP_DYNAMIC_PORT = 'True'\n", b"APP_DYNAMIC_PORT: bool\n",
+                     # not Python, not UTF-8, a NUL
+                     b"APP_DYNAMIC_PORT = True\ndef (:\n", b"APP_DYNAMIC_PORT = True\nx = '\xff'\n",
+                     b"APP_DYNAMIC_PORT = True\n\x00\n"):
             with self.subTest(text=text):
                 self.assertFalse(stamp.reads_dynamic_port(archive({**without, "entrypoint.py": text})))
-        for text in (b"APP_DYNAMIC_PORT = True\n", b"a = 1\nAPP_DYNAMIC_PORT = True  # the Supervisor's port\r\n"):
+        for text in (b"APP_DYNAMIC_PORT = True\n", b"a = 1\nAPP_DYNAMIC_PORT = True  # the Supervisor's port\r\n",
+                     b"APP_DYNAMIC_PORT: bool = True\n", b"APP_DYNAMIC_PORT = (\n    True\n)\n",
+                     b'"""HRI."""\nimport os\n\nAPP_DYNAMIC_PORT = False\nAPP_DYNAMIC_PORT = True\n'):
             with self.subTest(text=text):
                 self.assertTrue(stamp.reads_dynamic_port(archive({**without, "entrypoint.py": text})))
+        # larger than the manager reads
+        big = b"APP_DYNAMIC_PORT = True\n" + b"#" * stamp.MAX_DYNAMIC_PORT_FILE + b"\n"
+        self.assertFalse(stamp.reads_dynamic_port(archive({**without, "entrypoint.py": big})))
         # in another folder than the tree's root: not HRI's entrypoint
         moved = {**without, "tools/entrypoint.py": b"APP_DYNAMIC_PORT = True\n"}
         self.assertFalse(stamp.reads_dynamic_port(archive(moved)))
