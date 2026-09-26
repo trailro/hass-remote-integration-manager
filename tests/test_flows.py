@@ -506,6 +506,20 @@ class FlowTest(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(env.stub.codeload_paths, ["refs/tags/v0.25.0"])
                 self.assertNotIn("privileged", self.config("garage"))
 
+    async def test_a_repair_whose_build_fails_puts_the_registry_entry_back(self):
+        env = self.env
+        await self.create()
+        env.registry.update("garage", updated_at="2020-01-01T00:00:00+00:00", stamp_version=0)
+        before = env.registry.get("garage")
+        shutil.rmtree(self.folder("garage"))
+        await env.sv.reload_store()
+        with mock.patch.object(stamp, "find_configs", return_value=["config.yaml", "docs/config.yaml"]):
+            job = await env.job(await env.send("POST", "/api/instances/garage/repair"))
+        self.assertEqual(job["state"], "failed")
+        self.assertIn("more than one app", job["error"])
+        self.assertEqual(env.registry.get("garage"), before)
+        self.assertFalse(os.path.lexists(self.folder("garage")))
+
     def _hand_made_app(self, folder="my_garage", slug="hri_garage"):
         """A local app someone wrote by hand in another folder, with an instance's slug and HRI's url, installed."""
         path = os.path.join(self.env.local_apps, folder)
