@@ -938,13 +938,15 @@ class Manager:
         """Right after an install or update, before the installed app is compared with the definition: the folder is
         still what the manager wrote, and no decoy has appeared; either may be what the Supervisor installed (a store
         reload by anyone, the Supervisor's own every 3 hours among them, can come between the last check and the
-        install).  Tampered otherwise.  When the folder could not be searched, why the app must be held (not
-        contained: nothing was found), for the caller."""
+        install).  Tampered for a decoy of this instance's slug.  For one that names none (the manager cannot read
+        it, or could not search the folder): why the app must be held, not contained (nothing of it was found), for the
+        caller; as the start's check does (_recheck).  A decoy of another instance is not this one's: the next install
+        or update refuses while it is there."""
         await self._check_tree(managed.slug, manifest, installed=True)
-        found = await self._decoys()
-        decoys = [d for d in found if not d.scan_failed]
-        if decoys:
-            raise Tampered(f"after the install or update, {self._decoy_text(decoys)}")
+        found = self._decoys_of(await self._decoys(), managed.slug)
+        named = [d for d in found if d.slug is not None]
+        if named:
+            raise Tampered(f"after the install or update, {self._decoy_text(named)}")
         if found:
             return (f"after the install or update, {self._decoy_text(found)}; so the manager could not check that the "
                     f"Supervisor installed {managed.slug} from its definition")

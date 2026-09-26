@@ -1218,6 +1218,37 @@ class DecoyFlowTest(FlowBase):
         job = await env.job(await env.send("POST", "/api/instances/garage/finish"))  # searchable again: Check again
         self.assertEqual(job["state"], "succeeded", job)
 
+    async def test_after_an_install_only_a_decoy_of_the_instance_contains_it(self):
+        """F4: right after the install, as at the start's check: a decoy of another instance does not touch this one
+        (the next install or update refuses while it is there); one that names none (the manager cannot read it) holds
+        it; one of its own slug contains it (test_a_decoy_that_appears_around_the_install_is_contained)."""
+        env = self.env
+        install = env.sv.install
+
+        def around_the_install(plant):
+            async def plant_then_install(managed):
+                plant()
+                await install(managed)
+            return mock.patch.object(env.sv, "install", side_effect=plant_then_install)
+
+        with around_the_install(lambda: self.decoy(slug="hri_attic", name="HRI Attic")):
+            job = await self.create()
+        self.assertEqual(job["state"], "succeeded", job)
+        self.assertEqual(env.stub.installed["local_hri_garage"]["state"], "started")
+        shutil.rmtree(os.path.join(env.local_apps, "x"))
+
+        def fifo():
+            os.makedirs(os.path.join(env.local_apps, "f"))
+            os.mkfifo(os.path.join(env.local_apps, "f", "config.yaml"))
+
+        with around_the_install(fifo):
+            job = await self.create("lab")
+        self.assertEqual(job["state"], "failed", job)
+        self.assertIn("'f/config.yaml' in the local apps folder is not a regular file", job["error"])
+        self.assertIn("local_hri_lab", env.stub.installed)  # held, not uninstalled
+        self.assertEqual(env.stub.installed["local_hri_lab"]["state"], "stopped")
+        self.assertTrue(env.registry.get("lab")["tampered"]["unverified"])
+
     async def test_a_folder_changed_around_the_update_is_contained(self):
         """R2-3: the folder is checked right after the update too, before the installed app is compared."""
         env = self.env
