@@ -168,10 +168,12 @@ backup **leaves the local apps folder out**: the backup still names the folder `
 has moved it to `apps/local` (an upstream issue of the Supervisor, not of this app). So:
 
 - **After a full restore**, instances come back **detached**: installed and running, but without a definition, so they
-  cannot be updated. The manager **writes their definitions again by itself**: when it starts, and when its page
-  lists the instances (at most every 5 minutes), every instance of its registry that is installed, detached and
-  without its folder gets a repair job, run by "automatic repair", written to the manager's log, and shown on the
-  instance's row. If one fails (GitHub unreachable, say), the row says why and when the next try is, and offers
+  cannot be updated. The manager **writes their definitions again by itself**, whether or not anyone opens its page:
+  it checks when it starts and then every 5 minutes (and whenever its page lists the instances). The Supervisor
+  restores the apps one after another, usually the manager first, so each instance is repaired at the first check
+  after its own restore: within about 5 minutes, or at once when the page is open. Every instance of its registry
+  that is installed, detached and without its folder gets a repair job, run by "automatic repair", written to the
+  manager's log, and shown on the instance's row. If one fails (GitHub unreachable, say), the row says why and when the next try is, and offers
   **Repair**; each further failure doubles the wait (5 minutes, 10, 20, ... at most a day), and only the first
   failure is a warning in the log. Apps that are not in the registry are never touched.
 - **After a partial restore of an instance without the local apps folder**: the same.

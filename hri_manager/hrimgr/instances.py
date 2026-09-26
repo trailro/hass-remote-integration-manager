@@ -177,9 +177,11 @@ class Manager:
 
     def _auto_repair(self, names_: list[str]) -> dict[str, str]:
         """Start a repair job for each of ``names_`` (instances of the registry, installed, detached, without a
-        folder), at most once every ``auto_repair_interval`` seconds: {name: job id} of those started."""
+        folder), at most once every ``auto_repair_interval`` seconds: {name: job id} of those started.  A check with
+        nothing to repair does not count: after a full restore the Supervisor starts the manager first and restores
+        the instances after it, one by one, and each is repaired at the next check."""
         now = time.monotonic()
-        if self.auto_repair_interval is None or (
+        if self.auto_repair_interval is None or not names_ or (
                 self._auto_checked is not None and now - self._auto_checked < self.auto_repair_interval):
             return {}
         self._auto_checked = now
@@ -248,14 +250,23 @@ class Manager:
         return done
 
     async def auto_repair_check(self) -> None:
-        """The check when the manager starts: copies of the definitions it lacks, then the list, which starts the
-        automatic repairs."""
-        for name in await asyncio.to_thread(self.copy_missing):
-            _LOGGER.info("instance %s: a copy of its definition is kept in /data now", name)
+        """One check: the list, which starts the automatic repairs."""
         try:
             await self.instances()
         except (SupervisorError, NotAllowed, RegistryError) as err:
-            _LOGGER.warning("the automatic repair check at start did not run: %s", err)
+            _LOGGER.warning("the automatic repair check did not run: %s", err)
+
+    async def auto_repair_loop(self) -> None:
+        """From the manager's start, until it stops (cancelled): copies of the definitions it lacks, then a check
+        every ``auto_repair_interval`` seconds, whether or not anyone opens the page.  Each instance's back-off holds
+        (_auto_repair).  Without an interval, one check."""
+        for name in await asyncio.to_thread(self.copy_missing):
+            _LOGGER.info("instance %s: a copy of its definition is kept in /data now", name)
+        while True:
+            await self.auto_repair_check()
+            if self.auto_repair_interval is None:
+                return
+            await asyncio.sleep(self.auto_repair_interval)
 
     async def _info(self, slug: str) -> dict | None:
         try:
