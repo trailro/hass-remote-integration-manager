@@ -290,7 +290,7 @@ def _template(archive: tarsafe.Archive) -> dict:
     return parse_template(archive.read("app/config.yaml"))
 
 
-def _app_extras(archive: tarsafe.Archive) -> dict[str, bytes]:
+def app_extras(archive: tarsafe.Archive) -> dict[str, bytes]:
     """DOCS.md, CHANGELOG.md, icons and translations of app/, by their path relative to app/."""
     out = {}
     for rel in archive.files:
@@ -308,7 +308,7 @@ def build_release(archive: tarsafe.Archive, dest: str, name: str, version: str, 
     """Fill ``dest`` with a release instance's definition: the stamped config and HRI's app files."""
     config = stamp(_template(archive), name, version, "release", bluetooth)
     children.write_file(dest, "config.yaml", dump(config, source))
-    for sub, data in sorted(_app_extras(archive).items()):
+    for sub, data in sorted(app_extras(archive).items()):
         children.write_file(dest, sub, data)
     return config
 
@@ -341,7 +341,7 @@ def build_git(archive: tarsafe.Archive, dest: str, name: str, version: str, sha:
                             "Supervisor would use to build or confine the app instead of HRI's Dockerfile: refused")
     stamped = stamp(_template(archive), name, version, "git", bluetooth)
     config = stamped if config is None else config
-    extras = _app_extras(archive)
+    extras = app_extras(archive)
     tarsafe.extract(archive, dest)
     notes = [f"skipped link {tarsafe.show(rel)}" for rel in archive.skipped]
     for rel in find_configs(dest):

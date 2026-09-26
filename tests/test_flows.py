@@ -13,7 +13,7 @@ from unittest import mock
 
 import yaml
 
-from hrimgr import VERSION, children, stamp
+from hrimgr import VERSION, children, copies, stamp
 from hrimgr.jobs import Job, JobFailed
 from hrimgr.registry import RegistryError
 from hrimgr.supervisor import SupervisorError
@@ -820,6 +820,37 @@ class FlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("more than one app", job["error"])
         self.assertEqual(env.registry.get("garage"), before)
         self.assertFalse(os.path.lexists(self.folder("garage")))
+
+    async def test_the_copy_is_the_build_s_own_bytes_never_the_folder_read_back(self):
+        """A writer turns translations/ into a link to another folder (the manager's /data) right after the build:
+        nothing of it reaches the manager's copy, which later writes definitions back."""
+        env = self.env
+        secret_dir = os.path.join(env.data, "elsewhere")
+        os.makedirs(secret_dir)
+        with open(os.path.join(secret_dir, "options.json"), "w", encoding="utf-8") as fh:
+            json.dump({"github_token": "ghp_stolen_token_123"}, fh)
+        with open(os.path.join(secret_dir, "en.yaml"), "w", encoding="utf-8") as fh:
+            fh.write("configuration: {x: ghp_stolen_token_123}\n")
+        walk = copies._walk
+
+        def walk_then_swap(base):  # the folder listed first, its translations/ swapped for a link afterwards
+            found = walk(base)
+            translations = os.path.join(base, "translations")
+            if base.startswith(env.local_apps) and os.path.isdir(translations) and not os.path.islink(translations):
+                with open(os.path.join(translations, "options.json"), "w", encoding="utf-8") as fh:
+                    fh.write("{}")
+                found = sorted(found + ["translations/options.json"])
+                shutil.rmtree(translations)
+                os.symlink(secret_dir, translations)
+            return found
+
+        with mock.patch.object(copies, "_walk", side_effect=walk_then_swap):
+            job = await self.create()
+        self.assertEqual(job["state"], "succeeded", job)
+        kept = self.read_tree(self.copy_dir("garage"))
+        self.assertIn("translations/en.yaml", kept)
+        self.assertNotIn("translations/options.json", kept)
+        self.assertFalse(any(b"ghp_stolen" in data for data in kept.values()))
 
     async def test_a_copy_is_used_only_as_stamping_writes_it(self):
         """A copy's config must be what stamping gives (stamping it again changes nothing), its other files UTF-8 text

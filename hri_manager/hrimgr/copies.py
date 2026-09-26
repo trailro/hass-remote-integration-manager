@@ -36,8 +36,9 @@ PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
 TMP_PREFIX = ".tmp-"
 OLD_PREFIX = ".old-"
 META_FIELDS = ("name", "instance_id", "channel", "version", "ref_kind", "ref", "sha", "stamp_version", "template_source")
-# never translations/config.*: the store would read it as a second app
-_TRANSLATION_RE = re.compile(r"translations/(?!config\.)[A-Za-z0-9_-]{1,40}\.(?:yaml|yml|json)")
+# a language's translation only (en.yaml, pt-BR.yaml): never translations/config.* (the store would read it as a
+# second app), never another name a writer could plant (options.json)
+_TRANSLATION_RE = re.compile(r"translations/[a-z]{2}(?:-[A-Za-z0-9]{1,8})?\.(?:yaml|yml|json)", re.ASCII)
 
 
 class CopyError(Exception):
@@ -96,14 +97,33 @@ def _walk(base: str) -> list[str]:
     return sorted(out)
 
 
-def save(root: str, name: str, instance_folder: str, marker: dict, bluetooth: bool = False) -> list[str]:
-    """Copy what ``is_copied`` names from ``instance_folder`` (just written by the manager) to ``root/<name>``,
-    replacing any earlier copy.  Returns the files copied.  ``bluetooth``: the registry's choice for the instance."""
+def read_definition(instance_folder: str, channel: str) -> dict[str, bytes]:
+    """What a copy of ``instance_folder`` would hold, read from the folder (only for a definition the manager has no
+    bytes of: one written by 0.1.0), through folder descriptors: no link followed, no FIFO opened."""
+    files = {"config.yaml": children.read_file(instance_folder, "config.yaml")}
+    if channel != "release":
+        return files
+    for rel in stamp.APP_FILES:
+        try:
+            files[rel] = children.read_file(instance_folder, rel)
+        except FileNotFoundError:
+            pass
+    try:
+        listed = children.list_folder(instance_folder, "translations")
+    except FileNotFoundError:
+        listed = []
+    for entry in sorted(listed):
+        if is_copied(f"translations/{entry}", channel):
+            files[f"translations/{entry}"] = children.read_file(instance_folder, f"translations/{entry}")
+    return files
+
+
+def save(root: str, name: str, files: dict[str, bytes], marker: dict, bluetooth: bool = False) -> list[str]:
+    """Keep what ``is_copied`` names of ``files`` (the bytes the manager's build wrote into the instance's folder,
+    never read back from that folder, which others can write) as ``root/<name>``, replacing any earlier copy.
+    Returns the files copied.  ``bluetooth``: the registry's choice for the instance."""
     channel = marker.get("channel")
-    files = {}
-    for rel in _walk(instance_folder):
-        if is_copied(rel, channel):
-            files[rel] = read_file(os.path.join(instance_folder, *rel.split("/")))
+    files = {rel: data for rel, data in files.items() if is_copied(rel, channel)}
     if "config.yaml" not in files:
         raise CopyError(f"{names.folder_name(name)} has no config.yaml")
     if sum(len(d) for d in files.values()) > MAX_TOTAL:

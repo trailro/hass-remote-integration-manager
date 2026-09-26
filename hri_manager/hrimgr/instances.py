@@ -290,8 +290,8 @@ class Manager:
                 continue
             try:
                 entry = self.registry.get(name) or {}
-                copies.save(self.copies_root, name, children.child_path(self.root, name), marker,
-                            entry.get("bluetooth") is True)
+                files = copies.read_definition(children.child_path(self.root, name), marker.get("channel"))
+                copies.save(self.copies_root, name, files, marker, entry.get("bluetooth") is True)
             except (copies.CopyError, children.UnsafePath, OSError, RegistryError) as err:
                 _LOGGER.warning("the copy of %s's definition was not saved: %s", name, err)
                 continue
@@ -693,12 +693,12 @@ class Manager:
             except OSError as err:
                 _LOGGER.warning("the copy of %s's definition was not removed: %s", name, err)
 
-    async def _save_copy(self, job: Job, managed: children.Managed, bluetooth: bool) -> None:
-        """Keep a copy of the definition just written in /data (copies.py).  A failure costs only the offline Repair:
-        the job goes on.  ``bluetooth``: the instance's choice, as the registry records it."""
+    async def _save_copy(self, job: Job, managed: children.Managed, bluetooth: bool, files: dict[str, bytes]) -> None:
+        """Keep a copy of the definition just written in /data (copies.py), from ``files``, the bytes the build wrote
+        (_builder's "files"): never read back from the folder, which others can write.  A failure costs only the
+        offline Repair: the job goes on.  ``bluetooth``: the instance's choice, as the registry records it."""
         try:
-            saved = await asyncio.to_thread(copies.save, self.copies_root, managed.name,
-                                            children.child_path(self.root, managed.name), managed.marker, bluetooth)
+            saved = await asyncio.to_thread(copies.save, self.copies_root, managed.name, files, managed.marker, bluetooth)
         except (copies.CopyError, children.UnsafePath, names.InvalidName, OSError) as err:
             job.log(f"no copy of the definition kept in the manager's /data ({err}): a Repair would download it")
             _LOGGER.warning("the copy of %s's definition was not saved: %s", managed.name, err)
@@ -716,7 +716,7 @@ class Manager:
                  copy: copies.Copy | None = None, built: dict | None = None, bluetooth: bool = False):
         """``copy``: Repair from the manager's copy, of a release (its files as they are: no archive) or of a git
         instance (its stamped config over the archive of its commit).  ``built``: gets the stamped config written, as
-        "config" (what the Supervisor is then checked to report)."""
+        "config" (what the Supervisor is then checked to report), and the bytes of the files a copy keeps, as "files"."""
         def build(tmp: str) -> dict:
             try:
                 return fill(tmp)
@@ -725,15 +725,17 @@ class Manager:
                     archive.close()  # read whole by now
 
         def fill(tmp: str) -> dict:
+            extras: dict[str, bytes] = {}
             if copy is not None and channel == "release":
                 # the config dumped by the manager from the checked mapping, never the copy's bytes
                 config = copy.config
                 children.write_file(tmp, "config.yaml", stamp.dump(config, source))
-                for rel, data in sorted(copy.files.items()):
-                    if rel != "config.yaml":
-                        children.write_file(tmp, rel, data)
+                extras = {rel: data for rel, data in copy.files.items() if rel != "config.yaml"}
+                for rel, data in sorted(extras.items()):
+                    children.write_file(tmp, rel, data)
             elif channel == "release":
                 config = stamp.build_release(archive, tmp, name, version, source, bluetooth)
+                extras = stamp.app_extras(archive)
             else:
                 config, notes = stamp.build_git(archive, tmp, name, version, sha, source,
                                                 config=copy.config if copy is not None else None, bluetooth=bluetooth)
@@ -741,6 +743,7 @@ class Manager:
                     job.log(note)
             if built is not None:
                 built["config"] = config
+                built["files"] = {"config.yaml": stamp.dump(config, source), **extras}
             found = stamp.find_configs(tmp)
             if found != ["config.yaml"]:
                 raise JobFailed(f"the definition would hold more than one app: {found}")
@@ -785,7 +788,7 @@ class Manager:
         except WRITE_ERRORS as err:
             await asyncio.to_thread(self._forget, name, marker["instance_id"])
             raise JobFailed(f"the definition was not written: {err}") from None
-        await self._save_copy(job, managed, bluetooth)
+        await self._save_copy(job, managed, bluetooth, built["files"])
         expected = stamp.expected_view(built["config"], slug)
         installing = False
         try:
@@ -1048,7 +1051,7 @@ class Manager:
                        "the manager starts again")
             job.log(f"warning: {warning}")
             _LOGGER.warning("%s: %s", managed.name, warning)
-        await self._save_copy(job, managed, bluetooth)
+        await self._save_copy(job, managed, bluetooth, built["files"])
         if restamp:
             job.log(f"the definition is stamped by this manager now (stamping {marker.get('stamp_version')} -> "
                     f"{stamp.STAMP_VERSION}); the Supervisor applies it to the running app at its next version change "
@@ -1278,17 +1281,19 @@ class Manager:
         marker["history"] = self._history(history)
         setup_complete = entry.get("setup_complete", True)
         job.log(f"writing {names.folder_name(name)} again for {version}, the installed version")
+        built: dict = {}
         try:
             await asyncio.to_thread(self.registry.put, name, self._registry_entry(marker, setup_complete=setup_complete))
             managed = await asyncio.to_thread(
                 children.write_new, self.root, name,
-                self._builder(job, archive, channel, name, version, sha, marker, source, copy=copy, bluetooth=bluetooth),
+                self._builder(job, archive, channel, name, version, sha, marker, source, copy=copy, built=built,
+                              bluetooth=bluetooth),
                 self.registry)
         except WRITE_ERRORS as err:
             await asyncio.to_thread(self._restore_entry, name, entry, marker["instance_id"])
             raise JobFailed(f"the definition was not written: {err}") from None
         self._clear_auto(name, keep_job=job.id)  # an automatic repair's own note stays: it succeeded
-        await self._save_copy(job, managed, bluetooth)
+        await self._save_copy(job, managed, bluetooth, built["files"])
         await self._wait_store(job, slug, version)
         return {"slug": slug, "version": version}
 
@@ -1376,7 +1381,7 @@ class Manager:
                 raise JobFailed(str(err)) from None
             raise
         self._clear_auto(name)
-        await self._save_copy(job, managed, bluetooth)
+        await self._save_copy(job, managed, bluetooth, built["files"])
         return {"version": version, "state": after.get("state")}
 
     async def _adopt_installed_commit(self, job: Job, name: str, entry: dict, info: dict, ref: tuple[str, str], archive,

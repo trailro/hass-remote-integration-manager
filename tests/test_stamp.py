@@ -7,7 +7,7 @@ import unittest
 
 import yaml
 
-from hrimgr import copies, names, stamp, tarsafe
+from hrimgr import children, copies, names, stamp, tarsafe
 
 from .fakes.tarballs import hri_files, make_tarball, sha_of
 from .helpers import FIXTURE_0252, FIXTURE_CONFIG, tmpdir
@@ -242,7 +242,7 @@ class CopySaveTest(unittest.TestCase):
         root = tmpdir(self)
         marker = {"name": "garage", "instance_id": "a" * 32, "channel": "release", "version": "0.25.0",
                   "template_source": "https://codeload.github.com/x"}
-        return root, lambda: copies.save(root, "garage", self.folder(config), marker)
+        return root, lambda: copies.save(root, "garage", copies.read_definition(self.folder(config), "release"), marker)
 
     def test_what_the_manager_writes_is_kept(self):
         root, save = self.save(stamp.dump(stamp.stamp(template(), "garage", "0.25.0", "release"), "t"))
@@ -261,6 +261,29 @@ class CopySaveTest(unittest.TestCase):
                     save()
                 self.assertLess(time.monotonic() - start, 0.1)
                 self.assertEqual(os.listdir(root), [])
+
+
+class CopySourceTest(unittest.TestCase):
+    """A copy holds the bytes the build wrote; read from a folder only for an old definition, never through a link."""
+
+    def test_translations_are_languages_only(self):
+        for rel, kept in (("translations/en.yaml", True), ("translations/pt-BR.yaml", True), ("translations/de.json", True),
+                          ("translations/options.json", False), ("translations/config.yaml", False),
+                          ("translations/en.yaml.bak", False), ("translations/secrets.yaml", False)):
+            with self.subTest(rel=rel):
+                self.assertIs(copies.is_copied(rel, "release"), kept)
+
+    def test_an_old_definition_is_read_without_following_links(self):
+        base, outside = tmpdir(self), tmpdir(self)
+        with open(os.path.join(outside, "en.yaml"), "w", encoding="utf-8") as fh:
+            fh.write("configuration: {github_token: stolen}\n")
+        folder = os.path.join(base, "hri_garage")
+        os.makedirs(folder)
+        with open(os.path.join(folder, "config.yaml"), "wb") as fh:
+            fh.write(stamp.dump(stamp.stamp(template(), "garage", "0.25.0", "release"), "t"))
+        os.symlink(outside, os.path.join(folder, "translations"))
+        with self.assertRaises(children.UnsafePath):
+            copies.read_definition(folder, "release")
 
 
 class BuildTest(unittest.TestCase):
