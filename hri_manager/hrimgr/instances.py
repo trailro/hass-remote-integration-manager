@@ -102,11 +102,12 @@ class Manager:
             name = names.name_from_slug(slug)
             if name and slug not in seen:
                 entry = self._entry(name, None, app, latest)
+                known = registered.get(name)
                 # detached: the Supervisor has no definition of it anywhere (a hand-made local app with this slug is
-                # not detached, and Repair would write a second definition of its slug)
-                if app.get("url") == names.HRI_URL and app.get("detached") is True:
-                    known = registered.get(name)
-                    if known and (known.get("interrupted") or not known.get("setup_complete")):
+                # not detached, and Repair would write a second definition of its slug); and the manager's registry
+                # holds it: a detached app the manager did not create is not its to repair (Repair would adopt it)
+                if app.get("url") == names.HRI_URL and app.get("detached") is True and known:
+                    if known.get("interrupted") or not known.get("setup_complete"):
                         entry["problem"] = ("install interrupted: the manager stopped while the Supervisor was installing "
                                             "it. Repair writes its definition again; then Finish setup, or Delete")
                     else:
@@ -117,7 +118,9 @@ class Manager:
                 else:
                     others.append({"slug": slug, "name": app.get("name"), "kind": "local", "installed": True,
                                    "state": app.get("state"), "version": app.get("version"),
-                                   "problem": "a local app the manager did not create"})
+                                   "problem": ("not managed: detached, and not in the manager's registry (not created by "
+                                               "this manager)" if app.get("detached") is True
+                                               else "not managed: a local app the manager did not create")})
             elif slug.endswith("_" + names.HRI_SLUG):
                 others.append({"slug": slug, "name": app.get("name"), "kind": "published", "installed": True,
                                "state": app.get("state"), "version": app.get("version"),
@@ -251,6 +254,13 @@ class Manager:
 
     def repair(self, name: str, user: str) -> Job:
         name = self.check_name(name)
+        try:
+            known = self.registry.get(name)
+        except RegistryError as err:
+            raise InvalidRequest(str(err)) from None
+        if known is None:
+            raise InvalidRequest(f"{name} is not in the manager's registry: not created by this manager, so it is not "
+                                 "repaired")
         return self.jobs.start(name, "repair", user, lambda job: self._repair(job, name, user))
 
     def setup(self, name: str, action: str, user: str) -> Job:
@@ -618,9 +628,15 @@ class Manager:
         return {"removed": managed.slug, "data_removed": remove_data}
 
     async def _repair(self, job: Job, name: str, user: str) -> dict:
-        """Write the definition of an installed instance again: from the manager's registry when it has the
-        instance (its channel, branch or tag), else from the installed version (a release only)."""
+        """Write the definition of an installed instance again, from the manager's registry (its channel, branch or
+        tag).  Only for an instance the registry holds: never an app the manager did not create."""
         slug = names.supervisor_slug(name)
+        try:
+            entry = await asyncio.to_thread(self.registry.get, name)
+        except RegistryError as err:
+            raise JobFailed(str(err)) from None
+        if entry is None:
+            raise JobFailed(f"{name} is not in the manager's registry: not created by this manager, left alone")
         if os.path.lexists(os.path.join(self.root, names.folder_name(name))):
             raise JobFailed(f"{names.folder_name(name)} exists: nothing to repair")
         try:
@@ -639,12 +655,8 @@ class Manager:
             raise JobFailed(str(err)) from None
         if info.get("url") != names.HRI_URL:
             raise JobFailed(f"{slug} is not hass-remote-integration (its url is {info.get('url')!r}): left alone")
-        try:
-            entry = await asyncio.to_thread(self.registry.get, name)
-        except RegistryError as err:
-            raise JobFailed(str(err)) from None
         version = str(info.get("version") or "")
-        if entry and entry.get("channel") == "git":
+        if entry.get("channel") == "git":
             try:
                 channel, ref = "git", names.validate_ref(entry.get("ref_kind"), entry.get("ref"))
             except ValueError as err:
@@ -657,7 +669,7 @@ class Manager:
                             "which branch or tag to write again")
         else:
             raise JobFailed(f"cannot tell which HRI {version!r} is")
-        recorded = (entry.get("sha") if entry and channel == "release" and entry.get("channel") == "release"
+        recorded = (entry.get("sha") if channel == "release" and entry.get("channel") == "release"
                     and entry.get("version") == version else None)
         try:
             archive, source = await self._fetch(job, channel, version if channel == "release" else None, ref, recorded=recorded)
@@ -669,14 +681,11 @@ class Manager:
             job.log(f"the {ref[0]} {ref[1]} is now at {sha[:12]}, not the installed {version}: the definition is written "
                     "for the new commit, and Rebuild installs it")
             version = names.git_version(sha)
-        marker = self._marker(name, channel, version, ref, sha, source, user,
-                              instance_id=entry.get("instance_id") if entry else None)
+        marker = self._marker(name, channel, version, ref, sha, source, user, instance_id=entry.get("instance_id"))
         marker["repaired_at"] = marker["updated_at"]
-        if entry:
-            marker["created_at"] = entry.get("created_at") or marker["created_at"]
-        setup_complete = entry.get("setup_complete", True) if entry else True
-        job.log(f"writing {names.folder_name(name)} again for {version}"
-                + (" (from the manager's registry)" if entry else ""))
+        marker["created_at"] = entry.get("created_at") or marker["created_at"]
+        setup_complete = entry.get("setup_complete", True)
+        job.log(f"writing {names.folder_name(name)} again for {version} (from the manager's registry)")
         try:
             await asyncio.to_thread(self.registry.put, name, self._registry_entry(marker, setup_complete=setup_complete))
             await asyncio.to_thread(children.write_new, self.root, name,

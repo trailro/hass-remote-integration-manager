@@ -162,14 +162,16 @@ has moved it to `apps/local` (an upstream issue of the Supervisor, not of this a
   or tag, commit and id) is in the manager's `/data`, which **is** in the manager's own backup. Restore the manager
   with the instances and Repair works from the registry, for the git channel too.
 
-Repair is offered only for an app the Supervisor reports as detached, and runs only if, after a store reload, the
-store still has no definition of its slug.
+Repair is offered only for an app the Supervisor reports as detached **and** that the manager's registry holds (an
+instance this manager created), and runs only if, after a store reload, the store still has no definition of its
+slug. A detached `local_hri_*` app the registry does not hold (one made by hand, say) is listed as not managed, with
+no action: Repair would make it the manager's, and then deletable with its data.
 
 ## Other HRI apps
 
 The published single app (`<repository>_hass_remote_integration`), local apps whose slug looks like an instance but
-that the manager did not create, and `hri_<name>/` folders whose marker the manager's registry does not hold are
-listed under **Other HRI apps**, read-only: the manager offers no action on them. Adopting the single app into the
+that the manager did not create (detached or not), and `hri_<name>/` folders whose marker the manager's registry does
+not hold are listed under **Other HRI apps**, read-only: the manager offers no action on them. Adopting the single app into the
 manager is on the roadmap.
 
 ## Security model
