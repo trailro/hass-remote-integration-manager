@@ -744,7 +744,7 @@ class Manager:
             if body.get("ref") is not None:
                 ref = self.check_ref(body.get("ref_kind"), body.get("ref"))
         if detached is not None:
-            # an instance Repair could not rewrite at its installed version: a newer one, written and installed at once
+            # an instance without its definition: a newer version, written and installed at once
             return self.jobs.start(name, "update", user,
                                    lambda job: self._update_detached(job, name, version, ref, user, requested))
         return self.jobs.start(name, "update", user, lambda job: self._update(job, managed, version, ref, user, requested))
@@ -2307,9 +2307,11 @@ class Manager:
 
     async def _update_detached(self, job: Job, name: str, version: str | None, ref: tuple[str, str] | None,
                                user: str, requested: dict | None = None) -> dict:
-        """Update (release) or Rebuild (git) of an instance whose definition is gone and could not be written again at
-        its installed version: the definition of a NEWER version, written and installed in one job the user asked
-        for.  If the update does not succeed the definition is removed again (the instance stays detached)."""
+        """Update (release) or Rebuild (git) of an instance whose definition is gone (installed, detached, in the
+        registry): the definition of a NEWER version, written and installed in one job the user asked for.  The page
+        offers it for an instance that needs attention (Repair could not write its installed version) and Repair for
+        any other; the API takes it for either.  If the update does not succeed the definition is removed again (the
+        instance stays detached)."""
         slug = names.supervisor_slug(name)
         await self._refuse_marked_now(name)
         # it writes a definition (and removes it again on failure, with a store reload): not while a decoy is there

@@ -339,7 +339,9 @@ has moved it to `apps/local` (an upstream issue of the Supervisor, not of this a
   **Repair** again once the cause is gone. A Rebuild onto a branch or tag whose current commit **is** the installed one
   (a restore brought back another commit than the recorded one) writes that commit's definition, installs nothing,
   and records that branch or tag and commit, after the same checks as Repair (the commit is on HRI's branch or tag,
-  and is the installed version). GitHub being unreachable is not such a case: automatic repair tries again.
+  and is the installed version). GitHub being unreachable is not such a case: automatic repair tries again. The page
+  offers Update or Rebuild of a detached instance only when it needs attention (Repair otherwise); the manager's API
+  takes it for any detached instance of its registry, and writes and installs a newer version the same way.
 
 **If the manager's `/data` is lost** (the manager uninstalled with its data, or a restore without the manager's
 backup), its registry and its copies are gone. By design the manager then takes no instance for its own (anyone who
