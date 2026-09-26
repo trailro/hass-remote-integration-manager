@@ -120,7 +120,21 @@ jobs:
       BRANCH: ${{ github.event.repository.default_branch }}
       IMAGE: ghcr.io/${{ github.repository }}
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          fetch-depth: 0
+      - id: decide
+        name: Decide whether the app version moves
+        # the newest stable release from the releases (see the image job), the version never lowered, and something
+        # to change: only then is the image checked and the file written
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release list --repo "$GITHUB_REPOSITORY" --limit 1000 --json tagName,isPrerelease,isDraft \
+            | python3 .github/app_version.py decide "$TAG" "$IMAGE" hri_manager/config.yaml
       - name: Anyone can pull the image, for both architectures
+        if: steps.decide.outputs.move == 'true'
         # as a Supervisor pulls it: anonymously.  A new package on ghcr.io is private until it is made public
         # (Package settings > Change visibility); until then this fails and the version does not move
         run: |
@@ -138,49 +152,10 @@ jobs:
           if missing:
               sys.exit(f"::error::no {', '.join(sorted(missing))} image in the pushed index")
           PY
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          ref: ${{ github.event.repository.default_branch }}
-          fetch-depth: 0
       - name: Set hri_manager/config.yaml version and image
-        # the newest stable release from the releases (see the image job); the version is never lowered, and the
-        # image: line is added with the first version that has an image
-        env:
-          GH_TOKEN: ${{ github.token }}
+        if: steps.decide.outputs.move == 'true'
         run: |
-          newest=$(gh release list --repo "$GITHUB_REPOSITORY" --limit 1000 --json tagName,isPrerelease,isDraft \
-            | python3 -c 'import json, re, sys; tags = [r["tagName"] for r in json.load(sys.stdin) if not r["isPrerelease"] and not r["isDraft"] and re.fullmatch(r"v\d+\.\d+\.\d+", r["tagName"])]; print(max(tags, key=lambda t: tuple(int(x) for x in t[1:].split("."))) if tags else "")')
-          if [ "$TAG" != "$newest" ]; then
-            echo "tag $TAG is not the newest stable release (${newest:-none}): the app version stays as it is"
-            exit 0
-          fi
-          python3 - "${TAG#v}" "$IMAGE" hri_manager/config.yaml <<'PY'
-          import re, sys
-          version, image, path = sys.argv[1:]
-          with open(path, encoding="utf-8") as fh:
-              text = fh.read()
-          line = re.search(r'^version: "?([^"\n]*)"?$', text, re.M)
-          current = line.group(1)
-          has_image = re.search(r"^image: ", text, re.M) is not None
-          def key(v):
-              m = re.fullmatch(r"(\d+)\.(\d+)\.(\d+)", v)
-              return tuple(int(x) for x in m.groups()) if m else (-1,)
-          if current == version and has_image:
-              print(f"{path} already names {version} and its image")
-              sys.exit(0)
-          if key(current) > key(version):
-              print(f"{path} names {current}, newer than {version}: the app version stays as it is")
-              sys.exit(0)
-          text = text[:line.start()] + f'version: "{version}"' + ("" if has_image else f"\nimage: {image}") + text[line.end():]
-          if has_image:
-              text = re.sub(r"^image: .*$", f"image: {image}", text, count=1, flags=re.M)
-          with open(path, "w", encoding="utf-8") as fh:
-              fh.write(text)
-          print(f"{path}: version {current} -> {version}" + ("" if has_image else f", image {image}"))
-          PY
-          if git diff --quiet -- hri_manager/config.yaml; then
-            exit 0
-          fi
+          python3 .github/app_version.py apply "$TAG" "$IMAGE" hri_manager/config.yaml
           git diff --stat
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
