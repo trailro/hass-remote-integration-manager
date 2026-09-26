@@ -720,6 +720,41 @@ class FlowTest(unittest.IsolatedAsyncioTestCase):
                 status, _ = await env.send("POST", "/api/instances/garage/restart")
                 self.assertEqual(status, 400)
 
+    async def test_records_of_an_instance_that_is_gone_are_listed_and_forgotten(self):
+        """Uninstalled outside the manager and its folder gone: the registry entry and the copy are listed, with Forget."""
+        env = self.env
+        await self.create()
+        await self.create("attic")
+        for name in ("garage", "attic"):
+            del env.stub.installed[f"local_hri_{name}"]
+            shutil.rmtree(self.folder(name))
+        env.registry.remove("attic")  # a copy without its registry entry
+        await env.sv.reload_store()
+        _, data = await env.get("/api/instances")
+        self.assertEqual(data["instances"], [])
+        orphans = {o["instance"]: o for o in data["others"] if o["kind"] == "orphan"}
+        self.assertEqual(sorted(orphans), ["attic", "garage"])
+        for o in orphans.values():
+            self.assertEqual((o["actions"], o["installed"]), (["forget"], False))
+        for body in ({}, {"confirm": "GARAGE"}):
+            status, _ = await env.send("POST", "/api/instances/garage/forget", body)
+            self.assertEqual(status, 400)
+        for name in ("garage", "attic"):
+            job = await env.job(await env.send("POST", f"/api/instances/{name}/forget", {"confirm": name}))
+            self.assertEqual(job["state"], "succeeded", job)
+            self.assertIsNone(env.registry.get(name))
+            self.assertFalse(os.path.exists(self.copy_dir(name)))
+        _, data = await env.get("/api/instances")
+        self.assertEqual([o for o in data["others"] if o["kind"] == "orphan"], [])
+        # never an installed app, and never a name with a folder
+        job = await env.job(await env.send("POST", "/api/instances/foreign/forget", {"confirm": "foreign"}))
+        self.assertEqual(job["state"], "failed")
+        await self.create()
+        status, _ = await env.send("POST", "/api/instances/garage/forget", {"confirm": "garage"})
+        self.assertEqual(status, 400)
+        self.assertIsNotNone(env.registry.get("garage"))
+        self.assertEqual(env.changing_calls("foreign"), [])
+
     def _hand_made_app(self, folder="my_garage", slug="hri_garage"):
         """A local app someone wrote by hand in another folder, with an instance's slug and HRI's url, installed."""
         path = os.path.join(self.env.local_apps, folder)

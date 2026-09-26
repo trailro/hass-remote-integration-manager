@@ -213,7 +213,10 @@ no action: Repair would make it the manager's, and then deletable with its data.
 The published single app (`<repository>_hass_remote_integration`), a local build of HRI
 (`local_hass_remote_integration`, labelled so), local apps whose slug looks like an instance but
 that the manager did not create (detached or not), and `hri_<name>/` folders whose marker the manager's registry does
-not hold are listed under **Other HRI apps**, read-only: the manager offers no action on them. Adopting the single app into the
+not hold are listed under **Other HRI apps**, read-only: the manager offers no action on them. So are the manager's
+own records of an instance that is neither installed nor defined (uninstalled outside the manager, its folder gone):
+its registry entry and its copy in `/data`. **Forget** (with the name typed) drops those records and touches nothing
+else; it refuses while the app is installed or its folder exists. Adopting the single app into the
 manager is on the roadmap.
 
 ## Security model

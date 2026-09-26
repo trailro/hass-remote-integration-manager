@@ -158,6 +158,18 @@ class Manager:
                 others.append({"slug": slug, "name": app.get("name"), "kind": kind, "installed": True,
                                "state": app.get("state"), "version": app.get("version"),
                                "update_available": bool(app.get("update_available"))})
+        # the manager's own records of an instance that is neither installed nor defined (uninstalled outside the
+        # manager, its folder gone): shown, with Forget, never acted on by themselves
+        kept = set(await asyncio.to_thread(copies.names_kept, self.copies_root))
+        present = {names.name_from_slug(s) for s in installed} | {n for n, _, _ in folders}
+        for name in sorted((set(registered) | kept) - present):
+            if names.NAME_RE.fullmatch(name) and name not in names.RESERVED and not self.jobs.running_for(name):
+                others.append({"slug": names.supervisor_slug(name), "name": name, "instance": name, "kind": "orphan",
+                               "installed": False, "state": None, "actions": ["forget"],
+                               "problem": ("neither installed nor defined: only the manager's "
+                                           + " and ".join(w for w, on in (("registry entry", name in registered),
+                                                                          ("copy of its definition", name in kept)) if on)
+                                           + " are left. Forget drops them")})
         started = self._auto_repair(repairable)
         for entry in out:
             if entry["name"] in started:
@@ -414,6 +426,36 @@ class Manager:
             raise InvalidRequest(f"{name} is not in the manager's registry: not created by this manager, so it is not "
                                  "repaired")
         return self.jobs.start(name, "repair", user, lambda job: self._repair(job, name, user))
+
+    def forget(self, name: str, body: dict, user: str) -> Job:
+        """Drop the registry entry and the copy of an instance that is neither installed nor defined (checked again in
+        the job).  Needs the name typed."""
+        name = self.check_name(name)
+        if body.get("confirm") != name:
+            raise InvalidRequest(f"Forgetting an instance needs its name typed: {name}.")
+        if os.path.lexists(os.path.join(self.root, names.folder_name(name))):
+            raise InvalidRequest(f"{names.folder_name(name)} exists: {name} is defined, not something to forget")
+        return self.jobs.start(name, "forget", user, lambda job: self._forget_records(job, name))
+
+    async def _forget_records(self, job: Job, name: str) -> dict:
+        slug = names.supervisor_slug(name)
+        try:
+            if any(a.get("slug") == slug for a in await self.sv.list_apps()):
+                raise JobFailed(f"{slug} is installed: not forgotten")
+        except (SupervisorError, NotAllowed) as err:
+            raise JobFailed(str(err)) from None
+        if os.path.lexists(os.path.join(self.root, names.folder_name(name))):
+            raise JobFailed(f"{names.folder_name(name)} exists: not forgotten")
+        try:
+            known = await asyncio.to_thread(self.registry.get, name)
+            if known is not None:
+                await asyncio.to_thread(self.registry.remove, name)
+            await asyncio.to_thread(copies.remove, self.copies_root, name)
+        except (RegistryError, OSError) as err:
+            raise JobFailed(str(err)) from None
+        self._clear_auto(name)
+        job.log(f"forgot {name}: " + ("its registry entry and " if known else "") + "any copy of its definition")
+        return {"forgotten": name}
 
     def setup(self, name: str, action: str, user: str) -> Job:
         """``install`` (a definition without its app) or ``finish`` (installed, but its create stopped before the
