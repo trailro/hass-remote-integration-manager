@@ -64,6 +64,13 @@ class Registry:
             fh.flush()
             os.fsync(fh.fileno())
         os.replace(tmp, self.path)
+        # the rename itself is durable only once its folder is: without this a power loss can bring the previous
+        # registry back, without an instance whose folder and marker survive (not managed, then)
+        folder = os.open(os.path.dirname(self.path) or ".", os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.fsync(folder)
+        finally:
+            os.close(folder)
 
     def all(self) -> dict[str, dict]:
         with self._lock:
