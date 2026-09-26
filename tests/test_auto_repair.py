@@ -209,6 +209,45 @@ class AutoRepairTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(os.path.isdir(self.folder("garage")))
         self.assertNotIn("garage", manager.auto_backoff)  # a success forgets the failures
 
+    async def fail_automatically(self, name="garage"):
+        """An automatic repair of ``name`` that fails (GitHub down, no copy): its row says so."""
+        env = self.env
+        await self.restore_without_the_local_apps_folder()
+        shutil.rmtree(os.path.join(env.data, "definitions", name), ignore_errors=True)
+        env.manager.auto_repair_interval = instances.AUTO_REPAIR_INTERVAL
+        env.manager._auto_checked = None
+        with mock.patch.object(env.gh, "_get", side_effect=GitHubError("GitHub unreachable: ClientConnectorError")):
+            await env.get("/api/instances")
+            await self.wait_jobs()
+        env.manager.auto_repair_interval = None  # no more automatic tries: what the user does is what is tested
+        _, data = await env.get("/api/instances")
+        self.assertEqual(next(i for i in data["instances"] if i["name"] == name)["auto_repair"]["state"], "failed")
+
+    async def row(self, name="garage"):
+        _, data = await self.env.get("/api/instances")
+        return next((i for i in data["instances"] if i["name"] == name), None)
+
+    async def test_the_failure_note_goes_when_the_user_fixes_it(self):
+        env = self.env
+        await self.create("garage")
+        # a manual Repair
+        await self.fail_automatically()
+        job = await env.job(await env.send("POST", "/api/instances/garage/repair"))
+        self.assertEqual(job["state"], "succeeded", job)
+        self.assertIsNone((await self.row())["auto_repair"])
+        # an Update of the detached instance
+        await self.fail_automatically()
+        job = await env.job(await env.send("POST", "/api/instances/garage/update", {"version": "0.25.1"}))
+        self.assertEqual(job["state"], "succeeded", job)
+        self.assertIsNone((await self.row())["auto_repair"])
+        # a Delete, then a Create of the same name
+        await self.fail_automatically()
+        job = await env.job(await env.send("DELETE", "/api/instances/garage", {"remove_data": True, "confirm": "garage"}))
+        self.assertEqual(job["state"], "succeeded", job)
+        await self.create("garage")
+        self.assertIsNone((await self.row())["auto_repair"])
+        self.assertEqual((env.manager.auto_repairs, env.manager.auto_backoff), ({}, {}))
+
     async def test_never_another_version_and_not_again_when_it_needs_attention(self):
         """The installed commit of a git instance is gone: automatic repair writes nothing (not the branch's head), and
         leaves the instance to the user from then on."""

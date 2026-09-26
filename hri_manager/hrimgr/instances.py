@@ -522,11 +522,19 @@ class Manager:
     def _registry_entry(marker: dict, **extra) -> dict:
         return {**{k: marker.get(k) for k in REGISTRY_FIELDS}, "setup_complete": False, **extra}
 
+    def _clear_auto(self, name: str, keep_job: str | None = None) -> None:
+        """Forget what automatic repair remembers of ``name`` (its failures, and its last job unless it is
+        ``keep_job``): the instance was repaired, updated or forgotten since, and the row must not say otherwise."""
+        self.auto_backoff.pop(name, None)
+        if keep_job is None or self.auto_repairs.get(name, {}).get("job") != keep_job:
+            self.auto_repairs.pop(name, None)
+
     def _forget(self, name: str, instance_id: str) -> None:
         """Drop the registry's entry of ``name``, and the copy of its definition, when it is still that instance."""
         entry = self.registry.get(name)
         if entry and entry.get("instance_id") == instance_id:
             self.registry.remove(name)
+            self._clear_auto(name)
             try:
                 copies.remove(self.copies_root, name)
             except OSError as err:
@@ -953,6 +961,7 @@ class Manager:
             # JobFailed: the builder's own refusal (more than one app)
             await asyncio.to_thread(self._restore_entry, name, entry, marker["instance_id"])
             raise JobFailed(f"the definition was not written: {err}") from None
+        self._clear_auto(name, keep_job=job.id)  # an automatic repair's own note stays: it succeeded
         await self._save_copy(job, managed)
         await self._wait_store(job, slug, version)
         return {"slug": slug, "version": version}
@@ -1020,6 +1029,7 @@ class Manager:
             if isinstance(err, (SupervisorError, NotAllowed)):
                 raise JobFailed(str(err)) from None
             raise
+        self._clear_auto(name)
         await self._save_copy(job, managed)
         return {"version": version, "state": after.get("state")}
 
