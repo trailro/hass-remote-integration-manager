@@ -137,21 +137,7 @@ jobs:
         if: steps.decide.outputs.move == 'true'
         # as a Supervisor pulls it: anonymously.  A new package on ghcr.io is private until it is made public
         # (Package settings > Change visibility); until then this fails and the version does not move
-        run: |
-          export DOCKER_CONFIG="$(mktemp -d)"   # no credentials
-          docker manifest inspect "$IMAGE:${TAG#v}" > "$RUNNER_TEMP/manifest.json" || {
-            echo "::error::$IMAGE:${TAG#v} cannot be pulled anonymously: make the package public, then re-run this job"
-            exit 1
-          }
-          python3 - "$RUNNER_TEMP/manifest.json" <<'PY'
-          import json, sys
-          index = json.load(open(sys.argv[1]))
-          found = {f"{m['platform']['os']}/{m['platform']['architecture']}" for m in index.get("manifests", []) if "platform" in m}
-          print("platforms:", ", ".join(sorted(found)))
-          missing = {"linux/amd64", "linux/arm64"} - found
-          if missing:
-              sys.exit(f"::error::no {', '.join(sorted(missing))} image in the pushed index")
-          PY
+        run: python3 .github/check_published_image.py --ref "$IMAGE:${TAG#v}"
       - name: Set hri_manager/config.yaml version and image
         if: steps.decide.outputs.move == 'true'
         run: |
