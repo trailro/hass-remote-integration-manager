@@ -642,6 +642,35 @@ class FlowCheckTest(FlowBase):
         self.assertIsNone(env.registry.get("garage")["tampered"])
         self.assertEqual(env.stub.installed["local_hri_garage"]["state"], "started")
 
+    async def test_a_held_app_does_not_start_at_the_next_boot_until_it_is_checked(self):
+        """A held app (stopped, marked as not checked, kept installed) gets start at boot turned off, as a contained
+        one does: the Supervisor starts every app with boot auto at its next start.  Check again, or Repair of an
+        instance without its folder, turns it back on when the check passes."""
+        env = self.env
+        with self.unreported("privileged"):
+            job = await self.create()
+        self.assertIn("does not report privileged", job["error"])
+        self.assertIn("start at boot was turned off", job["error"])
+        app = env.stub.installed["local_hri_garage"]
+        self.assertEqual((app["state"], app["boot"]), ("stopped", "manual"))
+        self.assertIn(("POST", "/addons/local_hri_garage/options", {"boot": "manual"}), env.stub.calls)
+        self.assertTrue(env.registry.get("garage")["tampered"]["boot_manual"])
+        _, data = await env.get("/api/instances")
+        self.assertIn("start at boot was turned off", data["instances"][0]["problem"])
+        job = await env.job(await env.send("POST", "/api/instances/garage/finish"))  # Check again
+        self.assertEqual(job["state"], "succeeded", job)
+        self.assertEqual((app["state"], app["boot"]), ("started", "auto"))
+        # Repair of an instance without its folder clears a hold too, and so gives start at boot back
+        with self.unreported("host_dbus"):
+            job = await env.job(await env.send("POST", "/api/instances/garage/update", {"version": "0.25.1"}))
+        self.assertEqual((app["state"], app["boot"]), ("stopped", "manual"))
+        shutil.rmtree(self.folder())
+        await env.sv.reload_store()
+        job = await env.job(await env.send("POST", "/api/instances/garage/repair"))
+        self.assertEqual(job["state"], "succeeded", job)
+        self.assertIsNone(env.registry.get("garage")["tampered"])
+        self.assertEqual(app["boot"], "auto")
+
     async def test_repair_of_an_unchecked_instance_checks_it_again(self):
         env = self.env
         self.assertEqual((await self.create())["state"], "succeeded")

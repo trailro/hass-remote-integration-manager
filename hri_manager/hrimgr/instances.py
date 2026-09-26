@@ -435,6 +435,7 @@ class Manager:
                 f"{self._decoy_text(decoyed)}; the Supervisor may have installed {managed.slug} from it, so the "
                 "manager could not check it"))
         await asyncio.to_thread(self.registry.update, managed.name, tampered=None)
+        await self._boot_back(job, managed, managed.entry.get("tampered"))
         return {"checked": managed.slug}
 
     def _marked_installed(self, installed: dict[str, str | None]) -> tuple[list, list[str]]:
@@ -1275,8 +1276,9 @@ class Manager:
     async def _hold(self, job: Job, managed: children.Managed, missing: list[str] | None = None,
                     reason: str | None = None) -> Unverified:
         """An installed app the manager could not check (the fields the Supervisor did not report, ``missing``, or
-        ``reason``): marked, stopped (through the marker gate), kept installed with its options and data.  The error
-        for the job."""
+        ``reason``): marked, stopped and its start at boot turned off (through the marker gate: the Supervisor starts
+        every app with boot auto at its next start), kept installed with its options and data.  Clearing the mark gives
+        start at boot back (_finish_setup, _boot_back).  The error for the job."""
         mark = {"reason": reason or (f"the Supervisor does not report {', '.join(missing or [])} of the installed "
                                      f"{managed.slug}, so the manager could not check it (a change of the Supervisor's "
                                      "API?)"),
@@ -1289,10 +1291,28 @@ class Manager:
             mark["stopped"] = True
         except Exception as err:  # noqa: BLE001 - reported in the mark and the job
             mark["failure"] = str(err) or err.__class__.__name__
+        try:
+            await self.sv.set_options(managed, boot="manual")
+            mark["boot_manual"] = True
+            job.log("start at boot turned off until it is checked")
+        except Exception as err:  # noqa: BLE001 - reported in the mark and the job
+            mark["boot_manual"] = False
+            job.log(f"start at boot NOT turned off: {err}")
         await self._set_mark(managed.name, mark)
         message = f"{mark['reason']}: {self._mark_text(managed.slug, mark)}"
         _LOGGER.error("%s", message)
         return Unverified(message)
+
+    async def _boot_back(self, job: Job, managed: children.Managed, mark: object) -> None:
+        """A hold cleared (its check passed) that had turned start at boot off: on again (Check again does it itself,
+        _finish_setup).  A failure is said, never the job's: the app is checked."""
+        if not (isinstance(mark, dict) and mark.get("boot_manual") is True):
+            return
+        try:
+            await self.sv.set_options(managed, boot="auto")
+            job.log("start at boot turned on again")
+        except (SupervisorError, NotAllowed) as err:
+            job.log(f"start at boot NOT turned on again ({err}): turn it on in Settings > Apps")
 
     async def _set_mark(self, name: str, mark: dict) -> bool:
         """The registry records ``mark``; when it cannot, the manager keeps it in memory (refused all the same:
@@ -1379,8 +1399,10 @@ class Manager:
     def _mark_text(slug: str, mark: dict) -> str:
         """What a mark means for the user: done, or what to do by hand."""
         if mark.get("unverified"):
+            boot = {True: "; start at boot was turned off until it is checked",
+                    False: "; start at boot could NOT be turned off"}.get(mark.get("boot_manual"), "")
             return (f"it was {'stopped' if mark.get('stopped') else 'NOT stopped (' + str(mark.get('failure') or INTERRUPTED)[:200] + ')'}"
-                    " and is kept installed, with its options and data. A newer manager may read the Supervisor's "
+                    f"{boot} and is kept installed, with its options and data. A newer manager may read the Supervisor's "
                     f"answer; until then Delete it, or start {slug} yourself in Settings > Apps if you trust it")
         if mark.get("uninstalled"):
             return "it was stopped and uninstalled at once (its /config folder is kept)"
@@ -2068,6 +2090,7 @@ class Manager:
         if entry.get("tampered") is not None:
             await asyncio.to_thread(self.registry.update, name, tampered=None)
             job.log("checked: the mark goes")
+            await self._boot_back(job, managed, entry.get("tampered"))
         return {"slug": slug, "version": version}
 
     async def _update_detached(self, job: Job, name: str, version: str | None, ref: tuple[str, str] | None,
