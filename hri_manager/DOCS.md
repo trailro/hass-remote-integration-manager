@@ -38,7 +38,9 @@ so each instance is repaired within about 5 minutes of its own restore (or at on
 **Repair**), from the copy it keeps in its own `/data` (a release needs nothing from GitHub; a git instance
 downloads the source of its installed commit), or from GitHub when it has no usable copy. Repair writes only the
 installed version: when its exact source cannot be had, nothing is written and the instance is marked **needs
-attention**, with **Update**/**Rebuild** (a newer version, written and installed at once) and **Delete** offered.
+attention**, with **Update**/**Rebuild** (a newer version, written and installed at once; a Rebuild onto a branch
+or tag whose current commit is the installed one writes that commit's definition and installs nothing) and **Delete**
+offered.
 Keep the manager in the same backups: its `/data` holds the registry and the copies that Repair works from.
 
 ## Options

@@ -491,6 +491,58 @@ class FlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.marker("lab")["sha"], sha_of("main-moved-on"))
         self.assertNotIn("needs_attention", env.registry.get("lab"))
 
+    async def test_rebuild_onto_the_installed_commit_writes_its_definition(self):
+        """A restore brought back an app built from another commit than the registry's (the registry says tag v0.25.1
+        at its commit, the installed app is the head of branch main): Repair refuses (not the recorded commit).
+        Rebuild onto main, whose head IS the installed commit, writes the definition of that commit, installs nothing,
+        and records main at that commit; the commit is checked to be on HRI's main first."""
+        env = self.env
+        await self.create("lab", channel="git", ref_kind="branch", ref="main")
+        head, version = env.stub.refs["main"], env.stub.installed["local_hri_lab"]["version"]
+        recorded = sha_of("tag-0.25.1")
+        env.registry.update("lab", ref_kind="tag", ref="v0.25.1", sha=recorded, version=f"0.0.0-{recorded[:12]}")
+        await self._detach("lab")
+        shutil.rmtree(self.copy_dir("lab"))
+        await self.assert_needs_attention("lab", "no record of the commit of the installed")
+        # the same Rebuild of an instance that does not need attention is Repair's, as before
+        attention = env.registry.get("lab")["needs_attention"]
+        env.registry.update("lab", needs_attention=None)
+        job = await env.job(await env.send("POST", "/api/instances/lab/update", {"ref_kind": "branch", "ref": "main"}))
+        self.assertEqual(job["state"], "failed", job)
+        self.assertIn("Repair writes its definition", job["error"])
+        env.registry.update("lab", needs_attention=attention)
+        # a commit HRI's compare does not put on the ref: nothing written
+        from hrimgr.github import NotHRICommit
+        with mock.patch.object(env.gh, "commit_on_ref", side_effect=NotHRICommit(f"commit {head[:12]} is not on it")):
+            job = await env.job(await env.send("POST", "/api/instances/lab/update", {"ref_kind": "branch", "ref": "main"}))
+        self.assertEqual(job["state"], "failed", job)
+        self.assertIn("not a commit of", job["error"])
+        self.assertFalse(os.path.lexists(self.folder("lab")))
+        self.assertEqual(env.registry.get("lab")["sha"], recorded)
+        env.stub.calls.clear()
+        with mock.patch.object(env.gh, "commit_on_ref", wraps=env.gh.commit_on_ref) as on_ref:
+            job = await env.job(await env.send("POST", "/api/instances/lab/update", {"ref_kind": "branch", "ref": "main"}))
+        self.assertEqual(job["state"], "succeeded", job)
+        on_ref.assert_awaited_once_with(head, "branch", "main")
+        self.assertEqual(env.changing_calls("local_hri_lab"), [])  # the installed version: nothing to update
+        self.assertEqual(env.stub.installed["local_hri_lab"]["version"], version)
+        self.assertEqual(env.stub.store["local_hri_lab"]["version"], version)
+        m = self.marker("lab")
+        self.assertEqual((m["sha"], m["version"], m["ref_kind"], m["ref"]), (head, version, "branch", "main"))
+        with open(os.path.join(self.folder("lab"), "Dockerfile"), encoding="utf-8") as fh:
+            self.assertIn(f"ARG HRI_BUILD={head}", fh.read())
+        entry = env.registry.get("lab")
+        self.assertEqual((entry["sha"], entry["version"], entry["ref_kind"], entry["ref"]), (head, version, "branch", "main"))
+        self.assertNotIn("needs_attention", entry)
+        with open(os.path.join(self.copy_dir("lab"), "copy.json"), encoding="utf-8") as fh:
+            meta = json.load(fh)
+        self.assertEqual((meta["sha"], meta["ref"]), (head, "main"))
+        _, data = await env.get("/api/instances")
+        row = data["instances"][0]
+        self.assertTrue(row["managed"])
+        self.assertNotIn("needs_attention", row)
+        self.assertIn("update", row["actions"])
+
     async def test_a_copy_that_does_not_fit_is_not_used(self):
         """Another instance's copy, another version's, or a config the manager would not write: GitHub instead."""
         env = self.env

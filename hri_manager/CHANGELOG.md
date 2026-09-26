@@ -21,6 +21,10 @@ Fixes from a first run on a real Home Assistant OS 18.3 (Supervisor 2026.09.2). 
 - **A published image.** The manager's image is built for amd64 and aarch64 and pulled from
   `ghcr.io/trailro/hass-remote-integration-manager`, so its backups no longer hold a locally built image. The app's
   version on the store moves only once that version's image is published and pullable.
+- **Rebuild onto the installed commit.** A git instance restored at another commit than the one the registry
+  recorded needs attention, and Repair refuses it; a Rebuild onto a branch or tag whose current commit is the
+  installed one was refused too ("Repair writes its definition"). It now writes that commit's definition (the
+  installed version: nothing to update) and records that branch or tag and commit, after Repair's checks.
 - A local build of HRI (`local_hass_remote_integration`) is labelled as such, not as the published app.
 - Docs: turn on **Show in sidebar** after installing the manager (the Supervisor leaves it off); one integration per
   instance, and two instances of the same integration cannot share an MQTT broker.
