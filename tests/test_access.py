@@ -79,6 +79,24 @@ class AccessTest(unittest.IsolatedAsyncioTestCase):
             with self.subTest(lines=lines):
                 self.assertEqual(await self.raw_status(client, lines), 403)
 
+    async def test_the_user_headers_must_be_spelled_as_the_supervisor_spells_them(self):
+        """What the Supervisor 2026.09.3 sends (its _init_header through its aiohttp, bytes captured): its own
+        X-Remote-User-Id and X-Remote-User-Name, spelled so.  A client's x-remote-user-id passes its filter, and
+        aiohttp's session merges the two spellings keeping the client's: ONE header arrives, the client's value in
+        the client's spelling.  So any other spelling is refused, even alone."""
+        client = await self.env.client_with(self)
+        ok = [f"X-Remote-User-Id: {ALICE_ID}", "X-Remote-User-Name: alice", "X-Remote-User-Display-Name: Alice"]
+        self.assertEqual(await self.raw_status(client, ok), 200)
+        self.assertEqual(await self.raw_status(client, [f"X-Remote-User-Id: {ALICE_ID}"]), 200)  # a user without a login name
+        for lines in ([f"x-remote-user-id: {ALICE_ID}"],  # bob's session, alice's id injected: what reaches the app
+                      [f"X-REMOTE-USER-ID: {ALICE_ID}", "X-Remote-User-Name: alice"],
+                      [f"X-Remote-user-Id: {ALICE_ID}"],
+                      [f"X-Remote-User-Id: {ALICE_ID}", "x-remote-user-name: root"],
+                      [f"X-Remote-User-Id: {ALICE_ID}", "X-Remote-User-Name: alice", "X-Remote-User-Name: alice"],
+                      [f"X-Remote-User-Id: {ALICE_ID}", f"X-Remote-User-Id: {ALICE_ID}"]):
+            with self.subTest(lines=lines):
+                self.assertEqual(await self.raw_status(client, lines), 403)
+
     async def test_the_page_says_why(self):
         client = await self.env.client_with(self)
         status, text = await self.status_of(client, "GET", "/", ingress(BOB_ID, "bob"))

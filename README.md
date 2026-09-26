@@ -220,8 +220,11 @@ narrows itself, in code, and the tests pin it:
   it serves a request only when the connection comes from the Supervisor (`172.30.32.2`, checked on the socket, not
   in a header). Being logged in to Home Assistant is not enough: any user may open an app's ingress, and the panel
   being hidden from non-administrators (`panel_admin`) is only cosmetic. So on every request, pages and API alike,
-  the manager takes the user id the Supervisor's ingress sets (`X-Remote-User-Id`; a request with two ids, or two user
-  names, is refused) and asks Home Assistant whether that user is an administrator: the command
+  the manager takes the user id the Supervisor's ingress sets (`X-Remote-User-Id`) and asks Home Assistant whether
+  that user is an administrator. The Supervisor drops a client's own copy of that header only in its exact spelling,
+  and a copy in another spelling (`x-remote-user-id`) replaces the Supervisor's value on the way; so the id header must
+  arrive exactly once, and it and `X-Remote-User-Name` (at most once) exactly as the Supervisor spells them, or the
+  request is refused. The question to Home Assistant is the command
   `config/auth/list` on Core's websocket, through the Supervisor's proxy (`homeassistant_api: true`, which costs no
   security rating), from which it computes `is_admin` as Core does (the owner, or an active member of the
   administrators group). A small client with its own allow-list (`hrimgr/corews.py`) can send only the

@@ -4,8 +4,11 @@ The app publishes no port, and a request is served only when its TRANSPORT peer 
 which proxies ingress from the hassio network.  Being logged in to Home Assistant is not enough: any user may open an
 app's ingress (``panel_admin`` only hides the panel), so every request, page and API alike, is checked here:
 
-- the Supervisor sets ``X-Remote-User-Id`` from the ingress session, first; a client's own copy in another spelling
-  arrives as a second value, so a request with more than one id (or more than one ``X-Remote-User-Name``) is refused;
+- the Supervisor sets ``X-Remote-User-Id`` (and ``X-Remote-User-Name``) from the ingress session, spelled exactly so
+  (its const.py; checked on the wire with its own _init_header and aiohttp).  It drops a client's copy only in that
+  exact spelling: a client's ``x-remote-user-id`` passes, and aiohttp's merge of case-variant keys then sends the
+  CLIENT's value alone.  So in the raw headers each must appear at most once (the id exactly once), spelled exactly
+  as the Supervisor spells it; any other spelling refuses the request;
 - Core says whether that id is an administrator (corews.py: ``config/auth/list`` through the Supervisor's proxy);
   when Core cannot say, the request is refused: the guard fails closed;
 - ``allowed_users`` narrows the administrators further, keyed on the verified id: the id itself, or the login name
@@ -41,7 +44,7 @@ ASSETS = {"mgr.css": "text/css", "mgr.js": "application/javascript"}
 CSP = ("default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; "
        "object-src 'none'; base-uri 'none'; frame-ancestors 'self'; form-action 'self'")
 USER_HEADER = "X-Remote-User-Name"
-USER_ID_HEADER = "X-Remote-User-Id"
+USER_ID_HEADER = "X-Remote-User-Id"  # the Supervisor's HEADER_REMOTE_USER_ID, byte for byte
 USER_ID_RE = re.compile(r"[A-Za-z0-9_-]{1,64}")
 READ_ONLY = frozenset({"GET", "HEAD"})
 MAX_BODY = 64 * 1024
@@ -89,13 +92,26 @@ def _refuse(status: int, text: str) -> web.Response:
     return response
 
 
+def raw_header(request: web.BaseRequest, name: str) -> tuple[list[str], bool]:
+    """The values of the header ``name`` as received, and whether every one of them was spelled exactly ``name``."""
+    exact = name.encode("ascii")
+    values, spelled = [], True
+    for key, value in request.raw_headers:
+        if key.lower() == exact.lower():
+            values.append(value.decode("utf-8", "replace"))
+            spelled = spelled and key == exact
+    return values, spelled
+
+
 async def _identify(request: web.Request, settings: Settings, users: CoreUsers) -> str | web.Response:
-    """The request's Home Assistant administrator (their name, or their id), or the 403 that refuses it."""
+    """The request's Home Assistant administrator (as Core names them), or the 403 that refuses it."""
     where = f"{request.method} {request.path}"
-    ids = request.headers.getall(USER_ID_HEADER, [])
-    user_names = request.headers.getall(USER_HEADER, [])
-    if len(ids) != 1 or len(user_names) > 1 or not USER_ID_RE.fullmatch(ids[0]):
-        _LOGGER.warning("refused %s: %d user id(s) and %d user name(s) in the request, not one", where, len(ids), len(user_names))
+    ids, ids_spelled = raw_header(request, USER_ID_HEADER)
+    user_names, names_spelled = raw_header(request, USER_HEADER)
+    if (len(ids) != 1 or len(user_names) > 1 or not ids_spelled or not names_spelled
+            or not USER_ID_RE.fullmatch(ids[0])):
+        _LOGGER.warning("refused %s: user headers not as the Supervisor sets them (%d id(s), %d name(s), spelled %s)",
+                        where, len(ids), len(user_names), "as expected" if ids_spelled and names_spelled else "otherwise")
         return _refuse(403, "HRI Manager could not tell which Home Assistant user is asking. Open it from Home "
                             "Assistant's sidebar.")
     user_id, name = ids[0], (user_names[0] if user_names else "")
