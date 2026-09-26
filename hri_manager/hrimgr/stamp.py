@@ -10,7 +10,10 @@ and the icons) from the HRI release or git ref and changes only what makes the c
   the app's Network tab;
 - ``backup_exclude``: the ``*_hass_remote_integration/`` prefix becomes ``*_hri_<name>/``, the folder of this
   instance, or its Home Assistant backups would hold the installed Home Assistant (about 800 MB);
-- ``webui`` dropped; ``image`` dropped for a git build (the Supervisor builds the folder instead).
+- ``webui`` dropped; ``image`` dropped for a git build (the Supervisor builds the folder instead);
+- ``host_dbus: true`` added for an instance created with Bluetooth (the manager's registry records the choice): the
+  host's D-Bus, through which BlueZ offers the Bluetooth adapters.  The template itself can never add it: it is not a
+  key of ``TEMPLATE_KEYS``.
 
 Everything else (options, schema, ingress, map, homeassistant, image, arch, timeout, uart...) is kept as HRI wrote
 it, after a check (``vet_template``): the template may hold only the keys this manager version knows from HRI's own
@@ -230,7 +233,8 @@ def parse_template(raw: bytes) -> dict:
     return data
 
 
-def stamp(template: dict, name: str, version: str, channel: str) -> dict:
+def stamp(template: dict, name: str, version: str, channel: str, bluetooth: bool = False) -> dict:
+    """``bluetooth``: the instance's registry says Bluetooth (host_dbus), never the template."""
     names.validate_name(name)
     if channel not in children.CHANNELS:
         raise ValueError(f"unknown channel {channel!r}")
@@ -254,6 +258,8 @@ def stamp(template: dict, name: str, version: str, channel: str) -> dict:
         out[key] = value
     if any(names.HRI_SLUG in e for e in out["backup_exclude"]):
         raise TemplateError("a backup_exclude entry names HRI's slug elsewhere than at its start: not stamped")
+    if bluetooth:
+        out["host_dbus"] = True
     return out
 
 
@@ -285,9 +291,10 @@ def _app_extras(archive: tarsafe.Archive) -> dict[str, bytes]:
     return out
 
 
-def build_release(archive: tarsafe.Archive, dest: str, name: str, version: str, source: str) -> dict:
+def build_release(archive: tarsafe.Archive, dest: str, name: str, version: str, source: str,
+                  bluetooth: bool = False) -> dict:
     """Fill ``dest`` with a release instance's definition: the stamped config and HRI's app files."""
-    config = stamp(_template(archive), name, version, "release")
+    config = stamp(_template(archive), name, version, "release", bluetooth)
     children.write_file(dest, "config.yaml", dump(config, source))
     for sub, data in sorted(_app_extras(archive).items()):
         children.write_file(dest, sub, data)
@@ -305,7 +312,7 @@ def is_app_config(rel: str) -> bool:
 
 
 def build_git(archive: tarsafe.Archive, dest: str, name: str, version: str, sha: str, source: str,
-              config: dict | None = None) -> tuple[dict, list[str]]:
+              config: dict | None = None, bluetooth: bool = False) -> tuple[dict, list[str]]:
     """Fill ``dest`` with a git instance: HRI's whole tree, built by the Supervisor from its root Dockerfile.
     ``config``: the stamped config to write (Repair, from the manager's copy) instead of stamping the tree's own.
 
@@ -320,7 +327,7 @@ def build_git(archive: tarsafe.Archive, dest: str, name: str, version: str, sha:
     if build_files:
         raise TemplateError(f"the tree has {', '.join(tarsafe.show(r) for r in build_files)} at its root, which the "
                             "Supervisor would use to build or confine the app instead of HRI's Dockerfile: refused")
-    stamped = stamp(_template(archive), name, version, "git")
+    stamped = stamp(_template(archive), name, version, "git", bluetooth)
     config = stamped if config is None else config
     extras = _app_extras(archive)
     tarsafe.extract(archive, dest)

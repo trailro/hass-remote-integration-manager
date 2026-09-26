@@ -70,9 +70,10 @@ function versionCell(i) {
   return out;
 }
 function channelCell(i) {
-  if (i.channel === 'git') return `<span class="tag warn" title="testing build from source">git · testing</span><span class="sub">${esc(i.ref_kind)} ${esc(i.ref)} @ ${esc((i.sha || '').slice(0, 12))}</span>`;
-  if (i.channel === 'release') return '<span class="tag">release</span>';
-  return '<span class="tag bad">unknown</span>';
+  const bt = i.bluetooth ? ' <span class="tag acc" title="the instance has the host\'s D-Bus (host_dbus), for Bluetooth">Bluetooth</span>' : '';
+  if (i.channel === 'git') return `<span class="tag warn" title="testing build from source">git · testing</span>${bt}<span class="sub">${esc(i.ref_kind)} ${esc(i.ref)} @ ${esc((i.sha || '').slice(0, 12))}</span>`;
+  if (i.channel === 'release') return '<span class="tag">release</span>' + bt;
+  return '<span class="tag bad">unknown</span>' + bt;
 }
 function autoNote(i) {
   // the instance's last automatic repair (a restore left it detached): running, done, or failed and retried
@@ -120,7 +121,7 @@ async function loadInstances() {
   body.querySelectorAll('button[data-job]').forEach(b => { b.onclick = () => watch(b.dataset.job); });
 }
 
-function dialog({title, text, ok, danger, versions, selected, ref, refKind, data, name}) {
+function dialog({title, text, ok, danger, versions, selected, ref, refKind, data, name, bluetooth}) {
   const d = $('#confirm');
   $('#cf-title').textContent = title; $('#cf-text').textContent = text;
   const okb = $('#cf-ok'); okb.textContent = ok; okb.className = danger ? 'danger' : 'primary';
@@ -129,12 +130,13 @@ function dialog({title, text, ok, danger, versions, selected, ref, refKind, data
   $('#cf-ref-row').hidden = ref === undefined; $('#cf-ref').value = ref || '';
   $('#cf-kind-row').hidden = ref === undefined; $('#cf-kind').value = refKind || 'branch';
   $('#cf-data-row').hidden = !data; $('#cf-data').checked = false;
+  $('#cf-bt-row').hidden = bluetooth === undefined; $('#cf-bt').checked = !!bluetooth;
   $('#cf-name-row').hidden = !name; $('#cf-name').value = ''; $('#cf-name-hint').textContent = name || '';
   const sync = () => { okb.disabled = !!name && $('#cf-name').value !== name; };
   $('#cf-data').onchange = sync; $('#cf-name').oninput = sync; sync();
   d.returnValue = '';
   return new Promise(resolve => {
-    d.onclose = () => resolve(d.returnValue === 'ok' ? {version: $('#cf-version').value, ref: $('#cf-ref').value.trim(), refKind: $('#cf-kind').value, removeData: $('#cf-data').checked, confirm: $('#cf-name').value} : null);
+    d.onclose = () => resolve(d.returnValue === 'ok' ? {version: $('#cf-version').value, ref: $('#cf-ref').value.trim(), refKind: $('#cf-kind').value, removeData: $('#cf-data').checked, confirm: $('#cf-name').value, bluetooth: $('#cf-bt').checked} : null);
     d.showModal();
   });
 }
@@ -144,18 +146,18 @@ async function act(action, name) {
   let r;
   if (action === 'update') {
     if (i.channel === 'git') {
-      const c = await dialog({title: `Rebuild ${name}`, text: 'Downloads the branch or tag of hass-remote-integration again and, when its commit changed, builds and runs that code on this machine. For testing only. The app restarts; its data stays.', ok: 'Rebuild', ref: i.ref || '', refKind: i.ref_kind});
+      const c = await dialog({title: `Rebuild ${name}`, text: 'Downloads the branch or tag of hass-remote-integration again and, when its commit changed, builds and runs that code on this machine. For testing only. The app restarts; its data stays. Bluetooth changes only with a new commit.', ok: 'Rebuild', ref: i.ref || '', refKind: i.ref_kind, bluetooth: !!i.bluetooth});
       if (!c) return;
-      r = await send('POST', `api/instances/${encodeURIComponent(name)}/update`, c.ref ? {ref_kind: c.refKind, ref: c.ref} : {});
+      r = await send('POST', `api/instances/${encodeURIComponent(name)}/update`, {...(c.ref ? {ref_kind: c.refKind, ref: c.ref} : {}), bluetooth: c.bluetooth});
     } else {
       // the newer of the definition and the installed app: the manager does not downgrade either
       const floor = vcmp(i.installed_version, i.version) > 0 ? i.installed_version : i.version;
       // an instance without its definition (needs attention): only newer releases; the installed one is Repair's
       const choices = releases.filter(x => i.managed ? vcmp(x.version, floor) >= 0 : vcmp(x.version, floor) > 0);
       if (!choices.length) { flash('No release at or above ' + floor + ' is known yet.', 'err'); return; }
-      const c = await dialog({title: `Update ${name}`, text: `From ${i.installed_version || i.version}. The Supervisor pulls the new image and restarts the app; its options and data stay.`, ok: 'Update', versions: choices, selected: i.newer_release || latest});
+      const c = await dialog({title: `Update ${name}`, text: `From ${i.installed_version || i.version}. The Supervisor pulls the new image and restarts the app; its options and data stay. Bluetooth changes only with a newer version.`, ok: 'Update', versions: choices, selected: i.newer_release || latest, bluetooth: !!i.bluetooth});
       if (!c) return;
-      r = await send('POST', `api/instances/${encodeURIComponent(name)}/update`, {version: c.version});
+      r = await send('POST', `api/instances/${encodeURIComponent(name)}/update`, {version: c.version, bluetooth: c.bluetooth});
     }
   } else if (action === 'delete') {
     const c = await dialog({title: `Delete ${name}`, text: `Stops and uninstalls ${i.slug} and removes its definition. The Supervisor always removes the instance's options (its password, ingress_users). Without the box below only its /config folder (its Home Assistant, integration and configuration) is kept, and a new instance named ${name} would reuse that folder, without those options.`, ok: 'Delete', danger: true, data: true, name});
@@ -218,12 +220,13 @@ function syncForm() {
 $('#create').addEventListener('submit', async ev => {
   ev.preventDefault();
   const name = $('#c-name').value.trim(), channel = $('#c-channel').value;
-  const body = channel === 'git' ? {name, channel, ref_kind: $('#c-kind').value, ref: $('#c-ref').value.trim()} : {name, channel, version: $('#c-version').value};
+  const bluetooth = $('#c-bt').checked;
+  const body = channel === 'git' ? {name, channel, ref_kind: $('#c-kind').value, ref: $('#c-ref').value.trim(), bluetooth} : {name, channel, version: $('#c-version').value, bluetooth};
   const b = $('#c-go'); b.disabled = true;
   const r = await send('POST', 'api/instances', body);
   b.disabled = false;
   if (!r.ok) { flash(r.error, 'err'); return; }
-  $('#c-name').value = ''; syncForm();
+  $('#c-name').value = ''; $('#c-bt').checked = false; syncForm();
   watch(r.job.id);
   loadInstances();
 });

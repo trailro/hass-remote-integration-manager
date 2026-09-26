@@ -22,6 +22,13 @@ app, so the sidebar has no **HRI Manager** entry until you do (**Open web UI** w
   branch's code and Dockerfile run here. For trying a fix before its release, with a branch you trust; not for
   production. Commits, pull requests and forks are refused.
 
+**Bluetooth** (a box of the **New instance** form) gives the instance the host's D-Bus (`host_dbus`), through
+which BlueZ offers the host's Bluetooth adapters: for an integration that talks to Bluetooth devices. D-Bus is a
+powerful interface that reaches many of the host's services, so turn it on only for an integration that needs it.
+Home Assistant keeps using the same adapter (BlueZ serves several clients); the adapter recovery features that need
+raw HCI sockets are not available in the instance. It changes only with a new version (the box in **Update** or
+**Rebuild**); otherwise delete the instance keeping its data and create it again. See the README's Bluetooth section.
+
 **One integration per instance.** Two instances running the *same* integration cannot share an MQTT broker: HRI's
 base topic and client id are `hass_<domain>`, named after the integration and not a setting, so they would take each
 other's connection and retained data. Give each instance a different integration (two config entries of one

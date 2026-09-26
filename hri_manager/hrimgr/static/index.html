@@ -23,8 +23,10 @@
   <label id="c-version-row">HRI version <select id="c-version"><option value="">loading…</option></select></label>
   <label id="c-kind-row" hidden>Branch or tag <select id="c-kind"><option value="branch">Branch</option><option value="tag">Tag</option></select></label>
   <label id="c-ref-row" hidden>Name <input id="c-ref" maxlength="100" placeholder="main" spellcheck="false"></label>
+  <label class="check"><input type="checkbox" id="c-bt"><span>Bluetooth (access to the host's D-Bus)</span></label>
   <button id="c-go" class="primary" type="submit">Create</button>
  </form>
+ <p class="mut small">Bluetooth gives the instance the host's D-Bus, through which BlueZ offers the Bluetooth adapters. D-Bus is a powerful interface that reaches many of the host's services: turn it on only for an integration that needs Bluetooth. Home Assistant keeps using the same adapter. It can be changed later only with a new version (Update or Rebuild).</p>
  <p class="mut small">The app is called <code id="c-slug">local_hri_…</code>, starts at boot with its Watchdog on and shows in the sidebar. Lowercase letters, digits and <code>_</code>, starting with a letter, at most 20.</p>
  <p class="warn small">Reusing the name of a deleted instance whose /config folder was kept gives the new instance that folder (its Home Assistant, integration and credentials), but not the old options: set its password and <code>ingress_users</code> again on its Configuration tab before you open it to others.</p>
  <p id="c-git-note" class="warn small" hidden>Testing only: the Supervisor builds that branch or tag of hass-remote-integration on this machine (several minutes), and its code and Dockerfile run here. Use a branch you trust; not for production.</p>
@@ -47,6 +49,7 @@
   <label id="cf-version-row" hidden>Version <select id="cf-version"></select></label>
   <label id="cf-kind-row" hidden>Branch or tag <select id="cf-kind"><option value="branch">Branch</option><option value="tag">Tag</option></select></label>
   <label id="cf-ref-row" hidden>Name <input id="cf-ref" maxlength="100" spellcheck="false"></label>
+  <label id="cf-bt-row" class="check" hidden><input type="checkbox" id="cf-bt"><span>Bluetooth (access to the host's D-Bus), from this version on</span></label>
   <label id="cf-data-row" class="check" hidden><input type="checkbox" id="cf-data"><span>Also delete the instance's /config folder (its Home Assistant, integration and configuration)</span></label>
   <label id="cf-name-row" hidden><span>Type <b id="cf-name-hint"></b> to confirm</span><input id="cf-name" spellcheck="false" autocomplete="off"></label>
   <div class="row end"><button value="cancel" type="submit">Cancel</button><button id="cf-ok" value="ok" type="submit" class="primary">OK</button></div>

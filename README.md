@@ -117,6 +117,7 @@ Only what makes the copy a separate app; everything else is HRI's, as released:
 | `ports` | `8087/tcp: null`: no port published. The panel works through ingress; map a port on the instance's **Network** tab if you want one |
 | `backup_exclude` | `*_hass_remote_integration/…` becomes `*_hri_garage/…`, so the instance's backups leave out its installed Home Assistant (about 800 MB) as HRI's do |
 | `webui` | dropped |
+| `host_dbus` | `true`, only for an instance created (or updated) with **Bluetooth**, below |
 
 Before stamping, the manager checks HRI's template against the keys it knows from HRI's own app (`hrimgr/stamp.py`,
 `TEMPLATE_KEYS`) and a vetted range for each: `map` only the instance's own `app_config`, `image` only HRI's, `url`
@@ -124,6 +125,35 @@ only HRI's repository, option types without `device`, and so on. A template with
 `full_access`, `docker_api`, `privileged`, `host_network`, `devices`, `apparmor`, `environment`...) or a value
 outside its range is refused, on both channels, with "HRI's app definition has &lt;key&gt;, which this manager version
 does not accept; update the manager". `uart: true` is kept: HRI uses it for serial sticks.
+
+### Bluetooth
+
+An integration that talks to Bluetooth devices needs the host's Bluetooth adapter. In an app that adapter is reached
+through BlueZ, the host's Bluetooth service, over the host's D-Bus, which the Supervisor gives an app with
+`host_dbus: true`. HRI's published app does not ask for it, and neither does an instance unless you tick
+**Bluetooth (access to the host's D-Bus)** when you create it. The manager then adds `host_dbus: true` to that
+instance's definition and records the choice in its registry. HRI's template can never add it: `host_dbus` is not one
+of the keys the manager accepts from it. The instance's row shows a **Bluetooth** badge.
+
+- **What it enables:** the integration in that instance can scan for and connect to Bluetooth devices through the
+  host's adapters, as Home Assistant's own Bluetooth integration does on the host.
+- **Security:** D-Bus is a powerful interface. It reaches not just BlueZ but many of the host's system services (as
+  far as their own D-Bus policies allow), so an instance with it can do much more on the host than one without. Turn it
+  on only for an integration that needs Bluetooth, and only with code you trust.
+- **Home Assistant keeps the adapter.** BlueZ serves several clients at once: Home Assistant Core goes on using the
+  same adapter while the instance scans and connects through it. An adapter has a limited number of connection
+  slots, which they share.
+- **No adapter recovery in the instance.** Home Assistant's features that reset or recover a stuck adapter need raw
+  HCI sockets (host network and extra capabilities), which an instance does not get. Home Assistant Core on the host
+  still has them for its own use of the adapter.
+- **Changing it later** is part of **Update** or **Rebuild**: their dialogs have the same box, and the change is
+  applied with the new version. The Supervisor applies an installed app's definition only when the app's version
+  changes (it refuses an update to the same version), so a change without a newer release or a new commit is refused
+  with that reason. To change it at once, **Delete** the instance keeping its `/config` folder and create it again
+  with the same name and the other choice (set its options again, see [Deleting](#deleting)).
+
+The manager checks around every install and update that the Supervisor installed `host_dbus` exactly as the registry
+says (see [Security model](#security-model)).
 
 ### Git channel (testing)
 

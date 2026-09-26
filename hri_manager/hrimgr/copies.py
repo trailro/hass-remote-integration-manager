@@ -94,9 +94,9 @@ def _walk(base: str) -> list[str]:
     return sorted(out)
 
 
-def save(root: str, name: str, instance_folder: str, marker: dict) -> list[str]:
+def save(root: str, name: str, instance_folder: str, marker: dict, bluetooth: bool = False) -> list[str]:
     """Copy what ``is_copied`` names from ``instance_folder`` (just written by the manager) to ``root/<name>``,
-    replacing any earlier copy.  Returns the files copied."""
+    replacing any earlier copy.  Returns the files copied.  ``bluetooth``: the registry's choice for the instance."""
     channel = marker.get("channel")
     files = {}
     for rel in _walk(instance_folder):
@@ -112,7 +112,7 @@ def save(root: str, name: str, instance_folder: str, marker: dict) -> list[str]:
         config = yaml.safe_load(files["config.yaml"].decode("utf-8"))
     except (UnicodeDecodeError, yaml.YAMLError) as err:
         raise CopyError(f"its config.yaml cannot be read: {err}") from None
-    check(config, name, str(marker.get("version")), channel)
+    check(config, name, str(marker.get("version")), channel, bluetooth)
     for rel, data in files.items():
         if rel != "config.yaml":
             check_file(rel, data)
@@ -178,12 +178,16 @@ def check_file(rel: str, data: bytes) -> None:
             raise CopyError(f"its {rel} is not a mapping")
 
 
-def check(config: object, name: str, version: str, channel: str) -> dict:
+def check(config: object, name: str, version: str, channel: str, bluetooth: bool = False) -> dict:
     """An instance's stamped definition, exactly as this manager writes it: its slug and version, HRI's url, the image
     only for a release, every other key vetted as HRI's own template is (stamp.vet_template), and stamping it again
-    changes nothing (no name, panel title, port, backup_exclude entry or key stamping would not have written)."""
+    changes nothing (no name, panel title, port, backup_exclude entry or key stamping would not have written).
+    ``host_dbus: true`` exactly when ``bluetooth`` (the registry's choice): never otherwise."""
     if not isinstance(config, dict):
         raise CopyError("its config.yaml is not a mapping")
+    template = dict(config)
+    if bluetooth and template.pop("host_dbus", None) is not True:
+        raise CopyError("its config.yaml lacks host_dbus: true, which the instance's Bluetooth needs")
     shown_version = config.get("version")  # a scalar before str(): an aliased list would be spelled out whole
     if (config.get("slug") != names.config_slug(name) or not isinstance(shown_version, (str, int, float))
             or str(shown_version) != version):
@@ -193,8 +197,8 @@ def check(config: object, name: str, version: str, channel: str) -> dict:
     if (channel == "release") != ("image" in config):
         raise CopyError("its config.yaml does not match its channel (image)")
     try:
-        stamp.vet_template({**config, "slug": names.HRI_SLUG})
-        restamped = stamp.stamp({**config, "slug": names.HRI_SLUG}, name, version, channel)
+        stamp.vet_template({**template, "slug": names.HRI_SLUG})
+        restamped = stamp.stamp({**template, "slug": names.HRI_SLUG}, name, version, channel, bluetooth)
     except (stamp.TemplateError, ValueError, TypeError, AttributeError) as err:
         raise CopyError(str(err)) from None
     if restamped != config:
@@ -243,5 +247,5 @@ def load(root: str, name: str, entry: dict, installed_version: str) -> Copy:
         config = yaml.safe_load(files["config.yaml"].decode("utf-8")) if "config.yaml" in files else None
     except (OSError, UnicodeDecodeError, yaml.YAMLError) as err:
         raise CopyError(f"it cannot be read: {err}") from None
-    check(config, name, installed_version, channel)
+    check(config, name, installed_version, channel, entry.get("bluetooth") is True)
     return Copy(meta=meta, config=config, files=files)
