@@ -318,6 +318,22 @@ class Manager:
             done.append(name)
         return done
 
+    async def startup(self) -> list[str]:
+        """At the manager's start, before any job: what a crash or a stop left in the local apps folder is tidied
+        (children.cleanup_stale), knowing which version the Supervisor has of each instance.  What was done."""
+        try:
+            installed: dict[str, str | None] | None = {}
+            for app in await self.sv.list_apps():
+                name = names.name_from_slug(app.get("slug"))
+                if name:
+                    installed[name] = app.get("version")
+            notes = []
+        except (SupervisorError, NotAllowed) as err:
+            installed = None
+            notes = [f"could not ask the Supervisor which apps are installed ({err}): an update that stopped midway is "
+                     "left as it is until the next start"]
+        return notes + await asyncio.to_thread(children.cleanup_stale, self.root, self.registry, installed)
+
     async def auto_repair_check(self) -> None:
         """One check: the list, which starts the automatic repairs."""
         try:
@@ -1046,12 +1062,16 @@ class Manager:
 
     async def _update(self, job: Job, managed: children.Managed, version: str | None, ref: tuple[str, str] | None,
                       user: str, bluetooth: bool | None = None) -> dict:
+        try:
+            info = await self._installed(managed)
+        except (SupervisorError, NotAllowed) as err:
+            raise JobFailed(str(err)) from None
         if isinstance(managed.entry.get("updating"), dict):
             # an earlier update's flag, still set (its record failed): settled first, or this update's own flag, and
             # its rollback, would lose what it names
             try:
                 note = await asyncio.to_thread(children.settle_update, self.registry, managed.name, managed.entry,
-                                               managed.marker)
+                                               managed.marker, info.get("version"))
                 managed = await asyncio.to_thread(children.load_managed, self.root, managed.name, self.registry)
             except (RegistryError, children.NotManaged) as err:
                 raise JobFailed(str(err)) from None
@@ -1062,10 +1082,6 @@ class Manager:
         restamp = False
         had_bluetooth = managed.entry.get("bluetooth") is True  # the registry's, never the marker's
         requested, bluetooth = bluetooth, had_bluetooth if bluetooth is None else bluetooth
-        try:
-            info = await self._installed(managed)
-        except (SupervisorError, NotAllowed) as err:
-            raise JobFailed(str(err)) from None
         if channel == "release":
             if version is None:
                 try:
@@ -1137,14 +1153,17 @@ class Manager:
             raise JobFailed(f"the definition was not written: {err}") from None
         expected = stamp.expected_view(built["config"], managed.slug)
         missing: list[str] = []
+        sent = verified = False
         try:
             managed = await asyncio.to_thread(children.load_managed, self.root, managed.name, self.registry)
             await self._wait_store(job, managed.slug, version, replacement.manifest)
             if info.get("version") != version:
                 await self._verify_store(job, managed, expected, replacement.manifest)
                 job.log(f"updating {info.get('version')} -> {version}" + (" (building)" if channel == "git" else ""))
+                sent = True
                 await self.sv.update(managed)
                 missing = await self._verify_installed(job, managed, expected)
+                verified = not missing
             elif version != marker.get("version"):
                 # the Supervisor finished an update the manager stopped waiting for: the app is taken over only as
                 # checked (a restamp at the same version is not: a newer stamping may report otherwise)
@@ -1154,6 +1173,12 @@ class Manager:
             if after.get("version") != version:
                 raise JobFailed(f"the Supervisor reports {after.get('version')} after the update, not {version}")
         except asyncio.CancelledError:
+            if sent:
+                # the Supervisor may finish the update on its own: putting the previous definition back now could
+                # offer a downgrade; the next start keeps whichever definition the installed app is (cleanup_stale)
+                job.log("the manager is stopping while the Supervisor updates it: both definitions stay, and the next "
+                        "start keeps the new one if the Supervisor installed it, or puts the previous one back")
+                raise
             job.log("the manager is stopping: putting the previous definition back")
             await self._shielded(job, self._rollback_update(job, replacement), "putting it back")
             raise
@@ -1163,6 +1188,9 @@ class Manager:
             await self._rollback_update(job, replacement)
             raise self._tampered(managed, str(err), mark, "and its previous definition put back") from None
         except Exception as err:
+            if sent:
+                await self._after_failed_update(job, managed, replacement, version, recorded, err, verified,
+                                                built["files"], bluetooth)
             job.log(f"{err}: putting the previous definition back")
             await self._rollback_update(job, replacement)
             if isinstance(err, (SupervisorError, NotAllowed)):
@@ -1195,6 +1223,36 @@ class Manager:
                     "(an HRI update, or a rebuild of a new commit), not at the same version")
         result = {"version": version, "state": after.get("state"), "restamped": restamp}
         return {**result, "warning": warning} if warning else result
+
+    async def _after_failed_update(self, job: Job, managed: children.Managed, replacement: children.Replacement,
+                                   version: str, recorded: dict, err: Exception, verified: bool,
+                                   files: dict[str, bytes], bluetooth: bool) -> None:
+        """An update call that failed after it was sent: what the Supervisor has now decides.  Installed all the same:
+        the new definition stays and is recorded (marked to be checked unless it was), never the previous one put
+        back (the Supervisor would offer a downgrade).  Not known yet (no answer, or no clean refusal): both stay for
+        the next start to settle.  Returns only when the update did not happen: the caller puts the previous one back."""
+        try:
+            now = (await self.sv.app_info(managed.slug)).get("version")
+        except Exception:  # noqa: BLE001 - not known
+            now = None
+        unsure = isinstance(err, SupervisorError) and not (err.status and 400 <= err.status < 500)
+        if now == version:
+            mark = None if verified else children.pending_mark(
+                f"its update to {version} was not checked: the update call failed ({str(err)[:200]}) after the "
+                "Supervisor had installed it")
+            try:
+                await asyncio.to_thread(self.registry.update, managed.name, updating=None, **{**recorded, "tampered": mark})
+                await asyncio.to_thread(replacement.commit)
+            except (RegistryError, OSError) as err2:
+                job.log(f"warning: {err2}; the next start records it")
+            await self._save_copy(job, managed, bluetooth, files)
+            raise JobFailed(f"{err}. The Supervisor has installed {version} all the same: its new definition stays and "
+                            "is recorded" + ("" if verified else "; the manager has not checked it yet: Check again "
+                                                               "on its row")) from None
+        if now is None or unsure:
+            raise JobFailed(f"{err}. Whether the Supervisor installed {version} is not known yet: both definitions "
+                            "stay, and the manager's next start keeps the new one if it did, or puts the previous one "
+                            "back") from None
 
     async def _bluetooth_at_same_version(self, managed: children.Managed, requested: bool | None,
                                          recorded: bool) -> tuple[bool, bool]:

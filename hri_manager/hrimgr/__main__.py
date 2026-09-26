@@ -9,7 +9,7 @@ import sys
 
 from aiohttp import web
 
-from . import VERSION, children
+from . import VERSION
 from .corews import CoreUsers
 from .github import GitHub
 from .instances import Manager
@@ -41,8 +41,6 @@ def main() -> int:
     if settings.dev:
         log.warning("DEVELOPMENT MODE: peers %s, Supervisor %s", ", ".join(sorted(settings.peers)), settings.supervisor_url)
     registry = Registry(os.path.join(settings.data_dir, FILE_NAME))
-    for note in children.cleanup_stale(settings.local_apps, registry):
-        log.log(logging.WARNING if note.startswith("could not") else logging.INFO, "local apps folder: %s", note)
 
     async def build() -> web.Application:
         sv = SupervisorClient(settings.supervisor_url, settings.supervisor_token)
@@ -70,6 +68,9 @@ def main() -> int:
             await users.close()
 
         async def report(_app: web.Application) -> None:
+            # before any job or request: what a crash left, settled with the Supervisor's installed versions
+            for note in await manager.startup():
+                log.log(logging.WARNING if note.startswith("could not") else logging.INFO, "local apps folder: %s", note)
             for name in manager.pending_setup():
                 log.warning("instance %s: its create stopped before its setup finished; the page offers Finish setup", name)
             # instances left detached by a restore get their definitions written again, by a loop of its own (the

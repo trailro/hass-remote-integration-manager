@@ -289,18 +289,38 @@ class WriteTest(unittest.TestCase):
         with open(os.path.join(self.root, f"hri_{name}", "config.yaml"), "rb") as fh:
             return fh.read()
 
-    def test_an_update_stopped_before_its_commit_is_put_back(self):
-        """The manager killed between the swap and the commit (OOM, power, SIGKILL): the registry's flag says so."""
+    def killed_mid_update(self):
+        """The manager killed between the swap and the record (OOM, power, SIGKILL): the registry's flag says so."""
         m = children.write_new(self.root, "garage", build_with({"config.yaml": b"old"}, marker("garage")), self.reg)
         self.reg.update("garage", updating={"at": "t", "fields": {"version": "0.25.1", "sha": "b" * 40}})
         children.replace(m, build_with({"config.yaml": b"new"}, marker("garage", version="0.25.1", sha="b" * 40)))
         self.assertEqual(len(self.entries()), 2)
-        done = children.cleanup_stale(self.root, self.reg)
+
+    def test_an_update_the_supervisor_did_not_install_is_put_back(self):
+        self.killed_mid_update()
+        done = children.cleanup_stale(self.root, self.reg, {"garage": "0.25.0"})
         self.assertEqual(self.entries(), ["hri_garage"])
         self.assertEqual(self.read(), b"old")
         self.assertIsNone(self.reg.get("garage")["updating"])
         self.assertEqual(self.reg.get("garage")["version"], "0.25.0")
-        self.assertIn("stopped before it was committed", done[0])
+        self.assertIn("the Supervisor has not installed it", done[0])
+
+    def test_an_update_the_supervisor_installed_is_kept_recorded_and_marked_to_be_checked(self):
+        """Putting the previous definition back would make the Supervisor offer (and auto-update to) a downgrade."""
+        self.killed_mid_update()
+        done = children.cleanup_stale(self.root, self.reg, {"garage": "0.25.1"})
+        self.assertEqual((self.entries(), self.read()), (["hri_garage"], b"new"))
+        entry = self.reg.get("garage")
+        self.assertEqual((entry["version"], entry["updating"]), ("0.25.1", None))
+        self.assertTrue(entry["tampered"]["unverified"] and entry["tampered"]["pending"])
+        self.assertIn("had finished", done[0])
+
+    def test_an_update_nobody_can_tell_about_is_left_for_the_next_start(self):
+        self.killed_mid_update()
+        done = children.cleanup_stale(self.root, self.reg, None)  # the Supervisor could not be asked
+        self.assertEqual(len(self.entries()), 2)
+        self.assertIsInstance(self.reg.get("garage")["updating"], dict)
+        self.assertIn("the next start settles it", done[0])
 
     def test_without_the_flag_the_new_definition_stays(self):
         m = children.write_new(self.root, "garage", build_with({"config.yaml": b"old"}, marker("garage")), self.reg)
@@ -313,7 +333,7 @@ class WriteTest(unittest.TestCase):
         fields = {"version": "0.25.1", "sha": "b" * 40, "ref": "v0.25.1", "updated_by": "alice"}
         self.reg.update("garage", updating={"at": "t", "fields": fields})
         children.replace(m, build_with({"config.yaml": b"new"}, marker("garage", version="0.25.1", sha="b" * 40))).commit()
-        children.cleanup_stale(self.root, self.reg)
+        children.cleanup_stale(self.root, self.reg, {"garage": "0.25.1"})
         entry = self.reg.get("garage")
         self.assertEqual((entry["version"], entry["ref"], entry["updated_by"], entry["updating"]), ("0.25.1", "v0.25.1", "alice", None))
         self.assertEqual(self.read(), b"new")
@@ -323,7 +343,7 @@ class WriteTest(unittest.TestCase):
         children.write_new(self.root, "garage", build_with({"config.yaml": b"old"}, marker("garage", stamp_version=1)), self.reg)
         self.reg.update("garage", stamp_version=1, updating={"at": "t", "fields": {"version": "0.25.0", "sha": "a" * 40,
                                                                                    "stamp_version": 2}})
-        children.cleanup_stale(self.root, self.reg)
+        children.cleanup_stale(self.root, self.reg, {"garage": "0.25.0"})
         entry = self.reg.get("garage")
         self.assertEqual((entry["stamp_version"], entry["updating"]), (1, None))
 

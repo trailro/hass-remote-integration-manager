@@ -66,7 +66,7 @@ function versionCell(i) {
   const shown = i.installed_version || i.version || '?';
   let out = esc(shown);
   if (i.newer_release) out += ` <span class="tag acc" title="a newer HRI release">${esc(i.newer_release)} available</span>`;
-  else if (i.update_available) out += ' <span class="tag warn" title="the definition is newer than the installed app">update pending</span>';
+  else if (i.update_available) out += ' <span class="tag warn" title="the Supervisor offers the definition in the local apps folder, another version than the installed one (newer or older): use the manager\'s Update, never the Update of the app\'s own page">definition differs</span>';
   return out;
 }
 function channelCell(i) {
