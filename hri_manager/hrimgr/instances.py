@@ -592,6 +592,7 @@ class Manager:
             raise JobFailed(str(err)) from None
         except Exception as err:  # tarsafe.UnsafeArchive and the like
             raise JobFailed(f"the download was refused: {err}") from None
+        job.keep(archive)  # a spooled file of up to 256 MB: closed after its build, or at the latest when the job ends
         if channel == "git" and not archive.sha:
             raise JobFailed("the archive does not say which commit it is")
         if expected and archive.sha != expected:
@@ -691,6 +692,13 @@ class Manager:
         instance (its stamped config over the archive of its commit).  ``built``: gets the stamped config written, as
         "config" (what the Supervisor is then checked to report)."""
         def build(tmp: str) -> dict:
+            try:
+                return fill(tmp)
+            finally:
+                if archive is not None:
+                    archive.close()  # read whole by now
+
+        def fill(tmp: str) -> dict:
             if copy is not None and channel == "release":
                 # the config dumped by the manager from the checked mapping, never the copy's bytes
                 config = copy.config
@@ -1198,6 +1206,7 @@ class Manager:
             job.log(f"checking that commit {sha[:12]}, the installed one, is on HRI's {ref[0]} {ref[1]}, and downloading it")
             try:
                 archive, source = await self.gh.tarball_of_commit(sha, *ref)
+                job.keep(archive)
             except NotHRICommit as err:
                 raise NeedsAttention(f"{err}: not a commit of HRI's {ref[0]} {ref[1]}") from None
             except GitHubError as err:

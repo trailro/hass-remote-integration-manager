@@ -47,6 +47,19 @@ class Archive:
     links: dict[str, str] = field(default_factory=dict)  # relative name -> relative target (a regular file)
     skipped: list[str] = field(default_factory=list)
     tar: tarfile.TarFile | None = None
+    fileobj: object = None  # the unpacked tar (a SpooledTemporaryFile), which TarFile.close leaves open
+
+    def close(self) -> None:
+        if self.tar is not None:
+            self.tar.close()
+        if self.fileobj is not None:
+            self.fileobj.close()
+
+    def __enter__(self) -> "Archive":
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self.close()
 
     def read(self, rel: str) -> bytes:
         info = self.files[rel]
@@ -107,10 +120,12 @@ def open_archive(data: bytes) -> Archive:
         raise UnsafeArchive("the archive is larger than the manager accepts")
     fileobj = gunzip(data)
     try:
-        return _open(fileobj)
+        archive = _open(fileobj)
     except BaseException:
         fileobj.close()
         raise
+    archive.fileobj = fileobj
+    return archive
 
 
 def _open(fileobj) -> Archive:
@@ -167,7 +182,28 @@ def _open(fileobj) -> Archive:
             archive.links[rel] = resolved
         else:
             archive.skipped.append(rel)
+    _check_names(archive)
     return archive
+
+
+def _check_names(archive: Archive) -> None:
+    """One name set across the kinds that are written: a name that is two of a file, a link and a folder, or a name
+    below a file or a link, would fail midway through the extraction (or write through the link): refused here."""
+    kinds: dict[str, str] = {rel: "file" for rel in archive.files}
+    for rel in archive.links:
+        if rel in kinds:
+            raise UnsafeArchive(f"{show(rel)} is in the archive as a {kinds[rel]} and a link")
+        kinds[rel] = "link"
+    for rel in archive.dirs:
+        if kinds.get(rel, "folder") != "folder":
+            raise UnsafeArchive(f"{show(rel)} is in the archive as a {kinds[rel]} and a folder")
+        kinds[rel] = "folder"
+    for rel in kinds:
+        parts = rel.split("/")
+        for i in range(1, len(parts)):
+            parent = "/".join(parts[:i])
+            if kinds.get(parent, "folder") != "folder":
+                raise UnsafeArchive(f"{show(rel)} is below {show(parent)}, a {kinds[parent]} of the archive")
 
 
 def extract(archive: Archive, dest: str) -> None:
