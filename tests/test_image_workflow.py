@@ -50,6 +50,10 @@ class ImageJobTest(unittest.TestCase):
         build = next(s for s in job["steps"] if str(s.get("uses", "")).startswith("docker/build-push-action@"))
         self.assertEqual(build["with"]["context"], "hri_manager")
         self.assertEqual(build["with"]["platforms"], "linux/amd64,linux/arm64")
+        checkout = next(s for s in job["steps"] if str(s.get("uses", "")).startswith("actions/checkout@"))
+        # the tag by its full name: actions/checkout looks a bare name up as a branch first
+        self.assertEqual(checkout["with"]["ref"], "refs/tags/${{ env.TAG }}")
+        self.assertIs(checkout["with"]["persist-credentials"], False)
         meta = next(s for s in job["steps"] if str(s.get("uses", "")).startswith("docker/metadata-action@"))
         self.assertEqual(meta["with"]["images"], "ghcr.io/${{ github.repository }}")
         self.assertEqual(wf["jobs"]["app-version"]["env"]["IMAGE"], "ghcr.io/${{ github.repository }}")
@@ -87,6 +91,14 @@ class ImageJobTest(unittest.TestCase):
         pull = _step(job, "Anyone can pull the image, for both architectures")
         # anonymously, both architectures: tests/test_published_image.py tests that script
         self.assertIn('.github/check_published_image.py --ref "$IMAGE:${TAG#v}"', pull)
+        # the write token is not kept in .git/config for every step: only the pull and push of the write get it
+        checkout = next(s for s in job["steps"] if str(s.get("uses", "")).startswith("actions/checkout@"))
+        self.assertIs(checkout["with"]["persist-credentials"], False)
+        write = next(s for s in job["steps"] if s.get("name") == "Set hri_manager/config.yaml version and image")
+        self.assertEqual(write["env"], {"GH_TOKEN": "${{ github.token }}"})
+        authed = [line for line in write["run"].splitlines() if "GH_TOKEN" in line or "extraheader" in line]
+        self.assertEqual(len(authed), 3, authed)  # the header built once, then the pull and the push
+        self.assertNotRegex(write["run"], r"https://[^ ]*\$GH_TOKEN|x-access-token:\$")
 
 
 class AppVersionStepTest(unittest.TestCase):
@@ -184,6 +196,23 @@ class AppVersionStepTest(unittest.TestCase):
         config, _, out = self.run_step("v0.1.1")
         self.assertEqual((config["version"], config.get("image"), self.moved), ("0.3.0", None, False))
         self.assertIn("newer than 0.1.1", out)
+
+    def test_a_version_it_cannot_read_fails_clearly(self):
+        """Never a guess: a version that is not X.Y.Z, or no version line, stops the job with the reason."""
+        output = self.work.parent / "github_output"
+        releases = json.dumps([{"tagName": "v0.1.1", "isPrerelease": False, "isDraft": False}])
+        env = {**self.env, "TAG": "v0.1.1", "BRANCH": "main", "IMAGE": IMAGE, "GITHUB_OUTPUT": str(output),
+               "GITHUB_REPOSITORY": "trailro/hass-remote-integration-manager", "STUB_RELEASES": releases}
+        for text, why in ((self.original.replace('version: "0.1.0"', 'version: "0.1.0-dev"'), "is not a stable version X.Y.Z"),
+                          (self.original.replace('version: "0.1.0"\n', ""), "has no version: line")):
+            with self.subTest(why=why):
+                self.config_path.write_text(text, encoding="utf-8")
+                output.write_text("", encoding="utf-8")
+                proc = subprocess.run(["bash", "-e", "-o", "pipefail", "-c", self.decide], cwd=self.work, env=env,
+                                      capture_output=True, text=True)
+                self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
+                self.assertIn(why, proc.stderr)
+                self.assertNotIn("move=true", output.read_text(encoding="utf-8"))
 
     def test_versions_compare_as_numbers(self):
         """0.10.0 is newer than 0.9.0 (a text sort says otherwise)."""
