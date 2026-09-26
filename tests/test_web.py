@@ -83,9 +83,15 @@ class GuardTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(resp.status, 202, await resp.text())
         await self.env.job((resp.status, await resp.json()))
         big = b'{"x": "' + b"a" * (mgrweb.MAX_BODY + 10) + b'"}'
-        resp = await self.env.client.post("/api/instances", data=big,
-                                          headers={"X-Requested-With": "fetch", "Content-Type": "application/json"})
-        self.assertIn(resp.status, (400, 413))
+
+        async def streamed():  # no Content-Length: aiohttp counts what it reads
+            for i in range(0, len(big), 4096):
+                yield big[i:i + 4096]
+
+        for data in (big, streamed()):
+            resp = await self.env.client.post("/api/instances", data=data,
+                                              headers={"X-Requested-With": "fetch", "Content-Type": "application/json"})
+            self.assertEqual(resp.status, 413)
 
     async def test_policy_headers_everywhere(self):
         client = self.env.client
