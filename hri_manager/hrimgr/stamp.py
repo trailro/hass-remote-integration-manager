@@ -28,7 +28,13 @@ template (``TEMPLATE_KEYS``), each with a value in the range vetted for it.  A k
 than HRI's app has (``hassio_role``, ``full_access``, ``docker_api``, ``privileged``, ``host_network``, ``devices``,
 ``apparmor``, a ``map`` of another folder...) is refused with the whole definition, whichever channel it comes from:
 the manager writes app definitions with the Supervisor's manager role, and a new key in HRI's template needs a new
-manager version that vets it.  The YAML is written with ``yaml.safe_dump``."""
+manager version that vets it.  The YAML is written with ``yaml.safe_dump``.
+
+HRI's CI imports this module on its own (the manager's latest release, ``hri_manager`` on PYTHONPATH, only PyYAML
+installed) to check its template before a release: ``vet_template(data)`` and ``stamp(template, name, version,
+channel, bluetooth=..., host_network=...)`` are that contract.  Keep its imports (children, names, tarsafe, registry)
+to the standard library and PyYAML, and a new argument of ``stamp`` a keyword with a default;
+tests/test_stamp_contract.py checks both."""
 
 from __future__ import annotations
 
