@@ -825,7 +825,8 @@ class Manager:
             managed = await asyncio.to_thread(
                 children.write_new, self.root, name,
                 self._builder(job, archive, channel, name, version, sha, marker, source, copy=copy), self.registry)
-        except (stamp.TemplateError, children.UnsafePath, children.NotManaged, RegistryError, OSError) as err:
+        except (stamp.TemplateError, children.UnsafePath, children.NotManaged, RegistryError, OSError, JobFailed) as err:
+            # JobFailed: the builder's own refusal (more than one app)
             await asyncio.to_thread(self._restore_entry, name, entry, marker["instance_id"])
             raise JobFailed(f"the definition was not written: {err}") from None
         await self._save_copy(job, managed)
