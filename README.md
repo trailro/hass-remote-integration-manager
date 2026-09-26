@@ -102,12 +102,15 @@ it, then set it up as the [HRI documentation](https://github.com/trailro/hass-re
 
 ### One integration per instance
 
-Each instance runs **one** integration, as HRI does: for a second integration, create a second instance. Two
-instances running the **same** integration cannot share an MQTT broker: HRI names everything it publishes after the
-integration's domain (base topic and client id `hass_<domain>`, not a setting), so the second would take the first's
-broker connection and clear its retained data. Give the instances different integrations. For two config entries of
-one integration, put both in one instance (as HRI's README says), or give each instance its own broker. Base topics
-per instance would lift this; they are a possible future HRI feature, not something the manager can set.
+Each instance runs **one** integration, as HRI does: for a second integration, create a second instance. From HRI
+0.26.0 each instance derives its MQTT identity from its app's slug, so two instances running the **same**
+integration can share a broker: each publishes under a per-instance base topic (see HRI's `docs/mqtt.md` for the
+exact rule), unless it had already published under the integration's plain name, which it keeps so that its
+entities in the main Home Assistant stay as they are. With an older HRI release, everything an instance publishes is
+named after the integration's domain (base topic and client id `hass_<domain>`, not a setting), so a second instance
+of the same integration would take the first's broker connection and clear its retained data: one instance of an
+integration per broker there (two config entries of one integration go in one instance, as HRI's README says). The
+manager sets nothing for this either way.
 
 ### What is stamped
 
