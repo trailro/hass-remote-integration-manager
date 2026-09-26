@@ -13,6 +13,7 @@ from unittest import mock
 import yaml
 
 from hrimgr import VERSION, children, stamp
+from hrimgr.jobs import Job, JobFailed
 from hrimgr.registry import RegistryError
 from hrimgr.supervisor import SupervisorError
 
@@ -376,6 +377,31 @@ class FlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(job["state"], "failed")
         self.assertIsNone(env.registry.get("garage")["updating"])
         self.assertEqual(children.cleanup_stale(env.local_apps, env.registry), [])
+
+    async def test_a_delete_of_an_instance_that_is_gone_says_delete(self):
+        env = self.env
+        await self.create()
+        del env.stub.installed["local_hri_garage"]
+        shutil.rmtree(self.folder("garage"))
+        await env.sv.reload_store()
+        job = await env.job(await env.send("DELETE", "/api/instances/garage", {"remove_data": False, "confirm": "garage"}))
+        self.assertEqual(job["state"], "failed")
+        self.assertIn("local_hri_garage is not installed: nothing to delete", job["error"])
+        self.assertNotIn("repair", job["error"])
+
+    async def test_the_store_wait_is_bounded_by_the_clock(self):
+        """Each store answer may take up to its own timeout: the wait is measured, not counted in sleeps."""
+        env = self.env
+        env.manager.store_timeout = 0.4
+
+        async def slow(slug):
+            await asyncio.sleep(0.2)
+            return None
+
+        start = time.monotonic()
+        with mock.patch.object(env.sv, "store_app", side_effect=slow), self.assertRaises(JobFailed):
+            await env.manager._wait_store(Job("garage", "create", "t"), "local_hri_garage", "0.25.0")
+        self.assertLess(time.monotonic() - start, 1.5)
 
     async def test_finish_setup_and_install(self):
         env = self.env

@@ -549,13 +549,15 @@ class Manager:
         await self._check_tree(slug, manifest)
         job.log("reloading the Supervisor's store")
         await self.sv.reload_store()
-        waited = 0.0
+        # by the clock: a store answer can take up to its own timeout, which counting sleeps would not see
+        start = time.monotonic()
         reloaded_again = False
         while True:
             entry = await self.sv.store_app(slug)
             if entry and entry.get("version_latest") == version:
                 job.log(f"the store has {slug} {version}")
                 return
+            waited = time.monotonic() - start
             if waited >= self.store_timeout:
                 message = f"the Supervisor's store did not show {slug} {version} within {int(self.store_timeout)} s"
                 future = await asyncio.to_thread(children.newest_future, self.root)
@@ -570,7 +572,6 @@ class Manager:
                 await self.sv.reload_store()
                 reloaded_again = True
             await asyncio.sleep(self.poll_interval)
-            waited += self.poll_interval
 
     async def _fetch(self, job: Job, channel: str, version: str | None, ref: tuple[str, str] | None,
                      recorded: str | None = None):
@@ -1084,9 +1085,10 @@ class Manager:
             raise JobFailed(str(err)) from None
         return {"removed": managed.slug, "data_removed": remove_data}
 
-    async def _detached(self, job: Job, name: str) -> tuple[dict, dict]:
+    async def _detached(self, job: Job, name: str, action: str = "repair") -> tuple[dict, dict]:
         """The registry's entry and the Supervisor's info of an instance whose definition is gone: in the registry,
-        no folder, installed, detached after a store reload, no store entry, HRI's url.  JobFailed otherwise."""
+        no folder, installed, detached after a store reload, no store entry, HRI's url.  JobFailed otherwise, in the
+        words of ``action`` (repair, update, delete)."""
         slug = names.supervisor_slug(name)
         try:
             entry = await asyncio.to_thread(self.registry.get, name)
@@ -1095,19 +1097,21 @@ class Manager:
         if entry is None:
             raise JobFailed(f"{name} is not in the manager's registry: not created by this manager, left alone")
         if os.path.lexists(os.path.join(self.root, names.folder_name(name))):
-            raise JobFailed(f"{names.folder_name(name)} exists: nothing to repair")
+            raise JobFailed(f"{names.folder_name(name)} exists: {name} is not an instance without its definition, so "
+                            f"it is not {action}d this way")
         try:
             if not any(a.get("slug") == slug for a in await self.sv.list_apps()):
-                raise JobFailed(f"{slug} is not installed: nothing to repair")
+                raise JobFailed(f"{slug} is not installed: nothing to {action}"
+                                + (" (Forget drops the manager's own records of it)" if action == "delete" else ""))
             # only an app whose definition is gone from everywhere the store reads: after a reload, the Supervisor
             # calls it detached and its store has no app of that slug
             await self.sv.reload_store()
             info = await self.sv.app_info(slug)
             if info.get("detached") is not True:
                 raise JobFailed(f"{slug} is not detached: a definition of it is in the local apps folder (in another "
-                                f"folder than {names.folder_name(name)}?), so it is not the manager's to repair: left alone")
+                                f"folder than {names.folder_name(name)}?), so it is not the manager's to {action}: left alone")
             if await self.sv.store_app(slug) is not None:
-                raise JobFailed(f"the Supervisor's store has a definition of {slug}: not repaired, left alone")
+                raise JobFailed(f"the Supervisor's store has a definition of {slug}: not {action}d, left alone")
         except (SupervisorError, NotAllowed) as err:
             raise JobFailed(str(err)) from None
         if info.get("url") != names.HRI_URL:
@@ -1243,7 +1247,7 @@ class Manager:
         its installed version: the definition of a NEWER version, written and installed in one job the user asked
         for.  If the update does not succeed the definition is removed again (the instance stays detached)."""
         slug = names.supervisor_slug(name)
-        entry, info = await self._detached(job, name)
+        entry, info = await self._detached(job, name, "update")
         installed = str(info.get("version") or "")
         channel = entry.get("channel")
         if channel == "release":
@@ -1352,7 +1356,7 @@ class Manager:
     async def _delete_detached(self, job: Job, name: str, remove_data: bool, user: str) -> dict:
         """Delete of an instance whose definition is gone: a folder with the manager's marker only (no config.*: the
         store sees no app in it) gives the capability every changing call needs, then the ordinary delete."""
-        entry, info = await self._detached(job, name)
+        entry, info = await self._detached(job, name, "delete")
         marker = self._marker(name, entry.get("channel"), str(info.get("version") or ""),
                               (entry.get("ref_kind") or "tag", entry.get("ref") or ""), entry.get("sha"), "delete", user,
                               instance_id=entry.get("instance_id"))
