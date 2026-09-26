@@ -371,7 +371,9 @@ narrows itself, in code, and the tests pin it:
   repaired by the manager; Stop and Delete stay, and Delete (or Forget) clears the mark. A field the Supervisor no
   longer reports at all is not a difference but most likely a change of its API: the app is then stopped and marked
   as not checked, and kept installed (an uninstall would drop its options); before an install or update, the same
-  refuses it. A newer manager may read the new answer. What is
+  refuses it. **Check again** on its row (or **Repair**, for an instance without its folder) checks it again and
+  clears the mark when it passes; the manager also checks, at its start, an app installed while it was not watching
+  (an update it had stopped waiting for). What is
   left: a store reload by someone else between the manager's last check and the Supervisor's start of the install
   (both within the same moment), of a folder changed in between; the check after the install still catches every
   key the Supervisor reports. Root on the host can change anything and is outside this model.

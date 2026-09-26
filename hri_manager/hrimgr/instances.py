@@ -159,9 +159,9 @@ class Manager:
                 if app.get("url") == names.HRI_URL and app.get("detached") is True and known:
                     entry.update({k: known.get(k) for k in ("channel", "ref_kind", "ref", "sha")})
                     entry["bluetooth"] = known.get("bluetooth") is True
-                    if isinstance(known.get("tampered"), dict):  # never repaired, automatically or not
+                    if isinstance(known.get("tampered"), dict):  # never repaired automatically; by hand when unverified
                         entry["problem"] = f"{str(known['tampered'].get('reason'))[:300]}: {self._mark_text(slug, known['tampered'])}"
-                        entry["actions"] = ["delete"]
+                        entry["actions"] = (["repair"] if known["tampered"].get("unverified") else []) + ["delete"]
                         out.append(entry)
                         continue
                     attention = known.get("needs_attention")
@@ -341,12 +341,35 @@ class Manager:
         if installed is not None:
             follow, more = await asyncio.to_thread(self._marked_installed, installed)
             notes += more
-            for name, managed, reason in follow:
+            for name, managed, reason, pending in follow:
+                if pending:
+                    self.jobs.start(name, "check", AUTO_USER, lambda job, m=managed: self._recheck(job, m))
+                    notes.append(f"{name}: installed while the manager was not watching: checking it")
+                    continue
                 self.jobs.start(name, "contain", AUTO_USER,
                                 lambda job, m=managed, r=reason: self._contain_again(job, m, r))
                 notes.append(f"{name}: installed from another definition than the manager's and still installed: "
                              "containing it again")
         return notes
+
+    async def _recheck(self, job: Job, managed: children.Managed) -> dict:
+        """An installed app the manager has not checked (marked pending: installed while it was not watching): its
+        folder checked (copies.check) and the app compared with it; the mark goes when they agree, the app is
+        contained when they differ, stopped and kept when the Supervisor does not report a field."""
+        job.log("checking the installed app against its definition")
+        try:
+            expected, manifest = await asyncio.to_thread(self._definition_on_disk, managed)
+            await self._check_tree(managed.slug, manifest)
+            missing = await self._verify_installed(job, managed, expected)
+        except Tampered as err:
+            mark = await self._contain(job, managed, str(err))
+            raise self._tampered(managed, str(err), mark, "") from None
+        except (SupervisorError, NotAllowed) as err:
+            raise JobFailed(str(err)) from None
+        if missing:
+            raise await self._hold(job, managed, missing)
+        await asyncio.to_thread(self.registry.update, managed.name, tampered=None)
+        return {"checked": managed.slug}
 
     def _marked_installed(self, installed: dict[str, str | None]) -> tuple[list, list[str]]:
         """At the start: the instances marked as installed from another definition whose app is still installed (a
@@ -358,14 +381,15 @@ class Manager:
         follow, notes = [], []
         for name, entry in sorted(registered.items()):
             mark = entry.get("tampered")
-            if not isinstance(mark, dict) or mark.get("unverified") or name not in installed:
+            pending = isinstance(mark, dict) and mark.get("pending") is True
+            if not isinstance(mark, dict) or (mark.get("unverified") and not pending) or name not in installed:
                 continue
             try:
                 managed = children.load_managed(self.root, name, self.registry)
             except children.NotManaged as err:  # the marker broken: the mark says what to do by hand
                 notes.append(f"could not contain {name} again: {err}")
                 continue
-            follow.append((name, managed, str(mark.get("reason"))))
+            follow.append((name, managed, str(mark.get("reason")), pending))
         return follow, notes
 
     async def _contain_again(self, job: Job, managed: children.Managed, reason: str) -> dict:
@@ -432,9 +456,12 @@ class Manager:
             problems.append(str(known["tag_moved"])[:300])
         mark = known.get("tampered") if known else None
         if isinstance(mark, dict):
-            # marked: stop (when it runs) and Delete only; nothing that starts, installs or rewrites it
+            # marked: stop (when it runs) and Delete only; nothing that starts, installs or rewrites it.  An app the
+            # manager could not check may be checked again (Finish setup: checked, then set up and started)
             problems.append(f"{str(mark.get('reason'))[:300]}: {self._mark_text(slug, mark)}")
-            entry["actions"] = (["stop"] if app and app.get("state") == "started" else []) + ["delete"]
+            entry["actions"] = (["finish"] if app and mark.get("unverified") else []) + (
+                ["stop"] if app and app.get("state") == "started" else []) + ["delete"]
+            entry["labels"] = {"finish": "Check again"}
             entry["problem"] = "; ".join(problems)
             return entry
         if app is None and known is not None and known.get("channel") == "git":
@@ -573,7 +600,7 @@ class Manager:
         if known is None:
             raise InvalidRequest(f"{name} is not in the manager's registry: not created by this manager, so it is not "
                                  "repaired")
-        self._refuse_marked(name, known)
+        self._refuse_marked(name, known, check=True)
         return self.jobs.start(name, "repair", user, lambda job: self._repair(job, name, user))
 
     @staticmethod
@@ -633,7 +660,7 @@ class Manager:
         """``install`` (a definition without its app) or ``finish`` (installed, but its create stopped before the
         options and the start)."""
         managed = await self.managed(name)
-        self._refuse_marked(name, managed.entry)
+        self._refuse_marked(name, managed.entry, check=action == "finish")
         if action == "install" and managed.entry.get("channel") == "git":
             raise InvalidRequest(GIT_NOT_INSTALLED.format(name=name))
         return self.jobs.start(name, action, user, lambda job: self._setup(job, managed, install=action == "install"))
@@ -926,8 +953,9 @@ class Manager:
     async def _finish_setup(self, job: Job, managed: children.Managed) -> None:
         job.log("turning on start at boot, the Watchdog and the sidebar panel")
         await self.sv.set_options(managed, boot="auto", watchdog=True, ingress_panel=True)
-        job.log("starting")
-        await self.sv.start(managed)
+        if (await self.sv.app_info(managed.slug)).get("state") != "started":
+            job.log("starting")
+            await self.sv.start(managed)
         await asyncio.to_thread(self.registry.update, managed.name, setup_complete=True, tampered=None)
 
     @staticmethod
@@ -1074,9 +1102,17 @@ class Manager:
         return Tampered(message)
 
     @staticmethod
-    def _refuse_marked(name: str, entry: dict | None) -> None:
-        """InvalidRequest while the registry marks the instance (its app was installed from another definition)."""
+    def _refuse_marked(name: str, entry: dict | None, check: bool = False) -> None:
+        """InvalidRequest while the registry marks the instance (its app was installed from another definition).
+        ``check``: Finish setup or Repair, which check the installed app again: allowed for a mark of an app the manager
+        could not check ("unverified"), which they clear when the check passes."""
         mark = (entry or {}).get("tampered")
+        if isinstance(mark, dict) and check and mark.get("unverified"):
+            return
+        if isinstance(mark, dict) and mark.get("unverified"):
+            raise InvalidRequest(f"{name} is marked as not checked: {str(mark.get('reason'))[:300]}. Check again (or "
+                                 "Repair, without its folder) checks it; the manager starts, installs or updates "
+                                 "nothing of it before")
         if isinstance(mark, dict):
             raise InvalidRequest(f"{name} is marked: the Supervisor installed another definition of it than the "
                                  "manager's. The manager starts, installs, updates or repairs nothing of it; Delete "
@@ -1562,7 +1598,9 @@ class Manager:
         job.log(f"writing {names.folder_name(name)} again for {version}, the installed version")
         built: dict = {}
         try:
-            await asyncio.to_thread(self.registry.put, name, self._registry_entry(marker, setup_complete=setup_complete))
+            # a mark stays until the check below passes
+            await asyncio.to_thread(self.registry.put, name, self._registry_entry(marker, setup_complete=setup_complete,
+                                                                                  tampered=entry.get("tampered")))
             managed = await asyncio.to_thread(
                 children.write_new, self.root, name,
                 self._builder(job, archive, channel, name, version, sha, marker, source, copy=copy, built=built,
@@ -1582,6 +1620,9 @@ class Manager:
             raise self._tampered(managed, str(err), mark, "") from None
         if missing:
             raise await self._hold(job, managed, missing)
+        if entry.get("tampered") is not None:
+            await asyncio.to_thread(self.registry.update, name, tampered=None)
+            job.log("checked: the mark goes")
         return {"slug": slug, "version": version}
 
     async def _update_detached(self, job: Job, name: str, version: str | None, ref: tuple[str, str] | None,

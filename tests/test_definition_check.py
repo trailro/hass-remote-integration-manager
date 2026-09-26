@@ -389,7 +389,38 @@ class FlowCheckTest(unittest.IsolatedAsyncioTestCase):
         mark = env.registry.get("garage")["tampered"]
         self.assertEqual((mark["unverified"], mark["uninstalled"]), (True, False))
         _, data = await env.get("/api/instances")
-        self.assertEqual(data["instances"][0]["actions"], ["delete"])
+        (row,) = data["instances"]
+        self.assertEqual((row["actions"], row["labels"]["finish"]), (["finish", "delete"], "Check again"))
+        for action in ("start", "update", "install"):  # nothing else while it is not checked
+            status, _ = await env.send("POST", f"/api/instances/garage/{action}", {"version": "0.25.1"})
+            self.assertEqual(status, 400, action)
+        # the Supervisor reports the field again (the manager was updated, say): Check again clears the mark
+        job = await env.job(await env.send("POST", "/api/instances/garage/finish"))
+        self.assertEqual(job["state"], "succeeded", job)
+        self.assertIsNone(env.registry.get("garage")["tampered"])
+        self.assertEqual(env.stub.installed["local_hri_garage"]["state"], "started")
+
+    async def test_repair_of_an_unchecked_instance_checks_it_again(self):
+        env = self.env
+        self.assertEqual((await self.create())["state"], "succeeded")
+        with self.unreported("privileged"):
+            job = await env.job(await env.send("POST", "/api/instances/garage/update", {"version": "0.25.1"}))
+        self.assertIn("does not report privileged", job["error"])
+        shutil.rmtree(self.folder())  # restored without the local apps folder
+        await env.sv.reload_store()
+        _, data = await env.get("/api/instances")
+        self.assertEqual(data["instances"][0]["actions"], ["repair", "delete"])
+        job = await env.job(await env.send("POST", "/api/instances/garage/repair"))
+        self.assertEqual(job["state"], "succeeded", job)
+        self.assertIsNone(env.registry.get("garage")["tampered"])
+        with self.unreported("privileged"):  # still not reported: marked again, not uninstalled
+            shutil.rmtree(self.folder())
+            await env.sv.reload_store()
+            env.registry.update("garage", tampered={"reason": "x", "unverified": True, "stopped": True})
+            job = await env.job(await env.send("POST", "/api/instances/garage/repair"))
+        self.assertEqual(job["state"], "failed")
+        self.assertTrue(env.registry.get("garage")["tampered"]["unverified"])
+        self.assertIn("local_hri_garage", env.stub.installed)
 
     async def test_an_update_the_supervisor_cannot_report_is_recorded_stopped_and_marked(self):
         env = self.env
