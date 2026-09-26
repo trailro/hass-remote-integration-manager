@@ -488,6 +488,33 @@ class FlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((entry["version"], entry["updating"]), ("0.25.1", None))  # the first update is recorded
         self.assertEqual(self.config("garage")["version"], "0.25.1")
 
+    async def test_an_update_after_one_recorded_late_waits_for_its_check(self):
+        """C-11: settling an earlier update's flag records it marked to be checked; the next update must not record
+        over that mark (a restamp at the same version would clear it without any check)."""
+        env = self.env
+        await self.create()
+        update = env.registry.update
+
+        def full_disk(name, **fields):
+            if "stamp_version" in fields and fields.get("updating", 1) is None:
+                raise RegistryError("the manager's registry cannot be written: No space left on device")
+            return update(name, **fields)
+
+        with mock.patch.object(env.registry, "update", side_effect=full_disk):
+            job = await env.job(await env.send("POST", "/api/instances/garage/update", {"version": "0.25.1"}))
+        self.assertIn("warning", job["result"])
+        env.stub.releases.append("0.25.3")
+        job = await env.job(await env.send("POST", "/api/instances/garage/update", {"version": "0.25.3"}))
+        self.assertEqual(job["state"], "failed", job)
+        self.assertIn("is marked as not checked", job["error"])
+        self.assertEqual(env.stub.installed["local_hri_garage"]["version"], "0.25.1")
+        self.assertTrue(env.registry.get("garage")["tampered"]["pending"])
+        job = await env.job(await env.send("POST", "/api/instances/garage/finish"))  # Check again
+        self.assertEqual(job["state"], "succeeded", job)
+        job = await env.job(await env.send("POST", "/api/instances/garage/update", {"version": "0.25.3"}))
+        self.assertEqual(job["state"], "succeeded", job)
+        self.assertEqual(env.registry.get("garage")["version"], "0.25.3")
+
     async def test_a_failed_update_clears_its_flag(self):
         env = self.env
         await self.create()
@@ -680,6 +707,8 @@ class FlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(env.registry.get("garage")["stamp_version"], stamp.STAMP_VERSION + 1)
         self.assertEqual(env.changing_calls("local_hri_garage/update"), [])  # nothing for the Supervisor to install
         self.assertTrue(any("next version change" in l["msg"] for l in job["lines"]), job["lines"])
+        # R2-4: the Supervisor's own Rebuild applies a definition at the same version, unchecked: the note says so
+        self.assertTrue(any("The Supervisor's own Rebuild would apply it at once" in l["msg"] for l in job["lines"]))
 
     async def test_a_moved_release_tag_is_refused_and_flagged(self):
         env = self.env

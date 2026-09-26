@@ -132,6 +132,7 @@ class Manager:
         installed = {a.get("slug"): a for a in apps if isinstance(a.get("slug"), str)}
         latest = latest_stable(self.gh.cached_releases())
         folders = await asyncio.to_thread(children.scan, self.root, self.registry)
+        configs = await asyncio.to_thread(lambda: {n: self._config_sha256(n) for n, m, _ in folders if m is not None})
         found = await self._decoys()
         try:
             registered = await asyncio.to_thread(self.registry.all)
@@ -154,7 +155,8 @@ class Manager:
                                "installed": slug in installed, "state": installed.get(slug, {}).get("state")})
                 continue
             entry = self._entry(name, marker, installed.get(slug), latest, registered.get(name))
-            foreign = self._foreign_version(registered.get(name), (installed.get(slug) or {}).get("version_latest"))
+            foreign = (self._foreign_version(registered.get(name), (installed.get(slug) or {}).get("version_latest"))
+                       or self._foreign_config(registered.get(name), configs.get(name)))
             if foreign and not entry.get("job"):
                 entry["problem"] = "; ".join(p for p in (entry.get("problem"), foreign) if p)
                 entry["actions"] = ["repair"] + (["stop"] if entry["state"] == "started" else []) + ["delete"]
@@ -629,9 +631,40 @@ class Manager:
         if offered in (known.get("version"), fields.get("version")):
             return None
         return (f"the store offers a definition the manager did not write ({offered[:40]}; the manager's is "
-                f"{known.get('version')}): do not update from the Supervisor's app page. Someone changed "
+                f"{known.get('version')}): do not update or rebuild it from the Supervisor's app page. Someone changed "
                 f"{names.folder_name(str(known.get('name')))}/ in the local apps folder; Repair writes the manager's "
                 "definition again, Delete removes the instance")
+
+    @staticmethod
+    def _foreign_config(known: dict | None, found: str | None) -> str | None:
+        """Why the folder's config.yaml is not the one the manager wrote, at any version: its sha256 (``found``; None:
+        it cannot be read) is neither the registry's (``config_sha256``) nor that of an update in flight.  The
+        Supervisor's own Rebuild applies a definition of the installed version as it is, without the manager's checks.
+        None when it is the manager's, or when the registry has no sha256 to compare (last written by 0.1.2)."""
+        if not known:
+            return None
+        flag = known.get("updating")
+        fields = flag.get("fields") if isinstance(flag, dict) and isinstance(flag.get("fields"), dict) else {}
+        recorded = [h for h in (known.get("config_sha256"), fields.get("config_sha256")) if isinstance(h, str)]
+        if not recorded or found in recorded:
+            return None
+        folder = names.folder_name(str(known.get("name")))
+        return (f"{folder}/config.yaml is not the one the manager wrote for {known.get('version')} (someone changed it "
+                "in the local apps folder): do not update or rebuild it from the Supervisor's app page, which would "
+                "apply it. Repair writes the manager's definition again, Delete removes the instance")
+
+    def _config_sha256(self, name: str) -> str | None:
+        """The sha256 of ``hri_<name>/config.yaml`` as it is now (never through a link), None when it cannot be read."""
+        try:
+            return hashlib.sha256(children.read_file(children.child_path(self.root, name), "config.yaml")).hexdigest()
+        except (OSError, children.UnsafePath, names.InvalidName):
+            return None
+
+    def _record_config(self, name: str):
+        """A builder's on_built: the registry records the sha256 of the config.yaml written for ``name``."""
+        def record(digest: str) -> None:
+            self.registry.update(name, config_sha256=digest)
+        return record
 
     async def _refuse_foreign(self, managed: children.Managed) -> None:
         """InvalidRequest while the store offers a definition of the instance the manager did not write, or the local
@@ -644,7 +677,8 @@ class Manager:
             offered = (await self.sv.store_app(managed.slug) or {}).get("version_latest")
         except (SupervisorError, NotAllowed) as err:
             raise InvalidRequest(str(err)) from None
-        foreign = self._foreign_version(managed.entry, offered)
+        found_config = await asyncio.to_thread(self._config_sha256, managed.name)
+        foreign = self._foreign_version(managed.entry, offered) or self._foreign_config(managed.entry, found_config)
         if foreign:
             raise InvalidRequest(f"{managed.name}: {foreign}")
 
@@ -665,7 +699,8 @@ class Manager:
                 offered = (await self.sv.store_app(managed.slug) or {}).get("version_latest")
             except (SupervisorError, NotAllowed) as err:
                 raise InvalidRequest(str(err)) from None
-            if not self._foreign_version(managed.entry, offered):
+            found_config = await asyncio.to_thread(self._config_sha256, name)
+            if not (self._foreign_version(managed.entry, offered) or self._foreign_config(managed.entry, found_config)):
                 raise InvalidRequest(f"{names.folder_name(name)} exists and holds the manager's definition: nothing to "
                                      "repair")
             return self.jobs.start(name, "repair", user, lambda job: self._repair_foreign(job, managed, user))
@@ -674,6 +709,7 @@ class Manager:
     async def _repair_foreign(self, job: Job, managed: children.Managed, user: str) -> dict:
         """The store offers a definition the manager did not write: the folder goes (out of the store's sight), and
         Repair writes the manager's definition of the installed version again, and checks the installed app."""
+        await self._refuse_marked_now(managed.name, check=True)
         job.log(f"{names.folder_name(managed.name)} holds a definition the manager did not write: removing it")
         try:
             await asyncio.to_thread(children.remove, managed)
@@ -958,10 +994,13 @@ class Manager:
             return None
 
     def _builder(self, job: Job, archive, channel: str, name: str, version: str, sha: str | None, marker: dict, source: str,
-                 copy: copies.Copy | None = None, built: dict | None = None, bluetooth: bool = False):
+                 copy: copies.Copy | None = None, built: dict | None = None, bluetooth: bool = False,
+                 on_built=None):
         """``copy``: Repair from the manager's copy, of a release (its files as they are: no archive) or of a git
         instance (its stamped config over the archive of its commit).  ``built``: gets the stamped config written, as
-        "config" (what the Supervisor is then checked to report), and the bytes of the files a copy keeps, as "files"."""
+        "config" (what the Supervisor is then checked to report), and the bytes of the files a copy keeps, as "files".
+        ``on_built(sha256 of config.yaml)``: called once the folder is built, before it is put in place (the registry
+        records it: _foreign_config)."""
         def build(tmp: str) -> dict:
             try:
                 return fill(tmp)
@@ -986,12 +1025,15 @@ class Manager:
                                                 config=copy.config if copy is not None else None, bluetooth=bluetooth)
                 for note in notes:
                     job.log(note)
+            data = stamp.dump(config, source)  # the bytes the builders wrote as config.yaml
             if built is not None:
                 built["config"] = config
-                built["files"] = {"config.yaml": stamp.dump(config, source), **extras}
+                built["files"] = {"config.yaml": data, **extras}
             found = stamp.find_configs(tmp)
             if found != ["config.yaml"]:
                 raise JobFailed(f"the definition would hold more than one app: {found}")
+            if on_built is not None:
+                on_built(hashlib.sha256(data).hexdigest())
             return marker
         return build
 
@@ -1029,7 +1071,8 @@ class Manager:
             await asyncio.to_thread(self.registry.put, name, self._registry_entry(marker))
             managed = await asyncio.to_thread(children.write_new, self.root, name,
                                               self._builder(job, archive, channel, name, version, sha, marker, source,
-                                                            built=built, bluetooth=bluetooth),
+                                                            built=built, bluetooth=bluetooth,
+                                                            on_built=self._record_config(name)),
                                               self.registry)
         except WRITE_ERRORS as err:
             await asyncio.to_thread(self._forget, name, marker["instance_id"])
@@ -1234,6 +1277,16 @@ class Manager:
         _LOGGER.error("%s", message)
         return Tampered(message)
 
+    async def _refuse_marked_now(self, name: str, check: bool = False) -> dict | None:
+        """At the top of a job body: the registry's mark read again, as a containment may have finished since the
+        request was checked (_refuse_marked).  JobFailed while it refuses the job; the entry otherwise."""
+        try:
+            entry = await asyncio.to_thread(self.registry.get, name)
+            self._refuse_marked(name, entry, check)
+        except (RegistryError, InvalidRequest) as err:
+            raise JobFailed(str(err)) from None
+        return entry
+
     @staticmethod
     def _refuse_marked(name: str, entry: dict | None, check: bool = False) -> None:
         """InvalidRequest while the registry marks the instance (its app was installed from another definition).
@@ -1281,6 +1334,8 @@ class Manager:
         return info
 
     async def _simple(self, job: Job, managed: children.Managed, action: str) -> dict:
+        if action in ("start", "restart"):
+            await self._refuse_marked_now(managed.name)
         try:
             await self._installed(managed)
             job.log(f"{action} {managed.slug}")
@@ -1292,6 +1347,7 @@ class Manager:
 
     async def _update(self, job: Job, managed: children.Managed, version: str | None, ref: tuple[str, str] | None,
                       user: str, bluetooth: bool | None = None) -> dict:
+        await self._refuse_marked_now(managed.name)
         try:
             info = await self._installed(managed)
         except (SupervisorError, NotAllowed) as err:
@@ -1307,6 +1363,8 @@ class Manager:
                 raise JobFailed(str(err)) from None
             if note:
                 job.log(note)
+            # an update recorded late is marked to be checked first: this one must not record over that mark
+            await self._refuse_marked_now(managed.name)
         marker = managed.marker
         channel = marker["channel"]
         restamp = False
@@ -1376,10 +1434,16 @@ class Manager:
             raise JobFailed(f"nothing was written: {err}") from None
         job.log(f"rewriting {names.folder_name(managed.name)} (the previous definition is kept until the update succeeds)")
         built: dict = {}
+
+        def record_config(digest: str) -> None:
+            # in the flag before the swap: the definition in place is then the manager's, update in flight or not
+            recorded["config_sha256"] = digest
+            self.registry.update(managed.name, updating={"at": children.now_iso(), "fields": recorded})
+
         try:
             replacement = await asyncio.to_thread(
                 children.replace, managed, self._builder(job, archive, channel, managed.name, version, sha, new_marker, source,
-                                                         built=built, bluetooth=bluetooth))
+                                                         built=built, bluetooth=bluetooth, on_built=record_config))
         except WRITE_ERRORS as err:
             await self._clear_updating(managed.name)
             raise JobFailed(f"the definition was not written: {err}") from None
@@ -1452,8 +1516,9 @@ class Manager:
             raise await self._hold(job, managed, missing)
         if restamp:
             job.log(f"the definition is stamped by this manager now (stamping {marker.get('stamp_version')} -> "
-                    f"{stamp.STAMP_VERSION}); the Supervisor applies it to the running app at its next version change "
-                    "(an HRI update, or a rebuild of a new commit), not at the same version")
+                    f"{stamp.STAMP_VERSION}); the manager applies it to the running app at its next version change (an "
+                    "HRI update, or a rebuild of a new commit). The Supervisor's own Rebuild would apply it at once, "
+                    "but without the manager's checks: do not use it")
         result = {"version": version, "state": after.get("state"), "restamped": restamp}
         return {**result, "warning": warning} if warning else result
 
@@ -1561,7 +1626,7 @@ class Manager:
             data = stamp.dump(new, managed.marker["template_source"])
             children.replace_file(folder, "config.yaml", data)
             children.replace_file(folder, children.MARKER, children.marker_bytes({**managed.marker, "bluetooth": bluetooth}))
-            self.registry.update(managed.name, bluetooth=bluetooth)
+            self.registry.update(managed.name, bluetooth=bluetooth, config_sha256=hashlib.sha256(data).hexdigest())
             try:
                 kept = copies.read_definition(copies.folder(self.copies_root, managed.name), channel)
             except (OSError, children.UnsafePath):
@@ -1578,6 +1643,7 @@ class Manager:
         return managed
 
     async def _setup(self, job: Job, managed: children.Managed, install: bool) -> dict:
+        await self._refuse_marked_now(managed.name, check=not install)
         try:
             installed = any(a.get("slug") == managed.slug for a in await self.sv.list_apps())
             if install:
@@ -1685,6 +1751,7 @@ class Manager:
         nothing else: a definition of another version would be offered as an update (and installed by the Supervisor
         on its own with auto_update on).  Only for an instance the registry holds.  When the exact source cannot be
         had, nothing is written: NeedsAttention, recorded in the registry and shown with the user's options."""
+        await self._refuse_marked_now(name, check=True)
         try:
             return await self._repair_installed(job, name, user)
         except NeedsAttention as err:
@@ -1797,7 +1864,7 @@ class Manager:
             managed = await asyncio.to_thread(
                 children.write_new, self.root, name,
                 self._builder(job, archive, channel, name, version, sha, marker, source, copy=copy, built=built,
-                              bluetooth=bluetooth),
+                              bluetooth=bluetooth, on_built=self._record_config(name)),
                 self.registry)
         except WRITE_ERRORS as err:
             await asyncio.to_thread(self._restore_entry, name, entry, marker["instance_id"])
@@ -1824,6 +1891,7 @@ class Manager:
         its installed version: the definition of a NEWER version, written and installed in one job the user asked
         for.  If the update does not succeed the definition is removed again (the instance stays detached)."""
         slug = names.supervisor_slug(name)
+        await self._refuse_marked_now(name)
         entry, info = await self._detached(job, name, "update")
         installed = str(info.get("version") or "")
         channel = entry.get("channel")
@@ -1872,7 +1940,8 @@ class Manager:
                                     self._registry_entry(marker, setup_complete=entry.get("setup_complete", True)))
             managed = await asyncio.to_thread(
                 children.write_new, self.root, name,
-                self._builder(job, archive, channel, name, version, sha, marker, source, built=built, bluetooth=bluetooth),
+                self._builder(job, archive, channel, name, version, sha, marker, source, built=built, bluetooth=bluetooth,
+                              on_built=self._record_config(name)),
                 self.registry)
         except WRITE_ERRORS as err:
             await asyncio.to_thread(self._restore_entry, name, entry, marker["instance_id"])
