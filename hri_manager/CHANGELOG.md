@@ -1,5 +1,47 @@
 # Changelog
 
+## 0.1.3
+
+Fixes from a second external review (of 0.1.2). Still **experimental**.
+
+- **Decoys elsewhere in the local apps folder.** The Supervisor's store reads every `config.*` of the whole local apps
+  folder and keys each app by the slug inside the file, the last one found winning: a file in any other folder that
+  declared `slug: hri_<name>`, with its own image or a map of Home Assistant's configuration (neither reported by the
+  Supervisor), could be installed and started by the manager's own Install or Update and listed as healthy. The
+  manager now searches the folder by the Supervisor's own rule, refuses to create, install, update, rebuild, repair or
+  start while such a file is there, checks again right after an install or update (and contains what was installed
+  if one appeared), and lists every decoy with its path under Other HRI apps.
+- **A new definition is checked against what the manager wrote**, not taken from the folder when the build returns: a
+  file planted during the build (a `Dockerfile.<arch>`, a `config.yaml` with another image) refuses the write. The
+  build folder is `0700`. Install of a restored definition refuses a `Dockerfile.<arch>`, `build.*` or `apparmor.txt`.
+- **Checked right after the install or update too**, not only before: a change in the folder around it is contained.
+- **A same-version change is flagged.** The registry records the sha256 of the `config.yaml` the manager wrote; another
+  one is flagged like a foreign version (the Supervisor's own Rebuild applies a same-version definition unchecked),
+  with Repair. Instances last written by 0.1.2 get the sha256 at their next write.
+- **Containment:** an app that cannot be uninstalled gets start at boot turned off (the allow-list accepts `boot:
+  manual` for this, with the instance's marker); a mark the registry cannot record is kept in memory and in the
+  instance's marker for the next start; every job reads the mark again before it acts; the start's check of an app
+  installed while the manager was away holds it when its folder cannot be checked or a decoy of it is there.
+- **Bluetooth is never taken from the installed app** as your choice unless you choose it (an Update with Bluetooth
+  chosen) or the manager made the change; Repair stops at needs attention otherwise. Following the app writes the
+  registry first.
+- **Unfinished updates** are settled only on what is known: an unreadable registry, or a broken new marker while the
+  Supervisor has the new version, leaves both definitions; an Update after a start that could not ask the Supervisor
+  settles the previous definition first; an update after one recorded late waits for its Check again; a registry that
+  cannot be written reports as such (a successful update is a warning, never an unexpected error).
+- **Create waits** for an interrupted install that may still finish (as Forget does), and a rollback that could not
+  ask the Supervisor says what it left.
+- **Robustness:** the background loop runs supervised (an unexpected error is logged, shown on the status and the
+  loop starts again) and one odd folder (no `backup_exclude`, YAML nested too deep) no longer stops it; the folder
+  walk goes by descriptor and never through a swapped link; a template's slug is never spelled out before it is
+  vetted; no job starts once the stop began (503), and the sessions close after the jobs.
+- **Docs:** the security model says plainly what the checks guarantee and what they cannot (someone who can write the
+  local apps folder can still install things through the Supervisor's own buttons), lists `host_dbus`, and DOCS.md
+  warns against the Supervisor's own Update and Rebuild buttons.
+- **Smaller fixes:** duplicate `allowed_users` entries are not reported as blank; "repaired", not "repaird"; a marked
+  row offers no Repair it would refuse; refused archives are closed at once; one rule for translation names; copies
+  half-written by a stop are tidied at the start.
+
 ## 0.1.2
 
 Fixes from an external review of 0.1.1, and Bluetooth per instance. Still **experimental**.
