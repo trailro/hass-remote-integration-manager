@@ -169,7 +169,8 @@ no action: Repair would make it the manager's, and then deletable with its data.
 
 ## Other HRI apps
 
-The published single app (`<repository>_hass_remote_integration`), local apps whose slug looks like an instance but
+The published single app (`<repository>_hass_remote_integration`), a local build of HRI
+(`local_hass_remote_integration`, labelled so), local apps whose slug looks like an instance but
 that the manager did not create (detached or not), and `hri_<name>/` folders whose marker the manager's registry does
 not hold are listed under **Other HRI apps**, read-only: the manager offers no action on them. Adopting the single app into the
 manager is on the roadmap.

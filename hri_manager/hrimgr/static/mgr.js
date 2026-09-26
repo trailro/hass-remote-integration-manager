@@ -98,8 +98,8 @@ async function loadInstances() {
   const others = r.others || [];
   $('#otherscard').hidden = !others.length;
   $('#others tbody').innerHTML = others.map(o => {
-    const note = o.kind === 'published' ? 'the published single app' : o.problem || '';
-    const link = o.kind === 'published' ? panelHref({slug: o.slug, ingress_panel: true}) : null;
+    const note = o.kind === 'published' ? 'the published single app' : o.kind === 'local_build' ? 'a local build of HRI' : o.problem || '';
+    const link = o.kind === 'published' || o.kind === 'local_build' ? panelHref({slug: o.slug, ingress_panel: true}) : null;
     return `<tr><td><b>${esc(o.name || o.slug)}</b><span class="sub">${esc(o.slug)}</span></td><td>${o.installed ? stateCell(o) : '—'}</td>`
       + `<td>${esc(o.version || '')}${o.update_available ? ' <span class="tag acc">update</span>' : ''}</td><td class="mut">${esc(note)}</td><td class="act">${link ? `<a class="btn" href="${esc(link.href)}" target="${link.target}" rel="noopener">Open</a>` : ''}</td></tr>`;
   }).join('');

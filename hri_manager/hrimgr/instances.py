@@ -122,7 +122,9 @@ class Manager:
                                                "this manager)" if app.get("detached") is True
                                                else "not managed: a local app the manager did not create")})
             elif slug.endswith("_" + names.HRI_SLUG):
-                others.append({"slug": slug, "name": app.get("name"), "kind": "published", "installed": True,
+                # local_hass_remote_integration: HRI built from a folder of the local apps folder, not the store's
+                kind = "local_build" if slug == "local_" + names.HRI_SLUG else "published"
+                others.append({"slug": slug, "name": app.get("name"), "kind": kind, "installed": True,
                                "state": app.get("state"), "version": app.get("version"),
                                "update_available": bool(app.get("update_available"))})
         infos = await asyncio.gather(*(self._info(e["slug"]) for e in out if e["installed"]))

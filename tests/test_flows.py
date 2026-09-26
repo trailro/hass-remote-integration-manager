@@ -477,6 +477,17 @@ class FlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("already installed", job["error"])
         self.assertEqual(env.changing_calls(), [])
 
+    async def test_a_local_build_of_hri_is_not_the_published_app(self):
+        env = self.env
+        env.stub.installed["local_hass_remote_integration"] = {
+            "slug": "local_hass_remote_integration", "name": "hass-remote-integration", "version": "0.25.1",
+            "state": "started", "url": "https://github.com/trailro/hass-remote-integration", "repository": "local"}
+        _, data = await env.get("/api/instances")
+        kinds = {o["slug"]: o["kind"] for o in data["others"]}
+        self.assertEqual(kinds["5c53de3b_hass_remote_integration"], "published")
+        self.assertEqual(kinds["local_hass_remote_integration"], "local_build")
+        self.assertEqual(env.changing_calls(), [])
+
     async def test_the_marker_gates_every_changing_action(self):
         env = self.env
         await self.create()
