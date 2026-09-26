@@ -36,14 +36,14 @@ def main() -> int:
     log = logging.getLogger("hrimgr")
     if settings.dev:
         log.warning("DEVELOPMENT MODE: peers %s, Supervisor %s", ", ".join(sorted(settings.peers)), settings.supervisor_url)
-    for note in children.cleanup_stale(settings.local_apps):
-        log.info("local apps folder: %s", note)
+    registry = Registry(os.path.join(settings.data_dir, FILE_NAME))
+    for note in children.cleanup_stale(settings.local_apps, registry):
+        log.log(logging.WARNING if note.startswith("could not") else logging.INFO, "local apps folder: %s", note)
 
     async def build() -> web.Application:
         sv = SupervisorClient(settings.supervisor_url, settings.supervisor_token)
         gh = GitHub(f"{settings.data_dir}/releases.json", settings.github_token, settings.github_api, settings.codeload)
         jobs = Jobs()
-        registry = Registry(os.path.join(settings.data_dir, FILE_NAME))
         manager = Manager(settings.local_apps, sv, gh, jobs, registry, dev=settings.dev)
         users = CoreUsers(settings.core_ws_url, settings.supervisor_token)
         app = create_app(settings, manager, users)

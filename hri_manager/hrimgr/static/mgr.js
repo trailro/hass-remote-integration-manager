@@ -200,7 +200,8 @@ async function watch(id) {
     if (!r.ok) { flash(r.error, 'err'); return; }
     renderJob(r.job);
     if (r.job.state !== 'running') {
-      flash(r.job.state === 'succeeded' ? `${r.job.action} ${r.job.instance}: done` : `${r.job.action} ${r.job.instance} failed: ${r.job.error}`, r.job.state === 'succeeded' ? 'okmsg' : 'err');
+      const warning = r.job.state === 'succeeded' && r.job.result && r.job.result.warning;
+      flash(warning ? `${r.job.action} ${r.job.instance}: ${warning}` : r.job.state === 'succeeded' ? `${r.job.action} ${r.job.instance}: done` : `${r.job.action} ${r.job.instance} failed: ${r.job.error}`, warning ? 'err' : r.job.state === 'succeeded' ? 'okmsg' : 'err');
       loadInstances();
       return;
     }

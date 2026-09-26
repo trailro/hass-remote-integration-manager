@@ -148,8 +148,11 @@ rebuilds when its commit changed. Not for production.
 **Update** on an instance offers the releases at or above its version (the newest stable preselected; the page marks
 an instance for which a newer release exists). The manager writes the new release's definition, keeping the previous
 one aside, and asks the Supervisor to update the app: it pulls the new image and restarts the app with the same
-options and data. If the update fails, or the manager is stopped midway, the previous definition is put back. The
-manager does not downgrade.
+options and data. If the update fails, or the manager is stopped midway, the previous definition is put back; if the
+manager is killed midway (no time to put it back), its next start does it: the registry marks an update in progress
+before the swap, and a definition in place that the registry never recorded goes, the previous one comes back. When
+only the manager's own records could not be written after a successful update, the job says so as a warning, and the
+next start records it. The manager does not downgrade.
 
 ![The Update dialog of the instance garage: from 0.25.1, a version to choose, Cancel or Update](docs/images/update-dialog.png)
 

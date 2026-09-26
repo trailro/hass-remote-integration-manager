@@ -891,6 +891,16 @@ class Manager:
                                 "the Supervisor would not install it")
             job.log(f"commit {sha[:12]}: version {version}")
         new_marker = self._marker(managed.name, channel, version, new_ref, sha, source, user, previous=marker)
+        recorded = {"tag_moved": None, "tampered": None, "history": self._history(new_marker["history"]),
+                    **{k: new_marker[k] for k in ("version", "ref_kind", "ref", "sha", "updated_at", "stamp_version",
+                                                  "created_by", "updated_by")}}
+        # before the swap: a manager killed before the update is recorded finds the flag at its next start, and puts the
+        # previous definition back (children.cleanup_stale)
+        try:
+            await asyncio.to_thread(self.registry.update, managed.name,
+                                    updating={"at": children.now_iso(), "fields": recorded})
+        except RegistryError as err:
+            raise JobFailed(f"nothing was written: {err}") from None
         job.log(f"rewriting {names.folder_name(managed.name)} (the previous definition is kept until the update succeeds)")
         built: dict = {}
         try:
@@ -898,6 +908,7 @@ class Manager:
                 children.replace, managed, self._builder(job, archive, channel, managed.name, version, sha, new_marker, source,
                                                          built=built))
         except (stamp.TemplateError, children.UnsafePath, children.NotManaged, OSError) as err:
+            await self._clear_updating(managed.name)
             raise JobFailed(f"the definition was not written: {err}") from None
         expected = stamp.expected_view(built["config"], managed.slug)
         try:
@@ -928,20 +939,35 @@ class Manager:
             if isinstance(err, (SupervisorError, NotAllowed)):
                 raise JobFailed(str(err)) from None
             raise
-        await asyncio.to_thread(replacement.commit)
-        await asyncio.to_thread(self.registry.update, managed.name, tag_moved=None, tampered=None, history=self._history(new_marker["history"]),
-                                **{k: new_marker[k] for k in ("version", "ref_kind", "ref", "sha", "updated_at", "stamp_version",
-                                                              "created_by", "updated_by")})
+        warning = None
+        try:
+            await asyncio.to_thread(replacement.commit)
+            await asyncio.to_thread(self.registry.update, managed.name, updating=None, **recorded)
+        except (OSError, RegistryError) as err:
+            # the app is updated and its definition in place: only the manager's own records lag, and the flag left
+            # in the registry lets the next start record the update (children.cleanup_stale)
+            warning = (f"updated to {version}, but the manager's records were not updated ({err}); they catch up when "
+                       "the manager starts again")
+            job.log(f"warning: {warning}")
+            _LOGGER.warning("%s: %s", managed.name, warning)
         await self._save_copy(job, managed)
         if restamp:
             job.log(f"the definition is stamped by this manager now (stamping {marker.get('stamp_version')} -> "
                     f"{stamp.STAMP_VERSION}); the Supervisor applies it to the running app at its next version change "
                     "(an HRI update, or a rebuild of a new commit), not at the same version")
-        return {"version": version, "state": after.get("state"), "restamped": restamp}
+        result = {"version": version, "state": after.get("state"), "restamped": restamp}
+        return {**result, "warning": warning} if warning else result
+
+    async def _clear_updating(self, name: str) -> None:
+        try:
+            await asyncio.to_thread(self.registry.update, name, updating=None)
+        except RegistryError as err:
+            _LOGGER.error("%s", err)
 
     async def _rollback_update(self, job: Job, replacement: children.Replacement) -> None:
         try:
             await asyncio.to_thread(replacement.rollback)
+            await self._clear_updating(replacement.name)
             await self.sv.reload_store()
         except Exception as err:  # noqa: BLE001
             job.log(f"could not put it back: {err}")
