@@ -8,7 +8,8 @@ app's ingress (``panel_admin`` only hides the panel), so every request, page and
   (its const.py; checked on the wire with its own _init_header and aiohttp).  It drops a client's copy only in that
   exact spelling: a client's ``x-remote-user-id`` passes, and aiohttp's merge of case-variant keys then sends the
   CLIENT's value alone.  So in the raw headers each must appear at most once (the id exactly once), spelled exactly
-  as the Supervisor spells it; any other spelling refuses the request;
+  as the Supervisor spells it; any other spelling refuses the request (tests/test_access.py SupervisorWireTest pins
+  that merge with a real ClientSession: if aiohttp kept the first spelling instead, this check would not be enough);
 - Core says whether that id is an administrator (corews.py: ``config/auth/list`` through the Supervisor's proxy);
   when Core cannot say, the request is refused: the guard fails closed;
 - ``allowed_users`` narrows the administrators further, keyed on the verified id: the id itself, or the login name
