@@ -520,6 +520,57 @@ class FlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(env.registry.get("garage"), before)
         self.assertFalse(os.path.lexists(self.folder("garage")))
 
+    async def test_a_copy_is_used_only_as_stamping_writes_it(self):
+        """A copy's config must be what stamping gives (stamping it again changes nothing), its other files UTF-8 text
+        of the names a copy holds, within the size caps; the config is written by the manager's own dumper, never as
+        the copy's bytes."""
+        env = self.env
+        await self.create()
+        base = self.copy_dir("garage")
+
+        def edit(rel, fn):
+            path = os.path.join(base, *rel.split("/"))
+            with open(path, "rb") as fh:
+                data = fh.read()
+            with open(path, "wb") as fh:
+                fh.write(fn(data))
+
+        def add(rel, data):
+            os.makedirs(os.path.dirname(os.path.join(base, rel)), exist_ok=True)
+            with open(os.path.join(base, rel), "wb") as fh:
+                fh.write(data)
+
+        cases = {
+            "a panel title stamping would not write": lambda: edit("config.yaml", lambda d: d.replace(b"panel_title: HRI garage", b"panel_title: Anything")),
+            "a key stamping drops": lambda: edit("config.yaml", lambda d: d + b"webui: http://[HOST]:[PORT:8087]\n"),
+            "DOCS.md that is not UTF-8": lambda: edit("DOCS.md", lambda d: d + b"\xff\xfe"),
+            "a translation that is an app": lambda: add("translations/config.yaml", b"slug: x\nname: x\nversion: '1'\n"),
+            "a translation that is not a mapping": lambda: edit("translations/en.yaml", lambda d: b"- a list\n"),
+            "more than a copy may hold": lambda: mock.patch("hrimgr.copies.MAX_TOTAL", 100).start(),
+        }
+        for label, spoil in cases.items():
+            with self.subTest(case=label):
+                shutil.rmtree(self.folder("garage"))
+                await env.sv.reload_store()
+                spoil()
+                env.stub.codeload_paths.clear()
+                job = await env.job(await env.send("POST", "/api/instances/garage/repair"))
+                mock.patch.stopall()
+                self.assertEqual(job["state"], "succeeded", job)
+                self.assertTrue(any("copy of the definition is not used" in l["msg"] for l in job["lines"]), job["lines"])
+                self.assertEqual(env.stub.codeload_paths, ["refs/tags/v0.25.0"])
+        # a comment in the copy's config (valid YAML, same mapping) does not reach the definition: it is dumped anew
+        shutil.rmtree(self.folder("garage"))
+        await env.sv.reload_store()
+        edit("config.yaml", lambda d: d + b"# written by someone else\n")
+        env.stub.codeload_paths.clear()
+        job = await env.job(await env.send("POST", "/api/instances/garage/repair"))
+        self.assertEqual((job["state"], env.stub.codeload_paths), ("succeeded", []), job)
+        with open(os.path.join(self.folder("garage"), "config.yaml"), encoding="utf-8") as fh:
+            text = fh.read()
+        self.assertNotIn("someone else", text)
+        self.assertTrue(text.startswith("# Written by HRI Manager from "))
+
     def _hand_made_app(self, folder="my_garage", slug="hri_garage"):
         """A local app someone wrote by hand in another folder, with an instance's slug and HRI's url, installed."""
         path = os.path.join(self.env.local_apps, folder)

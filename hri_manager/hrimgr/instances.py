@@ -486,8 +486,11 @@ class Manager:
         instance (its stamped config over the archive of its commit)."""
         def build(tmp: str) -> dict:
             if copy is not None and channel == "release":
+                # the config dumped by the manager from the checked mapping, never the copy's bytes
+                children.write_file(tmp, "config.yaml", stamp.dump(copy.config, source))
                 for rel, data in sorted(copy.files.items()):
-                    children.write_file(tmp, rel, data)
+                    if rel != "config.yaml":
+                        children.write_file(tmp, rel, data)
             elif channel == "release":
                 stamp.build_release(archive, tmp, name, version, source)
             else:

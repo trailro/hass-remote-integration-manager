@@ -31,11 +31,14 @@ from .registry import INSTANCE_ID_RE
 DIR_NAME = "definitions"
 META = "copy.json"
 MAX_FILE = 1024 * 1024
+MAX_TEXT = 256 * 1024  # DOCS.md, CHANGELOG.md, README.md, a translation
 MAX_TOTAL = 4 * 1024 * 1024
+PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
 TMP_PREFIX = ".tmp-"
 OLD_PREFIX = ".old-"
 META_FIELDS = ("name", "instance_id", "channel", "version", "ref_kind", "ref", "sha", "stamp_version", "template_source")
-_TRANSLATION_RE = re.compile(r"translations/[A-Za-z0-9_-]{1,40}\.(?:yaml|yml|json)")
+# never translations/config.*: the store would read it as a second app
+_TRANSLATION_RE = re.compile(r"translations/(?!config\.)[A-Za-z0-9_-]{1,40}\.(?:yaml|yml|json)")
 
 
 class CopyError(Exception):
@@ -133,9 +136,32 @@ def remove(root: str, name: str) -> None:
         shutil.rmtree(path)
 
 
+def check_file(rel: str, data: bytes) -> None:
+    """A copied file other than config.yaml: UTF-8 text within MAX_TEXT (a translation a YAML or JSON mapping), or a
+    PNG icon."""
+    if rel.endswith(".png"):
+        if not data.startswith(PNG_MAGIC):
+            raise CopyError(f"its {rel} is not a PNG")
+        return
+    if len(data) > MAX_TEXT:
+        raise CopyError(f"its {rel} is larger than a copy's text may be")
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError:
+        raise CopyError(f"its {rel} is not UTF-8 text") from None
+    if rel.startswith("translations/"):
+        try:
+            parsed = yaml.safe_load(text)
+        except yaml.YAMLError:
+            raise CopyError(f"its {rel} does not parse") from None
+        if not isinstance(parsed, dict):
+            raise CopyError(f"its {rel} is not a mapping")
+
+
 def check(config: object, name: str, version: str, channel: str) -> dict:
-    """An instance's stamped definition, as this manager writes it: its slug and version, HRI's url, the image only
-    for a release, and every other key vetted as HRI's own template is (stamp.vet_template)."""
+    """An instance's stamped definition, exactly as this manager writes it: its slug and version, HRI's url, the image
+    only for a release, every other key vetted as HRI's own template is (stamp.vet_template), and stamping it again
+    changes nothing (no name, panel title, port, backup_exclude entry or key stamping would not have written)."""
     if not isinstance(config, dict):
         raise CopyError("its config.yaml is not a mapping")
     if config.get("slug") != names.config_slug(name) or str(config.get("version")) != version:
@@ -146,8 +172,11 @@ def check(config: object, name: str, version: str, channel: str) -> dict:
         raise CopyError("its config.yaml does not match its channel (image)")
     try:
         stamp.vet_template({**config, "slug": names.HRI_SLUG})
-    except stamp.TemplateError as err:
+        restamped = stamp.stamp({**config, "slug": names.HRI_SLUG}, name, version, channel)
+    except (stamp.TemplateError, ValueError, TypeError, AttributeError) as err:
         raise CopyError(str(err)) from None
+    if restamped != config:
+        raise CopyError("its config.yaml is not what stamping writes")
     return config
 
 
@@ -182,6 +211,10 @@ def load(root: str, name: str, entry: dict, installed_version: str) -> Copy:
             if not is_copied(rel, channel):
                 raise CopyError(f"it holds {rel!r}, which a copy does not")
             files[rel] = _read(os.path.join(base, *rel.split("/")))
+            if sum(len(d) for d in files.values()) > MAX_TOTAL:
+                raise CopyError("it is larger than a copy may be")
+            if rel != "config.yaml":
+                check_file(rel, files[rel])
         config = yaml.safe_load(files["config.yaml"].decode("utf-8")) if "config.yaml" in files else None
     except (OSError, UnicodeDecodeError, yaml.YAMLError) as err:
         raise CopyError(f"it cannot be read: {err}") from None
