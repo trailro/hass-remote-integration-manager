@@ -128,6 +128,19 @@ class AutoRepairTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(os.path.isdir(self.folder("garage")))
         self.assertEqual([j.user for j in env.manager.jobs.recent() if j.action == "repair"], [instances.AUTO_USER])
 
+    async def test_the_start_copies_the_definitions_it_has_no_copy_of(self):
+        """Instances created by 0.1.0 have no copy in /data: the manager makes one at its start (managed ones only)."""
+        env = self.env
+        await self.create("garage")
+        copy_dir = os.path.join(env.data, "definitions", "garage")
+        shutil.rmtree(copy_dir)
+        os.makedirs(os.path.join(env.local_apps, "hri_stranger"))  # a folder the registry does not hold
+        with open(os.path.join(env.local_apps, "hri_stranger", "config.yaml"), "w") as fh:
+            fh.write("slug: hri_stranger\nname: x\nversion: '1'\n")
+        await env.manager.auto_repair_check()
+        self.assertEqual(sorted(os.listdir(copy_dir)), ["CHANGELOG.md", "DOCS.md", "config.yaml", "copy.json", "translations"])
+        self.assertEqual(os.listdir(os.path.join(env.data, "definitions")), ["garage"])
+
     async def test_off_when_no_interval(self):
         env = self.env
         await self.create("garage")

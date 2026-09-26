@@ -185,8 +185,9 @@ has moved it to `apps/local` (an upstream issue of the Supervisor, not of this a
     installed app and nothing needs rebuilding.
 
   Repair uses a copy only when it is the copy of that instance (the registry's instance id and channel) at the
-  installed version, and its config is one the manager writes. Otherwise, or when the manager has no copy (an
-  instance created by 0.1.0, until its next update), Repair downloads from GitHub: a release from its tag; a git
+  installed version, and its config is one the manager writes (at its start the manager copies every definition it
+  has no copy of, such as those of instances created by 0.1.0). Otherwise, or without a copy, Repair downloads from
+  GitHub: a release from its tag; a git
   instance from its branch or tag, which must still exist (when the branch has moved on, the definition is written
   for its current commit and **Rebuild** installs it).
 

@@ -192,8 +192,26 @@ class Manager:
             return None
         return {"at": known["at"], "job": job.id, "state": job.state, "error": job.error}
 
+    def copy_missing(self) -> list[str]:
+        """A copy in /data of every managed instance's definition the manager has none of (instances created by 0.1.0,
+        or a copy that failed): the names copied."""
+        done = []
+        for name, marker, _ in children.scan(self.root, self.registry):
+            if marker is None or os.path.lexists(copies.folder(self.copies_root, name)):
+                continue
+            try:
+                copies.save(self.copies_root, name, children.child_path(self.root, name), marker)
+            except (copies.CopyError, children.UnsafePath, OSError) as err:
+                _LOGGER.warning("the copy of %s's definition was not saved: %s", name, err)
+                continue
+            done.append(name)
+        return done
+
     async def auto_repair_check(self) -> None:
-        """The check when the manager starts: the list, which starts the automatic repairs."""
+        """The check when the manager starts: copies of the definitions it lacks, then the list, which starts the
+        automatic repairs."""
+        for name in await asyncio.to_thread(self.copy_missing):
+            _LOGGER.info("instance %s: a copy of its definition is kept in /data now", name)
         try:
             await self.instances()
         except (SupervisorError, NotAllowed, RegistryError) as err:
