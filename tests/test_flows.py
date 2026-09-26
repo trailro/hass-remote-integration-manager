@@ -884,23 +884,27 @@ class FlowTest(unittest.IsolatedAsyncioTestCase):
             json.dump({"github_token": "ghp_stolen_token_123"}, fh)
         with open(os.path.join(secret_dir, "en.yaml"), "w", encoding="utf-8") as fh:
             fh.write("configuration: {x: ghp_stolen_token_123}\n")
-        walk = copies._walk
+        write_new = children.write_new
 
-        def walk_then_swap(base):  # the folder listed first, its translations/ swapped for a link afterwards
-            found = walk(base)
-            translations = os.path.join(base, "translations")
-            if base.startswith(env.local_apps) and os.path.isdir(translations) and not os.path.islink(translations):
-                with open(os.path.join(translations, "options.json"), "w", encoding="utf-8") as fh:
-                    fh.write("{}")
-                found = sorted(found + ["translations/options.json"])
-                shutil.rmtree(translations)
-                os.symlink(secret_dir, translations)
-            return found
+        def then_swap(root, name, build, registry):  # right after the build, before anything copies it
+            managed = write_new(root, name, build, registry)
+            translations = os.path.join(root, f"hri_{name}", "translations")
+            shutil.rmtree(translations)
+            os.symlink(secret_dir, translations)
+            return managed
 
-        with mock.patch.object(copies, "_walk", side_effect=walk_then_swap):
+        save, kept = copies.save, {}
+
+        def saved(*args, **kw):  # what the copy held when it was stored (the failed create removes it afterwards)
+            result = save(*args, **kw)
+            kept.update(self.read_tree(self.copy_dir("garage")))
+            return result
+
+        with mock.patch.object(children, "write_new", side_effect=then_swap), \
+                mock.patch.object(copies, "save", side_effect=saved):
             job = await self.create()
-        self.assertEqual(job["state"], "succeeded", job)
-        kept = self.read_tree(self.copy_dir("garage"))
+        self.assertEqual(job["state"], "failed", job)  # the folder changed after the write: nothing installed
+        self.assertIn("changed after the manager wrote it", job["error"])
         self.assertIn("translations/en.yaml", kept)
         self.assertNotIn("translations/options.json", kept)
         self.assertFalse(any(b"ghp_stolen" in data for data in kept.values()))
