@@ -1,9 +1,11 @@
 """The repository as the Supervisor and a reader see it: one app, its config pinned, versions in step, relative URLs
 only, development mode unreachable from the app, and nothing private."""
 
+import os
 import pathlib
 import re
 import subprocess
+import tempfile
 import unittest
 
 import yaml
@@ -117,9 +119,19 @@ class AppConfigTest(unittest.TestCase):
         checkout = next(s for s in steps if s.get("with", {}).get("repository") == "home-assistant/supervisor")
         self.assertEqual(checkout["with"]["ref"], "${{ env.SUPERVISOR_SHA }}")
         check = next(s["run"] for s in steps if "app_supervisor_check.py" in s.get("run", ""))
+        # PyYAML at the manager's own pin, taken from its lock: no version written in the workflow
+        self.assertNotRegex(check, r"(?i)pyyaml==[0-9]")
+        make = next(line for line in check.splitlines() if "constraints.txt" in line and "grep" in line)
+        self.assertIn("hri_manager/requirements.txt", make)
+        self.assertIn('-c "$RUNNER_TEMP/constraints.txt"', check)
+        with tempfile.TemporaryDirectory(prefix="hri-mgr-test-") as tmp:
+            proc = subprocess.run(["bash", "-e", "-o", "pipefail", "-c", make], cwd=ROOT, capture_output=True, text=True,
+                                  env={**os.environ, "RUNNER_TEMP": tmp})
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            with open(os.path.join(tmp, "constraints.txt"), encoding="utf-8") as fh:
+                constraint = fh.read()
         lock = (APP_DIR / "requirements.txt").read_text(encoding="utf-8")
-        pinned = re.search(r"(?m)^pyyaml==(\S+)", lock, re.I).group(1)
-        self.assertIn(f"PyYAML=={pinned}", check)  # the manager's own pin
+        self.assertEqual(constraint, "pyyaml==" + re.search(r"(?m)^pyyaml==(\S+)", lock).group(1) + "\n")
 
     def test_the_dockerfile_base_is_pinned(self):
         self.assertRegex((APP_DIR / "Dockerfile").read_text(encoding="utf-8"), r"(?m)^FROM [\w./:-]+@sha256:[0-9a-f]{64}$")

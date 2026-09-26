@@ -82,7 +82,9 @@ jobs:
         # its requirements only: "pip install supervisor" would install supervisord
         run: |
           rm -rf _stamped
-          python -m pip install --quiet -r .supervisor/requirements.txt PyYAML==6.0.3
+          # PyYAML, which the stamping code needs too, at the manager's own pin: a constraint taken from its lock
+          grep -iE '^pyyaml==' hri_manager/requirements.txt | sed 's/ *\\$//' > "$RUNNER_TEMP/constraints.txt"
+          python -m pip install --quiet -r .supervisor/requirements.txt PyYAML -c "$RUNNER_TEMP/constraints.txt"
           python .github/app_supervisor_check.py .supervisor
 
   published-image:
