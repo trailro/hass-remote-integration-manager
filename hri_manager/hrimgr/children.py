@@ -295,6 +295,27 @@ def write_file(base: str, rel: str, data: bytes, mode: int = 0o644) -> None:
         fh.write(data)
 
 
+def replace_file(base: str, rel: str, data: bytes, mode: int = 0o644) -> None:
+    """Put ``data`` in place of the file ``rel`` below ``base`` at once: written to a hidden new file next to it (the
+    store skips names starting with a dot), then renamed over it, both through the holding folder's descriptor."""
+    folder_fd, leaf = _in_folder(base, rel, False)
+    tmp = f".hri-new-{secrets.token_hex(4)}"
+    try:
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | _NOFOLLOW | _CLOEXEC, mode, dir_fd=folder_fd)
+        try:
+            with os.fdopen(fd, "wb") as fh:
+                fh.write(data)
+            os.replace(tmp, leaf, src_dir_fd=folder_fd, dst_dir_fd=folder_fd)
+        except BaseException:
+            try:
+                os.unlink(tmp, dir_fd=folder_fd)
+            except OSError:
+                pass
+            raise
+    finally:
+        os.close(folder_fd)
+
+
 def make_link(base: str, rel: str, target: str) -> None:
     """A new symlink ``rel`` below ``base`` pointing at ``target`` (checked by the caller)."""
     folder_fd, leaf = _in_folder(base, rel, True)
