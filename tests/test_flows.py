@@ -448,6 +448,22 @@ class FlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(job["state"], "succeeded", job)
         self.assertIn("backup_post", self.config("attic"))
 
+    async def test_a_git_definition_without_its_app_is_not_installed_from_the_folder(self):
+        env = self.env
+        job = await self.create("lab", channel="git", ref_kind="branch", ref="main")
+        self.assertEqual(job["state"], "succeeded", job)
+        del env.stub.installed["local_hri_lab"]  # a definition restored without its app
+        with open(os.path.join(self.folder("lab"), "Dockerfile"), "ab") as fh:
+            fh.write(b"RUN echo planted\n")  # the tree on disk is anyone's who can write the folder
+        status, body = await env.send("POST", "/api/instances/lab/install")
+        self.assertEqual(status, 400)
+        self.assertIn("never from the tree left in the local apps folder", body["error"])
+        self.assertNotIn("local_hri_lab", env.stub.installed)
+        _, data = await env.get("/api/instances")
+        (row,) = [i for i in data["instances"] if i["name"] == "lab"]
+        self.assertEqual(row["actions"], ["delete"])
+        self.assertIn("create it again from its branch or tag", row["problem"])
+
     async def test_finish_setup_and_install(self):
         env = self.env
         await self.create()
