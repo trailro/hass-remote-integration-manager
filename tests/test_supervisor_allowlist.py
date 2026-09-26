@@ -117,7 +117,8 @@ class AllowListTest(unittest.TestCase):
         bodies = {r.pattern.pattern.rsplit("/", 1)[-1]: (dict(r.body), r.required) for r in supervisor.RULES if r.body}
         self.assertEqual(bodies, {
             "update": ({"backup": (True, False)}, ()),
-            "options": ({"boot": ("auto",), "watchdog": (True, False), "ingress_panel": (True, False)}, ()),
+            # boot manual: an app containment could not uninstall must not start at the next host boot
+            "options": ({"boot": ("auto", "manual"), "watchdog": (True, False), "ingress_panel": (True, False)}, ()),
             "uninstall": ({"remove_config": (True, False)}, ("remove_config",)),
         })
 
@@ -195,12 +196,20 @@ class AllowListTest(unittest.TestCase):
     def test_bodies_carry_only_the_listed_keys_and_values(self):
         g = self.garage
         authorize("POST", "/addons/local_hri_garage/options", {"boot": "auto", "watchdog": True, "ingress_panel": True}, g)
+        authorize("POST", "/addons/local_hri_garage/options", {"boot": "manual"}, g)
         authorize("POST", "/addons/local_hri_garage/uninstall", {"remove_config": False}, g)
+        make_child(self.root, "attic", registry=self.registry)
+        attic = children.load_managed(self.root, "attic", self.registry)
+        for managed in (None, attic):  # boot manual too needs the Managed of that very instance
+            with self.subTest(managed=managed), self.assertRaises(NotAllowed):
+                authorize("POST", "/addons/local_hri_garage/options", {"boot": "manual"}, managed)
         authorize("POST", "/store/addons/local_hri_garage/update", {"backup": False}, g)
         refused = [
             ("/addons/local_hri_garage/options", {"options": {"password": "x"}}),
             ("/addons/local_hri_garage/options", {"network": {"8087/tcp": 8087}}),
-            ("/addons/local_hri_garage/options", {"boot": "manual"}),
+            ("/addons/local_hri_garage/options", {"boot": "disabled"}),
+            ("/addons/local_hri_garage/options", {"boot": "manual_only"}),
+            ("/addons/local_hri_garage/options", {"boot": True}),
             ("/addons/local_hri_garage/options", {"watchdog": 1}),
             ("/addons/local_hri_garage/options", {"watchdog": "true"}),
             ("/addons/local_hri_garage/options", {"auto_update": True}),

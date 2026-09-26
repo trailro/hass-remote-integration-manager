@@ -343,7 +343,7 @@ narrows itself, in code, and the tests pin it:
   | `POST /store/reload`, `GET /store/addons/local_hri_<name>` | make the store read a new or changed definition, and wait for it |
   | `POST /store/addons/local_hri_<name>/install` and `…/update` | install and update an instance |
   | `GET /addons/local_hri_<name>/info` | an instance's state and panel |
-  | `POST /addons/local_hri_<name>/options` | only `boot: auto`, `watchdog` and `ingress_panel`: never the instance's own options |
+  | `POST /addons/local_hri_<name>/options` | only `boot` (`auto`; `manual` for an app the manager contains and could not uninstall, so the Supervisor does not start it again at the next boot), `watchdog` and `ingress_panel`: never the instance's own options |
   | `POST /addons/local_hri_<name>/start`, `…/stop`, `…/restart`, `…/uninstall` | the actions on an instance; `uninstall` always with `remove_config` (required: never the Supervisor's default) |
 
   Paths must be plain (no `..`, escapes, queries); an app's slug is accepted only in the `local_hri_<name>` form;
