@@ -20,8 +20,9 @@ NET=$P-net
 VOL=$P-local
 IMG=$P:local
 SHOTS=${1:-}
-PLAYWRIGHT=${PLAYWRIGHT_IMAGE:-mcr.microsoft.com/playwright/python:latest}
-# the Python package matching that image's browsers, when the image does not carry it
+# Playwright 1.46's image, pinned by digest: its browsers (chromium-1129) are the ones playwright==1.46.0 drives, and
+# it carries no Python package, so that one is installed in it.  Change both together
+PLAYWRIGHT=${PLAYWRIGHT_IMAGE:-mcr.microsoft.com/playwright/python@sha256:98e88016a5705def757564f70469e80161c4e4dbf787bbe35a710fabb70bb7da}
 PLAYWRIGHT_PIP=${PLAYWRIGHT_PIP:-1.46.0}
 PORT=${HRI_MGR_DEV_PORT:-18099}
 
@@ -31,7 +32,9 @@ cleanup() {
     docker volume rm $VOL >/dev/null 2>&1 || true
     docker image rm $IMG >/dev/null 2>&1 || true
 }
-trap cleanup EXIT INT TERM
+trap cleanup EXIT
+# an interrupted run stops after its cleanup (a bare INT or TERM trap would run the cleanup and go on)
+trap 'cleanup; exit 130' INT TERM
 cleanup
 
 echo "== build"
