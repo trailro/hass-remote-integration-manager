@@ -129,7 +129,7 @@ class AppVersionStepTest(unittest.TestCase):
         self.git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", message, cwd=self.work)
         self.git("push", "-q", "origin", "HEAD:main", cwd=self.work)
 
-    def run_step(self, tag, releases=(("v0.1.0", False), ("v0.1.1", False), ("v0.2.0b1", True))):
+    def run_step(self, tag, releases=(("v0.1.0", False), ("v0.1.1", False), ("v0.2.0-rc1", True))):
         """The job as GitHub runs it: the decision, then (only when it says so) the pull check and the write."""
         output = self.work.parent / "github_output"
         output.write_text("", encoding="utf-8")
