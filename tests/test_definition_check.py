@@ -4,6 +4,7 @@ the folder at every reload): the manager hashes what it wrote and checks it agai
 the install or update, compares the store's parsed definition with what it stamped before the install or update, and
 the installed app's after it, uninstalling it at once when they differ."""
 
+import asyncio
 import json
 import os
 import shutil
@@ -13,7 +14,7 @@ from unittest import mock
 
 import yaml
 
-from hrimgr import children, names, stamp, supervisor
+from hrimgr import children, instances, names, stamp, supervisor
 
 from .env import Env
 from .fakes.stub import captured
@@ -291,6 +292,35 @@ class FlowCheckTest(unittest.IsolatedAsyncioTestCase):
                 self.assertIn("is marked", answer["error"])
         job = await env.job(await env.send("POST", "/api/instances/garage/stop"))
         self.assertEqual(job["state"], "succeeded", job)
+
+    async def test_a_containment_cut_short_by_a_stop_says_so_and_the_next_start_finishes_it(self):
+        env = self.env
+        env.stub.install_override["local_hri_garage"] = {"hassio_role": "admin"}
+        never = asyncio.Event()
+
+        async def hangs(managed, remove_config):
+            await never.wait()
+
+        with mock.patch.object(instances, "CONTAIN_BOUND", 0.2), mock.patch.object(env.sv, "uninstall", side_effect=hangs):
+            status, body = await env.send("POST", "/api/instances", {"name": "garage", "channel": "release", "version": "0.25.0"})
+            job = env.manager.jobs.get(body["job"]["id"])
+            for _ in range(300):
+                if any("uninstalling it at once" in line["msg"] for line in job.lines):
+                    break
+                await asyncio.sleep(0.01)
+            job.task.cancel()  # the manager is stopped
+            await asyncio.gather(job.task, return_exceptions=True)
+        mark = env.registry.get("garage")["tampered"]
+        self.assertEqual((mark["uninstalled"], mark["failure"]), (False, instances.INTERRUPTED))
+        _, data = await env.get("/api/instances")
+        problem = data["instances"][0]["problem"]
+        self.assertIn("interrupted: the manager stopped", problem)
+        self.assertNotIn("None", problem)
+        notes = await env.manager.startup()  # the next start contains it again
+        self.assertIn("containing it again", " ".join(notes))
+        await env.manager.jobs.wait_all()
+        self.assertNotIn("local_hri_garage", env.stub.installed)
+        self.assertTrue(env.registry.get("garage")["tampered"]["uninstalled"])
 
     def installed_as(self, **fields):
         """What the Supervisor holds of the installed app, changed behind the manager's back."""

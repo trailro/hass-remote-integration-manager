@@ -79,7 +79,7 @@ The manager then, as a job whose log the page shows:
 
 If a step fails, what was done is undone: the app is uninstalled (its `/config` folder kept), the definition removed
 and the store reloaded. The same when the manager itself is stopped midway (for at most 8 seconds, within the
-Supervisor's stop timeout). Three cases are left for you to finish, and the page says which:
+Supervisor's stop timeout of 30). Three cases are left for you to finish, and the page says which:
 
 - the Supervisor went on installing after the manager stopped waiting (the manager was stopped, or its install call
   got no clean answer: a timeout, a lost connection, a server error): the app is listed as **install interrupted**,

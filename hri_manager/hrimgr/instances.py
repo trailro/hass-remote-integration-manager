@@ -37,6 +37,11 @@ HISTORY = 20
 # the Supervisor kills the manager 30 s after SIGTERM (config.yaml timeout), and the manager cancels its jobs before it
 # waits for open requests (__main__.py): a rollback when the manager stops gets well within that
 ROLLBACK_BOUND = 8.0
+# containment (_contain: stop and uninstall an app installed from another definition) goes on for this long after the
+# manager is told to stop; what it could not finish, the next start does again.  With the wait for open requests
+# (__main__.SHUTDOWN_TIMEOUT) it fits in the stop timeout (config.yaml), tests/test_repo.py checks
+CONTAIN_BOUND = 15.0
+INTERRUPTED = "interrupted: the manager stopped before it finished; its next start tries again"
 AUTO_REPAIR_INTERVAL = 300.0
 AUTO_REPAIR_MAX_DELAY = 86400.0  # an instance's automatic repair that keeps failing is tried at least once a day
 AUTO_USER = "automatic repair"
@@ -332,7 +337,43 @@ class Manager:
             installed = None
             notes = [f"could not ask the Supervisor which apps are installed ({err}): an update that stopped midway is "
                      "left as it is until the next start"]
-        return notes + await asyncio.to_thread(children.cleanup_stale, self.root, self.registry, installed)
+        notes += await asyncio.to_thread(children.cleanup_stale, self.root, self.registry, installed)
+        if installed is not None:
+            follow, more = await asyncio.to_thread(self._marked_installed, installed)
+            notes += more
+            for name, managed, reason in follow:
+                self.jobs.start(name, "contain", AUTO_USER,
+                                lambda job, m=managed, r=reason: self._contain_again(job, m, r))
+                notes.append(f"{name}: installed from another definition than the manager's and still installed: "
+                             "containing it again")
+        return notes
+
+    def _marked_installed(self, installed: dict[str, str | None]) -> tuple[list, list[str]]:
+        """At the start: the instances marked as installed from another definition whose app is still installed (a
+        stop, a crash or a refusal cut their containment short): (name, Managed, reason) each, and notes."""
+        try:
+            registered = self.registry.all()
+        except RegistryError as err:
+            return [], [f"could not read the registry: {err}"]
+        follow, notes = [], []
+        for name, entry in sorted(registered.items()):
+            mark = entry.get("tampered")
+            if not isinstance(mark, dict) or mark.get("unverified") or name not in installed:
+                continue
+            try:
+                managed = children.load_managed(self.root, name, self.registry)
+            except children.NotManaged as err:  # the marker broken: the mark says what to do by hand
+                notes.append(f"could not contain {name} again: {err}")
+                continue
+            follow.append((name, managed, str(mark.get("reason"))))
+        return follow, notes
+
+    async def _contain_again(self, job: Job, managed: children.Managed, reason: str) -> dict:
+        job.log(f"still installed from another definition than the manager's ({reason[:200]}): containing it again")
+        mark = await self._contain(job, managed, reason)
+        if not mark["uninstalled"]:
+            raise JobFailed(self._mark_text(managed.slug, mark))
+        return {"uninstalled": managed.slug}
 
     async def auto_repair_check(self) -> None:
         """One check: the list, which starts the automatic repairs."""
@@ -967,21 +1008,41 @@ class Manager:
         stopped and uninstalled, keeping its /config folder.  Both calls go through the allow-list, which needs the
         instance's marker for them: a writer who breaks the marker blocks them, and the mark says so.  The mark,
         as recorded at the end."""
-        mark = {"reason": reason[:500], "at": children.now_iso(), "uninstalled": False, "stopped": False, "failure": None}
+        mark = {"reason": reason[:500], "at": children.now_iso(), "uninstalled": False, "stopped": False,
+                "failure": INTERRUPTED}
         await self._set_mark(managed.name, mark)
+
+        async def steps() -> None:
+            try:
+                if (await self.sv.app_info(managed.slug)).get("state") == "started":
+                    job.log("stopping it at once")
+                    await self.sv.stop(managed)
+                mark["stopped"] = True
+                job.log("uninstalling it at once (its /config folder is kept)")
+                await self.sv.uninstall(managed, remove_config=False)
+                mark["uninstalled"] = True
+                mark["failure"] = None
+            except NotAllowed as err:
+                mark["failure"] = (f"the manager's allow-list needs the instance's marker for stop and uninstall too, "
+                                   f"and it refused them: {err}")
+            except Exception as err:  # noqa: BLE001 - reported in the mark, the job and the log
+                mark["failure"] = str(err) or err.__class__.__name__
+
+        task = asyncio.ensure_future(steps())
         try:
-            if (await self.sv.app_info(managed.slug)).get("state") == "started":
-                job.log("stopping it at once")
-                await self.sv.stop(managed)
-            mark["stopped"] = True
-            job.log("uninstalling it at once (its /config folder is kept)")
-            await self.sv.uninstall(managed, remove_config=False)
-            mark["uninstalled"] = True
-        except NotAllowed as err:
-            mark["failure"] = (f"the manager's allow-list needs the instance's marker for stop and uninstall too, and it "
-                               f"refused them: {err}")
-        except Exception as err:  # noqa: BLE001 - reported in the mark, the job and the log
-            mark["failure"] = str(err) or err.__class__.__name__
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            # the manager is stopping: containment goes on for CONTAIN_BOUND seconds, then its state is recorded as it
+            # is (written without awaiting: this task is being cancelled), and the next start tries again
+            try:
+                await asyncio.wait_for(asyncio.shield(task), CONTAIN_BOUND)
+            except (TimeoutError, asyncio.CancelledError):
+                pass
+            try:
+                self.registry.update(managed.name, tampered=dict(mark), setup_complete=False)
+            except RegistryError as err:
+                _LOGGER.error("%s", err)
+            raise
         if mark["failure"]:
             job.log(f"NOT {'uninstalled' if mark['stopped'] else 'stopped'}: {mark['failure']}")
         await self._set_mark(managed.name, mark)
@@ -991,14 +1052,14 @@ class Manager:
     def _mark_text(slug: str, mark: dict) -> str:
         """What a mark means for the user: done, or what to do by hand."""
         if mark.get("unverified"):
-            return (f"it was {'stopped' if mark.get('stopped') else 'NOT stopped (' + str(mark.get('failure'))[:200] + ')'}"
+            return (f"it was {'stopped' if mark.get('stopped') else 'NOT stopped (' + str(mark.get('failure') or INTERRUPTED)[:200] + ')'}"
                     " and is kept installed, with its options and data. A newer manager may read the Supervisor's "
                     f"answer; until then Delete it, or start {slug} yourself in Settings > Apps if you trust it")
         if mark.get("uninstalled"):
             return "it was stopped and uninstalled at once (its /config folder is kept)"
         folder = names.folder_name(slug[len(names.SLUG_PREFIX):])
         return (f"it was NOT {'uninstalled' if mark.get('stopped') else 'stopped nor uninstalled'} "
-                f"({str(mark.get('failure'))[:300]}): stop and uninstall {slug} yourself in Settings > Apps now (keep "
+                f"({str(mark.get('failure') or INTERRUPTED)[:300]}): stop and uninstall {slug} yourself in Settings > Apps now (keep "
                 f"its data if you want it); then Delete it here, or, if the manager no longer recognises {folder}/, "
                 f"delete that folder from the local apps folder and Forget it here")
 
