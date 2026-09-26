@@ -4,6 +4,10 @@ is an administrator (config/auth/list through the Supervisor's proxy), and anyth
 import asyncio
 import unittest
 
+import aiohttp
+from aiohttp import hdrs
+from multidict import CIMultiDict, istr
+
 from hrimgr import corews
 from hrimgr.corews import CoreError, CoreUsers, NotAllowedMessage, check_message, parse_users
 
@@ -188,6 +192,100 @@ class AccessTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(set(types), {"auth", "config/auth/list"})
         for m in self.env.stub.ws_messages:
             self.assertIn(set(m), ({"type", "access_token"}, {"type", "id"}))
+
+
+# the Supervisor's constants (supervisor/const.py, 2026.09.3), byte for byte
+HEADER_TOKEN = "X-Supervisor-Token"
+HEADER_TOKEN_OLD = "X-Hassio-Key"
+HEADER_REMOTE_USER_ID = "X-Remote-User-Id"
+HEADER_REMOTE_USER_NAME = "X-Remote-User-Name"
+HEADER_REMOTE_USER_DISPLAY_NAME = "X-Remote-User-Display-Name"
+
+
+def supervisor_init_header(client_headers: list[tuple[str, str]], user_id: str, username: str | None,
+                           display_name: str | None, peer: str = "198.51.100.1") -> CIMultiDict:
+    """The Supervisor's _init_header (supervisor/api/ingress.py, 2026.09.3), line for line: the ingress session's user
+    first, then every header of the browser's request except the ones it filters.  Its filter is ``name in (...)``
+    over plain strings, so it drops a client's copy of its headers only in their exact spelling."""
+    request_headers = CIMultiDict(client_headers)  # what aiohttp's server hands the Supervisor: spellings kept
+    headers = CIMultiDict()
+    headers[HEADER_REMOTE_USER_ID] = user_id
+    if username is not None:
+        headers[HEADER_REMOTE_USER_NAME] = username
+    if display_name is not None:
+        headers[HEADER_REMOTE_USER_DISPLAY_NAME] = display_name
+    for name, value in request_headers.items():
+        if name in (
+            hdrs.CONTENT_LENGTH,
+            hdrs.CONTENT_ENCODING,
+            hdrs.TRANSFER_ENCODING,
+            hdrs.SEC_WEBSOCKET_EXTENSIONS,
+            hdrs.SEC_WEBSOCKET_PROTOCOL,
+            hdrs.SEC_WEBSOCKET_VERSION,
+            hdrs.SEC_WEBSOCKET_KEY,
+            istr(HEADER_TOKEN),
+            istr(HEADER_TOKEN_OLD),
+            istr(HEADER_REMOTE_USER_ID),
+            istr(HEADER_REMOTE_USER_NAME),
+            istr(HEADER_REMOTE_USER_DISPLAY_NAME),
+        ):
+            continue
+        headers.add(name, value)
+    headers[hdrs.X_FORWARDED_FOR] = f"{request_headers.get(hdrs.X_FORWARDED_FOR)}, {peer}"
+    return headers
+
+
+class SupervisorWireTest(unittest.IsolatedAsyncioTestCase):
+    """The ingress headers as the Supervisor builds them, sent to the manager through a real aiohttp.ClientSession, as
+    the Supervisor sends them (sys_websession.request(..., headers=<that CIMultiDict>)).
+
+    ClientSession._prepare_headers copies the headers into a new CIMultiDict and replaces a name it has not seen in that
+    exact spelling: the client's ``x-remote-user-id`` REPLACES the Supervisor's ``X-Remote-User-Id``, keeping the
+    client's value and spelling.  The manager refuses any spelling but the Supervisor's, so the spoof is a 403.  If
+    a future aiohttp or multidict kept the first spelling instead, the client's value would arrive as a genuine
+    ``X-Remote-User-Id`` and be served: then this test fails, and the header check must change."""
+
+    async def asyncSetUp(self):
+        self.env = await Env(tmpdir(self)).start()
+        self.app_client = await self.env.client_with(self)
+        self.session = aiohttp.ClientSession()
+        self.addAsyncCleanup(self.session.close)
+
+    async def asyncTearDown(self):
+        await self.env.close()
+
+    async def through_the_supervisor(self, session_user: tuple, client_headers: list[tuple[str, str]]) -> int:
+        headers = supervisor_init_header([("Accept", "application/json"), *client_headers], *session_user)
+        async with self.session.get(str(self.app_client.make_url("/api/status")), headers=headers,
+                                    allow_redirects=False) as resp:
+            return resp.status
+
+    async def test_the_legitimate_shape_is_served(self):
+        alice = (ALICE_ID, "alice", "Alice")
+        self.assertEqual(await self.through_the_supervisor(alice, []), 200)
+        self.assertEqual(await self.through_the_supervisor((OLGA_ID, None, "Olga"), []), 200)  # no login name
+        # a client's copy in the Supervisor's exact spelling is dropped by its filter: the session's user is served
+        self.assertEqual(await self.through_the_supervisor(alice, [("X-Remote-User-Id", BOB_ID)]), 200)
+        self.assertEqual(await self.through_the_supervisor(alice, [("X-Remote-User-Name", "root")]), 200)
+
+    async def test_the_client_s_lowercase_copies_are_refused(self):
+        bob, alice = (BOB_ID, "bob", "Bob"), (ALICE_ID, "alice", "Alice")
+        spoofs = {
+            "bob's session, alice's id": (bob, [("x-remote-user-id", ALICE_ID)]),
+            "bob's session, alice's id in capitals": (bob, [("X-REMOTE-USER-ID", ALICE_ID)]),
+            "bob's session, alice's id and name": (bob, [("x-remote-user-id", ALICE_ID), ("x-remote-user-name", "alice")]),
+            "alice's session, another name": (alice, [("x-remote-user-name", "root")]),
+            "alice's session, her own id again": (alice, [("x-remote-user-id", ALICE_ID)]),
+        }
+        for label, (user, extra) in spoofs.items():
+            with self.subTest(label):
+                self.assertEqual(await self.through_the_supervisor(user, extra), 403)
+        self.assertEqual(self.env.changing_calls(), [])
+
+    def test_what_the_session_sends(self):
+        """The mechanism itself, pinned: after the merge, one id header, the client's value in the client's spelling."""
+        merged = self.session._prepare_headers(supervisor_init_header([("x-remote-user-id", ALICE_ID)], BOB_ID, "bob", "Bob"))
+        self.assertEqual([(k, v) for k, v in merged.items() if k.lower() == "x-remote-user-id"], [("x-remote-user-id", ALICE_ID)])
 
 
 class CoreClientTest(unittest.TestCase):
