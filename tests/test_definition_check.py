@@ -671,6 +671,33 @@ class FlowCheckTest(FlowBase):
         self.assertIsNone(env.registry.get("garage")["tampered"])
         self.assertEqual(app["boot"], "auto")
 
+    async def test_a_hold_or_containment_keeps_the_admin_s_manual_start_at_boot(self):
+        """F6: an app whose start at boot the admin turned off keeps it off: the hold does not record turning it off
+        (it was off), and Check again does not turn it on."""
+        env = self.env
+        self.assertEqual((await self.create())["state"], "succeeded")
+        app = env.stub.installed["local_hri_garage"]
+        app["boot"] = "manual"  # the admin's choice, on the app's page
+        since = len(env.stub.calls)
+        with self.unreported("host_dbus"):
+            job = await env.job(await env.send("POST", "/api/instances/garage/update", {"version": "0.25.1"}))
+        self.assertIn("does not report host_dbus", job["error"])
+        self.assertNotIn(("POST", "/addons/local_hri_garage/options", {"boot": "manual"}), env.stub.calls[since:])
+        self.assertIsNone(env.registry.get("garage")["tampered"]["boot_manual"])
+        job = await env.job(await env.send("POST", "/api/instances/garage/finish"))  # Check again
+        self.assertEqual(job["state"], "succeeded", job)
+        self.assertEqual((app["state"], app["boot"]), ("started", "manual"))
+        # a containment that cannot uninstall leaves it as the admin had it too
+        env.stub.install_override["local_hri_garage"] = {"docker_api": True}
+        env.stub.fail[("POST", "/addons/local_hri_garage/uninstall")] = "the uninstall failed"
+        env.stub.releases.append("0.25.3")
+        since = len(env.stub.calls)
+        job = await env.job(await env.send("POST", "/api/instances/garage/update", {"version": "0.25.3"}))
+        self.assertIn("NOT uninstalled", job["error"])
+        self.assertEqual(app["boot"], "manual")
+        self.assertNotIn(("POST", "/addons/local_hri_garage/options", {"boot": "manual"}), env.stub.calls[since:])
+        self.assertIsNone(env.registry.get("garage")["tampered"]["boot_manual"])
+
     async def test_repair_of_an_unchecked_instance_checks_it_again(self):
         env = self.env
         self.assertEqual((await self.create())["state"], "succeeded")

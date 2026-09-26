@@ -1246,9 +1246,14 @@ class Manager:
         info = await self._info(slug) or {}
         return {"slug": slug, "version": version, "ingress_url": info.get("ingress_url"), "state": info.get("state", "started")}
 
-    async def _finish_setup(self, job: Job, managed: children.Managed) -> None:
-        job.log("turning on start at boot, the Watchdog and the sidebar panel")
-        await self.sv.set_options(managed, boot="auto", watchdog=True, ingress_panel=True)
+    async def _finish_setup(self, job: Job, managed: children.Managed, boot: bool = True) -> None:
+        """Start at boot (unless ``boot`` is False: the admin had turned it off), the Watchdog and the panel on, and
+        the app started; the setup recorded complete, and any mark cleared."""
+        job.log(("turning on start at boot, the Watchdog and the sidebar panel" if boot else
+                 "turning on the Watchdog and the sidebar panel (start at boot stays off, as it was)"))
+        options = {"boot": "auto", "watchdog": True, "ingress_panel": True} if boot else {"watchdog": True,
+                                                                                          "ingress_panel": True}
+        await self.sv.set_options(managed, **options)
         if (await self.sv.app_info(managed.slug)).get("state") != "started":
             job.log("starting")
             await self.sv.start(managed)
@@ -1313,24 +1318,38 @@ class Manager:
                                      "API?)"),
                 "at": children.now_iso(), "unverified": True, "uninstalled": False, "stopped": False, "failure": None}
         await self._set_mark(managed.name, mark)
+        boot = None
         try:
-            if (await self.sv.app_info(managed.slug)).get("state") == "started":
+            info = await self.sv.app_info(managed.slug)
+            boot = info.get("boot")
+            if info.get("state") == "started":
                 job.log("stopping it")
                 await self.sv.stop(managed)
             mark["stopped"] = True
         except Exception as err:  # noqa: BLE001 - reported in the mark and the job
             mark["failure"] = str(err) or err.__class__.__name__
-        try:
-            await self.sv.set_options(managed, boot="manual")
-            mark["boot_manual"] = True
-            job.log("start at boot turned off until it is checked")
-        except Exception as err:  # noqa: BLE001 - reported in the mark and the job
-            mark["boot_manual"] = False
-            job.log(f"start at boot NOT turned off: {err}")
+        await self._boot_off(job, managed, mark, boot, "start at boot turned off until it is checked")
         await self._set_mark(managed.name, mark)
         message = f"{mark['reason']}: {self._mark_text(managed.slug, mark)}"
         _LOGGER.error("%s", message)
         return Unverified(message)
+
+    async def _boot_off(self, job: Job, managed: children.Managed, mark: dict, boot: object, done: str) -> None:
+        """Start at boot off for an app the manager holds or contains (the Supervisor starts every app with boot auto
+        at its next start), through the marker gate.  ``boot``: the app's before (None: not known).  Recorded in
+        ``mark["boot_manual"]``: True turned off by the manager (and given back when the mark is cleared), False it
+        could not be, None it was off already, the admin's choice, which clearing the mark keeps."""
+        if boot == "manual":
+            mark["boot_manual"] = None
+            job.log("start at boot was off already: left so")
+            return
+        try:
+            await self.sv.set_options(managed, boot="manual")
+            mark["boot_manual"] = True
+            job.log(done)
+        except Exception as err:  # noqa: BLE001 - reported in the mark and the job
+            mark["boot_manual"] = False
+            job.log(f"start at boot NOT turned off: {err}")
 
     async def _boot_back(self, job: Job, managed: children.Managed, mark: object) -> None:
         """A hold cleared (its check passed) that had turned start at boot off: on again (Check again does it itself,
@@ -1375,9 +1394,13 @@ class Manager:
         if not await self._set_mark(managed.name, mark):
             job.log("the mark could not be recorded in the manager's registry: stopping it first all the same")
 
+        boot: list = [None]  # the app's start at boot before containment, when its info could be read
+
         async def steps() -> None:
             try:
-                if (await self.sv.app_info(managed.slug)).get("state") == "started":
+                info = await self.sv.app_info(managed.slug)
+                boot[0] = info.get("boot")
+                if info.get("state") == "started":
                     job.log("stopping it at once")
                     await self.sv.stop(managed)
                 mark["stopped"] = True
@@ -1392,13 +1415,7 @@ class Manager:
                 mark["failure"] = str(err) or err.__class__.__name__
             if not mark["uninstalled"]:
                 # still installed: the Supervisor starts every app with boot auto when it starts
-                try:
-                    await self.sv.set_options(managed, boot="manual")
-                    mark["boot_manual"] = True
-                    job.log("start at boot turned off")
-                except Exception as err:  # noqa: BLE001 - reported in the mark
-                    mark["boot_manual"] = False
-                    job.log(f"start at boot NOT turned off: {err}")
+                await self._boot_off(job, managed, mark, boot[0], "start at boot turned off")
 
         task = asyncio.ensure_future(steps())
         try:
@@ -1429,15 +1446,18 @@ class Manager:
         """What a mark means for the user: done, or what to do by hand."""
         if mark.get("unverified"):
             boot = {True: "; start at boot was turned off until it is checked",
-                    False: "; start at boot could NOT be turned off"}.get(mark.get("boot_manual"), "")
+                    False: "; start at boot could NOT be turned off",
+                    None: "; start at boot was off already" if "boot_manual" in mark else ""}.get(
+                mark.get("boot_manual"), "")
             return (f"it was {'stopped' if mark.get('stopped') else 'NOT stopped (' + str(mark.get('failure') or INTERRUPTED)[:200] + ')'}"
                     f"{boot} and is kept installed, with its options and data. A newer manager may read the Supervisor's "
                     f"answer; until then Delete it, or start {slug} yourself in Settings > Apps if you trust it")
         if mark.get("uninstalled"):
             return "it was stopped and uninstalled at once (its /config folder is kept)"
         folder = names.folder_name(slug[len(names.SLUG_PREFIX):])
-        boot = {True: "; start at boot was turned off", False: "; start at boot could NOT be turned off"}.get(
-            mark.get("boot_manual"), "")
+        boot = {True: "; start at boot was turned off", False: "; start at boot could NOT be turned off",
+                None: "; start at boot was off already" if "boot_manual" in mark else ""}.get(
+                mark.get("boot_manual"), "")
         return (f"it was NOT {'uninstalled' if mark.get('stopped') else 'stopped nor uninstalled'} "
                 f"({str(mark.get('failure') or INTERRUPTED)[:300]}{boot}): stop and uninstall {slug} yourself in Settings > Apps now (keep "
                 f"its data if you want it); then Delete it here, or, if the manager no longer recognises {folder}/, "
@@ -1874,7 +1894,10 @@ class Manager:
         return managed
 
     async def _setup(self, job: Job, managed: children.Managed, install: bool) -> dict:
-        await self._refuse_marked_now(managed.name, check=not install)
+        entry = await self._refuse_marked_now(managed.name, check=not install)
+        mark = (entry or {}).get("tampered")
+        # Check again of a hold that found start at boot off (the admin's choice) leaves it off
+        boot = not (isinstance(mark, dict) and "boot_manual" in mark and mark["boot_manual"] is None)
         try:
             installed = any(a.get("slug") == managed.slug for a in await self.sv.list_apps())
             if install:
@@ -1905,7 +1928,7 @@ class Manager:
                 missing = await self._verify_installed(job, managed, expected)
                 if missing:
                     raise await self._hold(job, managed, missing)
-            await self._finish_setup(job, managed)
+            await self._finish_setup(job, managed, boot=boot)
         except Tampered as err:
             mark = await self._contain(job, managed, str(err))
             raise self._tampered(managed, str(err), mark, "") from None
