@@ -1,5 +1,42 @@
 # Changelog
 
+## 0.1.2
+
+Fixes from an external review of 0.1.1, and Bluetooth per instance. Still **experimental**.
+
+- **It installs only what it wrote.** Anyone who can write the local apps folder could change an instance's
+  `config.yaml` between the manager's write and the Supervisor's reading of it, and the manager's own install or
+  update would then install it (`hassio_role: admin`, full access...). The manager now hashes every file it writes and
+  checks them before each store reload and right before the install or update, compares the store's definition with
+  what it stamped before, and the installed app's after: a difference refuses the install or update, or uninstalls the
+  app at once (its `/config` kept), marks the instance and says so.
+- **Bluetooth, per instance.** A box of the New instance form (and of the Update and Rebuild dialogs, applied with the
+  new version) gives the instance the host's D-Bus (`host_dbus: true`) for an integration that talks to Bluetooth
+  devices. Off unless chosen; HRI's template can never turn it on. See the README's Bluetooth section.
+- **An update killed midway is put back** at the manager's next start (the registry marks an update in progress
+  before the swap); only the manager's records failing after a successful update is a warning, not a failure, and the
+  next start records it.
+- **An install call without a clean answer** (a timeout, a lost connection) keeps the instance, as install
+  interrupted, instead of forgetting it while the Supervisor goes on installing; Forget waits an hour for it.
+- **Stopping** cancels the jobs first and waits at most 5 s for open requests, within a 30 s stop timeout
+  (`timeout: 30`), so a rollback always has its time. A file that cannot be tidied at the start no longer stops the
+  manager from starting.
+- **Safer writes:** every file below a definition folder is created through folder descriptors opened part by part
+  without following links; the registry's folder is synced after each write; a refused build never leaves a registry
+  entry behind; a refusal of HRI's template never spells a YAML value out (nested aliases took exponential time), and
+  the copy in `/data` is checked before it is kept.
+- **Administrators:** `allowed_users` matches a user's id or login name, never the display name (any administrator can
+  change it); a list whose entries are all blank refuses everyone; a hanging Home Assistant is asked once for all
+  waiting requests, and not again for 5 s.
+- **Smaller fixes:** "newer release" counts the installed version too; a row keeps all its problems; an uninstall
+  always says whether the data goes; archives whose names clash are refused before anything is written, and closed
+  after use; versions take ASCII digits only; Delete says "delete" when it fails; the wait for the store is measured
+  by the clock.
+- **Release and CI:** the image is built from a lock of every dependency with its hashes
+  (`hri_manager/requirements.txt`, compiled from `requirements.in`); the release build checks out the tag by its full
+  name; the app-version job keeps no token in the checkout; its script fails clearly on a version it cannot read; the
+  Supervisor checkout of CI is pinned by commit.
+
 ## 0.1.1
 
 Fixes from a first run on a real Home Assistant OS 18.3 (Supervisor 2026.09.2). Still **experimental**.
