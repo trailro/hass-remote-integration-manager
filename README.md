@@ -325,7 +325,9 @@ narrows itself, in code, and the tests pin it:
   Supervisor token and the optional GitHub token are never logged: the log formatter removes them from every line,
   tracebacks included.
 - **Files.** Writes stay inside `hri_<name>/` of the local apps folder and the manager's own `/data`: built in a hidden
-  temporary folder and renamed into place, no symlink followed, YAML written with a safe dumper. Source archives from GitHub are checked before
+  temporary folder and renamed into place, no symlink followed (every file is created, read or removed through
+  folder descriptors opened part by part with `O_NOFOLLOW`, the marker too, so a folder swapped for a link midway
+  is refused), YAML written with a safe dumper. Source archives from GitHub are checked before
   anything is written (no absolute paths, no `..`, no hard links or devices, links only to files of the same
   archive, size and count caps; the gzip layer is unpacked as a capped stream first, so a huge tar header is refused
   too), outside the event loop.

@@ -13,7 +13,6 @@ at a regular file of the same archive; any other link is skipped and reported.""
 
 from __future__ import annotations
 
-import os
 import posixpath
 import tarfile
 import tempfile
@@ -178,7 +177,4 @@ def extract(archive: Archive, dest: str) -> None:
     for rel, info in archive.files.items():
         children.write_file(dest, rel, archive.read(rel), 0o755 if info.mode & 0o100 else 0o644)
     for rel, resolved in archive.links.items():
-        parent, _, leaf = rel.rpartition("/")
-        folder = children.make_dirs(dest, parent) if parent else dest
-        path = children.safe_join(folder, leaf)
-        os.symlink(posixpath.relpath(resolved, posixpath.dirname(rel) or "."), path)
+        children.make_link(dest, rel, posixpath.relpath(resolved, posixpath.dirname(rel) or "."))

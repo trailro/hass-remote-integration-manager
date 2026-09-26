@@ -322,20 +322,19 @@ def build_git(archive: tarsafe.Archive, dest: str, name: str, version: str, sha:
     tarsafe.extract(archive, dest)
     notes = [f"skipped link {tarsafe.show(rel)}" for rel in archive.skipped]
     for rel in find_configs(dest):
-        os.unlink(children.safe_join(dest, rel))
+        children.remove_file(dest, rel)
         notes.append(f"removed {tarsafe.show(rel)}")
     for sub, data in sorted(extras.items()):
-        path = children.safe_join(dest, sub)
-        if os.path.lexists(path):
-            os.unlink(path)
+        try:
+            children.remove_file(dest, sub)
+        except FileNotFoundError:
+            pass
         children.write_file(dest, sub, data)
     children.write_file(dest, "config.yaml", dump(config, source))
-    dockerfile = os.path.join(dest, "Dockerfile")
-    with open(dockerfile, "rb") as fh:
-        text = fh.read()
+    text = children.read_file(dest, "Dockerfile")
     patched, count = HRI_BUILD_ARG.subn(b"ARG HRI_BUILD=" + sha.encode("ascii"), text, count=1)
     if count:
-        os.unlink(dockerfile)
+        children.remove_file(dest, "Dockerfile")
         children.write_file(dest, "Dockerfile", patched)
         notes.append(f"Dockerfile: HRI_BUILD defaults to {sha[:12]}")
     else:

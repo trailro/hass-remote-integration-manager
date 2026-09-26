@@ -163,6 +163,38 @@ class WriteTest(unittest.TestCase):
         with self.assertRaises(OSError):
             children.write_file(base, "flink", b"x")
 
+    def test_a_folder_swapped_for_a_link_while_writing_is_refused(self):
+        """Another writer of the local apps folder swaps a folder the manager has just created for a link elsewhere."""
+        base, outside = tmpdir(self), tmpdir(self)
+        real_mkdir = os.mkdir
+
+        def mkdir_then_swap(path, mode=0o777, *, dir_fd=None):
+            real_mkdir(path, mode, dir_fd=dir_fd)
+            if os.path.basename(path) == "a" and not os.path.islink(os.path.join(base, "a")):
+                os.rename(os.path.join(base, "a"), os.path.join(base, "a-moved"))
+                os.symlink(outside, os.path.join(base, "a"))
+
+        with mock.patch("os.mkdir", side_effect=mkdir_then_swap):
+            with self.assertRaises(children.UnsafePath):
+                children.write_file(base, "a/b/c", b"x")
+        self.assertEqual(os.listdir(outside), [])
+
+    def test_links_below_the_base_are_never_followed(self):
+        base, outside = tmpdir(self), tmpdir(self)
+        with open(os.path.join(outside, "keep"), "wb") as fh:
+            fh.write(b"x")
+        os.symlink(outside, os.path.join(base, "sub"))
+        for call in (lambda: children.remove_file(base, "sub/keep"), lambda: children.read_file(base, "sub/keep"),
+                     lambda: children.make_link(base, "sub/l", "keep"), lambda: children.make_dirs(base, "sub/d")):
+            with self.subTest(call=call), self.assertRaises(children.UnsafePath):
+                call()
+        self.assertEqual(sorted(os.listdir(outside)), ["keep"])
+        os.symlink(os.path.join(outside, "keep"), os.path.join(base, "leaf"))
+        with self.assertRaises(OSError):
+            children.read_file(base, "leaf")
+        children.remove_file(base, "leaf")  # the link goes, not what it points at
+        self.assertEqual(sorted(os.listdir(outside)), ["keep"])
+
     def test_replace_commit_and_rollback(self):
         m = children.write_new(self.root, "garage", build_with({"config.yaml": b"old"}, marker("garage")), self.reg)
         r = children.replace(m, build_with({"config.yaml": b"new"}, marker("garage", version="0.25.1")))
