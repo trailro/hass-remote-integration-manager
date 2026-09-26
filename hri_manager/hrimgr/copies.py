@@ -106,6 +106,16 @@ def save(root: str, name: str, instance_folder: str, marker: dict) -> list[str]:
         raise CopyError(f"{names.folder_name(name)} has no config.yaml")
     if sum(len(d) for d in files.values()) > MAX_TOTAL:
         raise CopyError("the definition is larger than a copy may be")
+    # the folder is in the local apps folder, which others can write: only a definition this manager writes is kept
+    # (the one Repair would use is checked again when it is read)
+    try:
+        config = yaml.safe_load(files["config.yaml"].decode("utf-8"))
+    except (UnicodeDecodeError, yaml.YAMLError) as err:
+        raise CopyError(f"its config.yaml cannot be read: {err}") from None
+    check(config, name, str(marker.get("version")), channel)
+    for rel, data in files.items():
+        if rel != "config.yaml":
+            check_file(rel, data)
     meta = {k: marker.get(k) for k in META_FIELDS}
     os.makedirs(root, mode=0o700, exist_ok=True)
     final = folder(root, name)
@@ -174,7 +184,9 @@ def check(config: object, name: str, version: str, channel: str) -> dict:
     changes nothing (no name, panel title, port, backup_exclude entry or key stamping would not have written)."""
     if not isinstance(config, dict):
         raise CopyError("its config.yaml is not a mapping")
-    if config.get("slug") != names.config_slug(name) or str(config.get("version")) != version:
+    shown_version = config.get("version")  # a scalar before str(): an aliased list would be spelled out whole
+    if (config.get("slug") != names.config_slug(name) or not isinstance(shown_version, (str, int, float))
+            or str(shown_version) != version):
         raise CopyError("its config.yaml is not the one of this instance and version")
     if config.get("url") != names.HRI_URL:
         raise CopyError("its config.yaml is not hass-remote-integration's")
