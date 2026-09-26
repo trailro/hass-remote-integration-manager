@@ -438,6 +438,7 @@ class Manager:
                 "manager could not check it"))
         await asyncio.to_thread(self.registry.update, managed.name, tampered=None)
         self._unrecorded_marks.pop(managed.name, None)
+        await asyncio.to_thread(self._drop_trace, managed)
         await self._boot_back(job, managed, managed.entry.get("tampered"))
         return {"checked": managed.slug}
 
@@ -452,12 +453,19 @@ class Manager:
         for name, entry in sorted(registered.items()):
             mark = entry.get("tampered")
             if not isinstance(mark, dict) and name in installed:
-                # a containment whose mark the registry could not record kept it in the instance's marker
+                # a containment or hold whose mark the registry could not record kept it in the instance's marker:
+                # recorded now (in memory when the registry still cannot be written), then followed as any mark
                 try:
                     traced = children.load_managed(self.root, name, self.registry).marker.get("contained")
                 except children.NotManaged:
                     traced = None
                 mark = traced if isinstance(traced, dict) else None
+                if mark is not None:
+                    try:
+                        self.registry.update(name, tampered=mark, setup_complete=False)
+                    except RegistryError:
+                        self._unrecorded_marks[name] = dict(mark)
+                    notes.append(f"{name}: its mark, which the registry could not record, is taken from its marker")
             pending = isinstance(mark, dict) and mark.get("pending") is True
             if not isinstance(mark, dict) or (mark.get("unverified") and not pending) or name not in installed:
                 continue
@@ -1267,6 +1275,7 @@ class Manager:
             await self.sv.start(managed)
         await asyncio.to_thread(self.registry.update, managed.name, setup_complete=True, tampered=None)
         self._unrecorded_marks.pop(managed.name, None)  # a mark only memory held goes with the registry's
+        await asyncio.to_thread(self._drop_trace, managed)
 
     @staticmethod
     async def _shielded(job: Job, coro, what: str) -> None:
@@ -1338,7 +1347,8 @@ class Manager:
         except Exception as err:  # noqa: BLE001 - reported in the mark and the job
             mark["failure"] = str(err) or err.__class__.__name__
         await self._boot_off(job, managed, mark, boot, "start at boot turned off until it is checked")
-        await self._set_mark(managed.name, mark)
+        if not await self._set_mark(managed.name, mark):
+            await asyncio.to_thread(self._trace_mark, managed, dict(mark))
         message = f"{mark['reason']}: {self._mark_text(managed.slug, mark)}"
         _LOGGER.error("%s", message)
         return Unverified(message)
@@ -1382,6 +1392,17 @@ class Manager:
             return False
         self._unrecorded_marks.pop(name, None)
         return True
+
+    def _drop_trace(self, managed: children.Managed) -> None:
+        """The mark cleared: its trace in the instance's marker goes too, or the next start would take it again.
+        Best effort, logged."""
+        if "contained" not in managed.marker:
+            return
+        try:
+            children.replace_file(children.child_path(self.root, managed.name), children.MARKER, children.marker_bytes(
+                {k: v for k, v in managed.marker.items() if k != "contained"}))
+        except (OSError, children.UnsafePath) as err:
+            _LOGGER.error("%s: the trace of its mark was not removed from its marker: %s", managed.name, err)
 
     def _trace_mark(self, managed: children.Managed, mark: dict) -> None:
         """A mark the registry could not record, kept in the instance's marker (``contained``) for the manager's next

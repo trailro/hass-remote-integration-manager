@@ -457,6 +457,28 @@ class FlowCheckTest(FlowBase):
         job = await env.job(await env.send("POST", "/api/instances/garage/restart"))
         self.assertEqual(job["state"], "succeeded", job)
 
+    async def test_a_hold_whose_mark_cannot_be_recorded_leaves_a_trace_for_the_next_start(self):
+        """F3: as a containment does, a hold the registry could not record is kept in the instance's marker: the next
+        start of the manager holds it again, until a Check again that passes removes the trace."""
+        env = self.env
+        self.assertEqual((await self.create())["state"], "succeeded")
+        with self.full_disk_for_marks(), self.unreported("host_dbus"):
+            await env.job(await env.send("POST", "/api/instances/garage/update", {"version": "0.25.1"}))
+        with open(os.path.join(self.folder(), children.MARKER), encoding="utf-8") as fh:
+            self.assertTrue(json.load(fh)["contained"]["unverified"])
+        restarted = self.restarted()  # the registry writable again
+        await restarted.startup()
+        await restarted.jobs.wait_all()
+        self.assertTrue(env.registry.get("garage")["tampered"]["unverified"])
+        status, answer = await env.send("POST", "/api/instances/garage/start")
+        self.assertEqual(status, 400, answer)
+        job = await env.job(await env.send("POST", "/api/instances/garage/finish"))  # Check again
+        self.assertEqual(job["state"], "succeeded", job)
+        with open(os.path.join(self.folder(), children.MARKER), encoding="utf-8") as fh:
+            self.assertNotIn("contained", json.load(fh))
+        await self.restarted().startup()
+        self.assertIsNone(env.registry.get("garage")["tampered"])
+
     async def test_a_containment_cut_short_by_a_stop_says_so_and_the_next_start_finishes_it(self):
         env = self.env
         env.stub.install_override["local_hri_garage"] = {"hassio_role": "admin"}
