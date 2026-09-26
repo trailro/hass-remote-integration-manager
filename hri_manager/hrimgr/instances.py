@@ -189,9 +189,11 @@ class Manager:
                 entry["foreign"] = True
             decoyed = self._decoys_of(found, slug)
             if decoyed and not entry.get("job"):
-                # nothing that makes the Supervisor install or start it while the store may take the decoy
+                # nothing that makes the Supervisor install or update it while the store may take the decoy, nor start
+                # it while one names it; one that names no instance leaves Start and Stop of the installed app
                 entry["problem"] = "; ".join(p for p in (entry.get("problem"), self._decoy_text(decoyed)) if p)
-                entry["actions"] = [a for a in entry["actions"] if a in ("stop", "delete")]
+                kept = ("stop", "delete") if any(d.slug for d in decoyed) else ("start", "restart", "stop", "delete")
+                entry["actions"] = [a for a in entry["actions"] if a in kept]
             out.append(entry)
         for slug, app in sorted(installed.items()):
             name = names.name_from_slug(slug)
@@ -639,7 +641,7 @@ class Manager:
         managed = await self.managed(name)
         if action in ("start", "restart"):
             self._refuse_marked(name, managed.entry)
-            await self._refuse_foreign(managed)
+            await self._refuse_foreign(managed, starting=True)
         return self.jobs.start(name, action, user, lambda job: self._simple(job, managed, action))
 
     async def _detached_entry(self, name: str) -> dict | None:
@@ -742,10 +744,14 @@ class Manager:
             self.registry.update(name, config_sha256=digest)
         return record
 
-    async def _refuse_foreign(self, managed: children.Managed) -> None:
+    async def _refuse_foreign(self, managed: children.Managed, starting: bool = False) -> None:
         """InvalidRequest while the store offers a definition of the instance the manager did not write, or the local
-        apps folder holds a decoy of it (stamp.decoys) that the store may take instead."""
+        apps folder holds a decoy of it (stamp.decoys) that the store may take instead.  ``starting`` (Start, Restart
+        of the installed app, which installs nothing): only a decoy that names the instance; one that names none (a
+        file the manager cannot read, a folder it cannot search) refuses installs and updates, not that."""
         found = self._decoys_of(await self._decoys(), managed.slug)
+        if starting:
+            found = [d for d in found if d.slug is not None]
         if found:
             raise InvalidRequest(f"{managed.name}: {self._decoy_text(found)}. Nothing is installed, updated or started "
                                  "while it is there")

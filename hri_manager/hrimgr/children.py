@@ -531,9 +531,9 @@ def walk(base: str, skip: Callable[[str], bool] | None = None, max_depth: int = 
             if skip is not None and skip(name):
                 continue
             count[0] += 1
-            if max_entries is not None and count[0] > max_entries:
-                raise UnsafePath(f"more than {max_entries} entries")
             rel = f"{rel_dir}/{name}" if rel_dir else name
+            if max_entries is not None and count[0] > max_entries:
+                raise UnsafePath(f"more than {max_entries} entries (at {rel[:80]!r})")
             try:
                 st = os.stat(name, dir_fd=fd, follow_symlinks=False)
             except FileNotFoundError:
