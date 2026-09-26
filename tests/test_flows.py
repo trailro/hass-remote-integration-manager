@@ -490,6 +490,15 @@ class FlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.marker("garage")["sha"], installed_sha)  # the definition is untouched
         _, data = await env.get("/api/instances")
         self.assertIn("tag moved", data["instances"][0]["problem"])
+        # a second problem is added to the row, never written over the first
+        del env.stub.installed["local_hri_garage"]
+        _, data = await env.get("/api/instances")
+        problem = data["instances"][0]["problem"]
+        self.assertIn("tag moved", problem)
+        self.assertIn("defined, but not installed", problem)
+        env.stub.installed["local_hri_garage"] = {"slug": "local_hri_garage", "name": "HRI Garage", "version": "0.25.0",
+                                                  "state": "started", "url": "https://github.com/trailro/hass-remote-integration",
+                                                  "repository": "local"}
         # the same for a repair from GitHub (without the manager's copy of the definition, which needs no download)
         shutil.rmtree(self.folder("garage"))
         shutil.rmtree(self.copy_dir("garage"))
@@ -498,6 +507,17 @@ class FlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(job["state"], "failed")
         self.assertIn("tag moved", job["error"])
         self.assertFalse(os.path.exists(self.folder("garage")))
+
+    async def test_a_newer_release_is_one_newer_than_the_installed_app_too(self):
+        """An update the manager stopped waiting for can leave the app newer than its definition."""
+        env = self.env
+        await self.create()
+        await env.get("/api/releases")
+        _, data = await env.get("/api/instances")
+        self.assertEqual(data["instances"][0]["newer_release"], "0.25.1")
+        env.stub.installed["local_hri_garage"]["version"] = "0.25.1"  # the definition still says 0.25.0
+        _, data = await env.get("/api/instances")
+        self.assertIsNone(data["instances"][0]["newer_release"])
 
     async def test_a_failed_update_puts_the_previous_definition_back(self):
         env = self.env
