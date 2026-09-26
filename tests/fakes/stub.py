@@ -87,7 +87,7 @@ class Stub:
         for path in sorted(self.local_apps.glob("**/config.*")):
             if path.suffix not in CONFIG_SUFFIXES:
                 continue
-            if any(p.startswith(".") for p in path.relative_to(self.local_apps).parts):
+            if any(p.startswith(".") or p == "rootfs" for p in path.relative_to(self.local_apps).parts):
                 continue
             data = yaml.safe_load(path.read_text(encoding="utf-8")) if path.suffix != ".json" else json.loads(path.read_text())
             if not isinstance(data, dict) or "slug" not in data or "version" not in data:

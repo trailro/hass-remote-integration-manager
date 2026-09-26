@@ -88,8 +88,10 @@ exists in HRI's repository before it downloads anything, downloads it by its ful
 
 The manager downloads that source tree into the instance's folder, puts HRI's app definition at its root without
 `image:` (so the Supervisor builds the folder's Dockerfile on your machine, which takes several minutes), removes
-every other `config.yaml/yml/json` of the tree (the store would read each as another app), and gives it the version
-`0.0.0-<commit>`. HRI's page shows the commit as its build. **Rebuild** downloads the branch or tag again and
+every other file the Supervisor's store would read as an app (by its own rule: `config.*` ending in `.yaml`, `.yml`
+or `.json`, such as `docs/config.example.yaml`, outside dot folders and `rootfs/`) and nothing else, and gives it the
+version `0.0.0-<commit>`. A tree with `apparmor.txt`, `build.yaml/yml/json` or a `Dockerfile.<anything>` at its root
+is refused: the Supervisor would use them to confine or build the app instead of HRI's Dockerfile. HRI's page shows the commit as its build. **Rebuild** downloads the branch or tag again and
 rebuilds when its commit changed. Not for production.
 
 ## Updating

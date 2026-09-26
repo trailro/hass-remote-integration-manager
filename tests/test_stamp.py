@@ -155,19 +155,37 @@ class BuildTest(unittest.TestCase):
         sha = sha_of("main")
         config, notes = stamp.build_git(self.archive(sha=sha), dest, "garage", names.git_version(sha), sha, "src")
         self.assertEqual(stamp.find_configs(dest), ["config.yaml"])
+        # what the Supervisor does not read as an app stays: the build may need it
         for kept in ("custom_components/integration_manager/static/config.js",
                      "custom_components/integration_manager/static/config.css",
                      "custom_components/integration_manager/templates/config.html", "DOCS.md", "translations/en.yaml",
-                     "README.md", "app/DOCS.md"):
+                     "README.md", "app/DOCS.md", "repository.yaml", ".github/haos/config.yaml", "rootfs/etc/config.yaml",
+                     "tools/Dockerfile.dev"):
             with self.subTest(kept=kept):
                 self.assertTrue(os.path.isfile(os.path.join(dest, kept)))
-        for gone in ("app/config.yaml", "tests/e2e/config.yaml", "tests/e2e/config.json", "repository.yaml", ".github/haos/config.yaml"):
+        for gone in ("app/config.yaml", "tests/e2e/config.yaml", "tests/e2e/config.json", "docs/config.example.yaml"):
             with self.subTest(gone=gone):
                 self.assertFalse(os.path.exists(os.path.join(dest, gone)))
         self.assertNotIn("image", config)
         with open(os.path.join(dest, "Dockerfile"), encoding="utf-8") as fh:
             self.assertIn(f"ARG HRI_BUILD={sha}\n", fh.read())
-        self.assertIn("removed app/config.yaml", notes)
+        self.assertIn("removed 'app/config.yaml'", notes)
+
+    def test_git_trees_with_build_files_at_their_root_are_refused(self):
+        """apparmor.txt replaces the default AppArmor profile, build.* sets base images and arguments, a
+        Dockerfile.<arch> is built instead of the Dockerfile the manager patches."""
+        for extra in ("apparmor.txt", "build.yaml", "build.yml", "build.json", "Dockerfile.amd64", "Dockerfile.aarch64",
+                      "Dockerfile.x"):
+            files = hri_files()
+            files[extra] = b"x\n"
+            dest = tmpdir(self)
+            with self.subTest(extra=extra), self.assertRaises(stamp.TemplateError) as ctx:
+                stamp.build_git(self.archive(files), dest, "garage", "0.0.0-abc", "a" * 40, "src")
+            self.assertIn(extra, str(ctx.exception))
+            self.assertEqual(os.listdir(dest), [])
+        files = hri_files()
+        files.update({"docs/apparmor.txt": b"x", "sub/build.yaml": b"x"})  # below the root the Supervisor does not look
+        stamp.build_git(self.archive(files), tmpdir(self), "garage", "0.0.0-abc", "a" * 40, "src")
 
     def test_git_without_a_dockerfile_is_refused(self):
         files = hri_files()
@@ -184,10 +202,12 @@ class BuildTest(unittest.TestCase):
     def test_find_configs_follows_the_supervisor(self):
         root = tmpdir(self)
         for rel in ("config.yaml", "a/config.json", "a/config.js", ".hidden/config.yaml", "b/rootfs/config.yaml", "c/.x/config.yml",
-                    "d/config.yml", "e/configs.yaml"):
+                    "d/config.yml", "e/configs.yaml", "f/config.example.yaml", "f/config.x.json", "g/Config.yaml",
+                    "g/config.", "g/config.yaml.bak", "rootfs/config.yml", "h/.config.yaml"):
             os.makedirs(os.path.join(root, os.path.dirname(rel)), exist_ok=True)
             open(os.path.join(root, rel), "w").close()
-        self.assertEqual(stamp.find_configs(root), ["a/config.json", "config.yaml", "d/config.yml"])
+        self.assertEqual(stamp.find_configs(root), ["a/config.json", "config.yaml", "d/config.yml", "f/config.example.yaml",
+                                                    "f/config.x.json"])
 
 
 if __name__ == "__main__":

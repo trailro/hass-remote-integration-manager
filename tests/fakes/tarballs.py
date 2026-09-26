@@ -55,5 +55,8 @@ def hri_files(version_in_config: str = "0.24.0") -> dict[str, bytes]:
         "custom_components/integration_manager/templates/config.html": b"<!doctype html>\n",
         "tests/e2e/config.yaml": b"slug: decoy\nname: decoy\nversion: '1'\n",
         "tests/e2e/config.json": b"{}\n",
+        "docs/config.example.yaml": b"slug: decoy2\nname: decoy\nversion: '1'\nprivileged: [SYS_ADMIN]\n",
         ".github/haos/config.yaml": b"hidden: true\n",
+        "rootfs/etc/config.yaml": b"read by the image, not by the store\n",
+        "tools/Dockerfile.dev": b"FROM scratch\n",
     }

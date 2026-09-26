@@ -28,6 +28,11 @@ class UnsafeArchive(Exception):
     pass
 
 
+def show(name: str, limit: int = 120) -> str:
+    """An archive member's name for a message or a log line: cut, and quoted with its escapes (repr)."""
+    return repr(name if len(name) <= limit else name[:limit] + "…")
+
+
 @dataclass
 class Archive:
     sha: str | None

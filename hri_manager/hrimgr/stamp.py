@@ -22,6 +22,7 @@ manager version that vets it.  The YAML is written with ``yaml.safe_dump``."""
 
 from __future__ import annotations
 
+import fnmatch
 import os
 import re
 from typing import Any
@@ -33,6 +34,10 @@ from . import children, names, tarsafe
 HRI_BACKUP_PREFIX = f"*_{names.HRI_SLUG}/"
 STAMPED_KEYS = ("name", "version", "slug", "panel_title", "ports", "backup_exclude")
 CONFIG_SUFFIXES = (".yaml", ".yml", ".json")  # what the Supervisor's store reads as config.* (FILE_SUFFIX_CONFIGURATION)
+# what the Supervisor reads next to an app's config.* besides the Dockerfile: its own AppArmor profile (which replaces
+# the default one), build options (base images, arguments) and a Dockerfile per architecture (used instead of the
+# Dockerfile, so without the HRI_BUILD line the manager patches).  A git tree with one at its root is refused
+BUILD_FILES_RE = re.compile(r"apparmor\.txt|build\.(?:yaml|yml|json)|Dockerfile\..+")
 APP_FILES = ("DOCS.md", "CHANGELOG.md", "README.md", "icon.png", "logo.png")
 # HRI's Dockerfile: the commit the image was built from.  The Supervisor passes only BUILD_VERSION and BUILD_ARCH
 # to a build without build.yaml (deprecated), so a git build gets its commit as the argument's default instead
@@ -226,29 +231,37 @@ def build_release(archive: tarsafe.Archive, dest: str, name: str, version: str, 
     return config
 
 
-def _is_config_name(filename: str) -> bool:
-    stem, ext = os.path.splitext(filename)
-    return stem in ("config", "repository") and ext in CONFIG_SUFFIXES
+def is_app_config(rel: str) -> bool:
+    """Whether the Supervisor's store reads ``rel`` (a POSIX path below an app folder) as an app definition, by its own
+    rule (store/data.py ``_find_app_configs``): the glob ``**/config.*``, a suffix of .yaml, .yml or .json, and no
+    path part that starts with a dot or is ``rootfs``.  So ``docs/config.example.yaml`` is an app, and
+    ``static/config.js`` or ``rootfs/config.yaml`` are not."""
+    parts = rel.split("/")
+    return (fnmatch.fnmatchcase(parts[-1], "config.*") and os.path.splitext(parts[-1])[1] in CONFIG_SUFFIXES
+            and not any(p.startswith(".") or p == "rootfs" for p in parts))
 
 
 def build_git(archive: tarsafe.Archive, dest: str, name: str, version: str, sha: str, source: str) -> tuple[dict, list[str]]:
     """Fill ``dest`` with a git instance: HRI's whole tree, built by the Supervisor from its root Dockerfile.
 
-    Every config.{yaml,yml,json} and repository.* of the tree goes (app/config.yaml included): the store reads each
-    config.* as an app, and a second one would be a second app.  Only those suffixes: HRI has static/config.js,
-    config.css and templates/config.html, which the build needs.  Returns the stamped config and what was done."""
+    Refused when the tree's root has a file the Supervisor would use to build or confine the app (``BUILD_FILES_RE``).
+    Every file the store would read as an app (``is_app_config``: app/config.yaml, and any other config.*) goes, and
+    only those: a second one would be a second app, and anything else may be what the build needs (HRI has
+    static/config.js, config.css and templates/config.html).  Returns the stamped config and what was done."""
     if "Dockerfile" not in archive.files:
         raise TemplateError("the archive has no Dockerfile at its root: the Supervisor could not build it")
+    build_files = sorted(rel for rel in (*archive.files, *archive.links, *archive.dirs)
+                         if "/" not in rel and BUILD_FILES_RE.fullmatch(rel))
+    if build_files:
+        raise TemplateError(f"the tree has {', '.join(tarsafe.show(r) for r in build_files)} at its root, which the "
+                            "Supervisor would use to build or confine the app instead of HRI's Dockerfile: refused")
     config = stamp(_template(archive), name, version, "git")
     extras = _app_extras(archive)
     tarsafe.extract(archive, dest)
-    notes = [f"skipped link {rel}" for rel in archive.skipped]
-    for folder, dirnames, filenames in os.walk(dest):
-        for filename in filenames:
-            if _is_config_name(filename):
-                path = os.path.join(folder, filename)
-                os.unlink(path)
-                notes.append(f"removed {os.path.relpath(path, dest)}")
+    notes = [f"skipped link {tarsafe.show(rel)}" for rel in archive.skipped]
+    for rel in find_configs(dest):
+        os.unlink(children.safe_join(dest, rel))
+        notes.append(f"removed {tarsafe.show(rel)}")
     for sub, data in sorted(extras.items()):
         path = children.safe_join(dest, sub)
         if os.path.lexists(path):
@@ -269,15 +282,10 @@ def build_git(archive: tarsafe.Archive, dest: str, name: str, version: str, sha:
 
 
 def find_configs(root: str) -> list[str]:
-    """The config.* files the Supervisor's store would read below ``root`` (supervisor/store/data.py)."""
+    """The files the Supervisor's store would read as apps below ``root`` (``is_app_config``)."""
     out = []
     for folder, dirnames, filenames in os.walk(root):
         rel_folder = os.path.relpath(folder, root)
         parts = [] if rel_folder == "." else rel_folder.split(os.sep)
-        if any(p.startswith(".") or p == "rootfs" for p in parts):
-            continue
-        for filename in filenames:
-            stem, ext = os.path.splitext(filename)
-            if stem == "config" and ext in CONFIG_SUFFIXES and not filename.startswith("."):
-                out.append("/".join(parts + [filename]))
+        out += ["/".join(parts + [f]) for f in filenames if is_app_config("/".join(parts + [f]))]
     return sorted(out)
