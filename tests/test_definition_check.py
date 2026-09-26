@@ -504,6 +504,25 @@ class FlowCheckTest(FlowBase):
         """What the Supervisor holds of the installed app, changed behind the manager's back."""
         self.env.stub.installed["local_hri_garage"]["definition"].update(fields)
 
+    async def test_an_app_installed_while_away_from_a_folder_the_manager_does_not_write_is_held(self):
+        """R2-7: the start's check of an app installed while the manager was not watching finds its folder is not a
+        definition this manager writes: the app is stopped and marked (kept installed), never left running."""
+        env = self.env
+        self.assertEqual((await self.create())["state"], "succeeded")
+        env.registry.update("garage", tampered=children.pending_mark("its update was recorded late"))
+        with open(os.path.join(self.folder(), "config.yaml"), "ab") as fh:
+            fh.write(b"full_access: true\n")
+        notes = await env.manager.startup()
+        self.assertIn("checking it", " ".join(notes))
+        await env.manager.jobs.wait_all()
+        (job,) = [j for j in env.manager.jobs.recent() if j.action == "check"]
+        self.assertEqual(job.state, "failed")
+        self.assertIn("not a definition this manager writes", job.error)
+        app = env.stub.installed["local_hri_garage"]
+        self.assertEqual(app["state"], "stopped")
+        mark = env.registry.get("garage")["tampered"]
+        self.assertEqual((mark["unverified"], mark.get("pending"), mark["stopped"]), (True, None, True))
+
     async def test_finish_setup_checks_the_installed_app_first(self):
         env = self.env
         self.assertEqual((await self.create())["state"], "succeeded")
