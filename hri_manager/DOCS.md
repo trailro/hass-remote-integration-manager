@@ -3,7 +3,7 @@
 Runs several instances of
 [hass-remote-integration](https://github.com/trailro/hass-remote-integration) (HRI) on one Home Assistant OS, one
 integration each. Every instance is a separate local app, `local_hri_<name>`, with its own sidebar panel, options,
-data and backups.
+data and backups. It needs Home Assistant OS with Supervisor **2026.07.1 or newer** (the local apps folder mapping).
 
 After installing, turn on **Show in sidebar** on this app's **Info** tab: the Supervisor leaves it off for a new
 app, so the sidebar has no **HRI Manager** entry until you do (**Open web UI** works meanwhile). Then open
