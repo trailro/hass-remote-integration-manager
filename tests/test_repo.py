@@ -69,6 +69,7 @@ class AppConfigTest(unittest.TestCase):
         from hrimgr import __main__ as main_module, instances
         self.assertEqual(CONFIG["timeout"], 30)
         self.assertLess(instances.ROLLBACK_BOUND + main_module.SHUTDOWN_TIMEOUT, CONFIG["timeout"] - 5)
+        self.assertLess(instances.CONTAIN_BOUND + main_module.SHUTDOWN_TIMEOUT, CONFIG["timeout"] - 5)
         for key in ("host_network", "privileged", "full_access", "docker_api", "auth_api", "devices", "uart"):
             self.assertNotIn(key, CONFIG)
 
