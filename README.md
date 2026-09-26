@@ -153,16 +153,19 @@ of the keys the manager accepts from it. The instance's row shows a **Bluetooth*
   HCI sockets (host network and extra capabilities), which an instance does not get. Home Assistant Core on the host
   still has them for its own use of the adapter.
 - **Changing it later** is part of **Update** or **Rebuild**: their dialogs have the same box, and the change is
-  applied with the new version. The Supervisor applies an installed app's definition only when the app's version
-  changes (it refuses an update to the same version), so a change without a newer release or a new commit is refused
-  with that reason. To change it at once, **Delete** the instance keeping its `/config` folder and create it again
-  with the same name and the other choice (set its options again, see [Deleting](#deleting)).
+  applied with the new version. An update applies an installed app's definition only when the app's version changes
+  (the Supervisor refuses an update to the same version), so a change without a newer release or a new commit is
+  refused with that reason. To change it at once, **Delete** the instance keeping its `/config` folder and create it
+  again with the same name and the other choice (set its options again, see [Deleting](#deleting)).
 
 The manager checks around every install and update that the Supervisor installed `host_dbus` exactly as the registry
 says (see [Security model](#security-model)). When it writes the definition of the version already installed (Repair,
-automatic or not, Finish setup, an Update to the installed version), the definition takes what the installed app has,
-and the registry records it: its record may lag (an update recorded late, an older `/data` restored), and the app
-must not be taken for a changed one for that.
+automatic or not, Finish setup, an Update to the installed version) and the installed app has the other value, it
+records what the app has only when the manager made that change itself (an update of its own recorded late) or when
+you choose it: an **Update** at the installed version with that Bluetooth choice. Otherwise it writes nothing and says
+why: the Supervisor's own Update of a definition someone changed would give the app the host's D-Bus too, and that is
+not your choice. A Repair then stops at **needs attention** (an Update to a newer release, with Bluetooth chosen, or
+Delete).
 
 ### Git channel (testing)
 
@@ -197,23 +200,26 @@ next start records it. The manager does not downgrade.
 
 ![The Update dialog of the instance garage: from 0.25.1, a version to choose, Cancel or Update](docs/images/update-dialog.png)
 
-**Never update an instance with the Supervisor's own Update button** (on its app page, or its auto-update). That
-button installs whatever `hri_<name>/` holds at that moment, without any of the manager's checks. It shows while the
-manager is updating the instance (its new definition is in place a moment before the install), and whenever the
-folder holds another version than the installed one: a definition someone else wrote there, which the manager's
-page then flags ("the store offers a definition the manager did not write"), with Repair to write the manager's
-definition again. Updates go through the manager's **Update**, which moves the definition and checks what the
-Supervisor installs.
+**Never update or rebuild an instance with the Supervisor's own buttons** (Update or Rebuild on its app page, or its
+auto-update). They install whatever the store read from the local apps folder at that moment, without any of the
+manager's checks: `hri_<name>/`, or a decoy elsewhere in the folder that declares the instance's slug (see
+[Security model](#security-model)). Update shows while the manager is updating the instance (its new definition is in
+place a moment before the install), and whenever the folder holds another version than the installed one; Rebuild
+applies a definition of the same version at once. The manager's page flags a definition it did not write ("the store
+offers a definition the manager did not write", or "config.yaml is not the one the manager wrote"), with Repair to
+write the manager's definition again, and lists every decoy. Updates go through the manager's **Update**, which moves
+the definition and checks what the Supervisor installs.
 
 A release instance records the commit its release tag named. When the manager downloads the same tag again (a
 Repair, or rewriting the definition) and the tag names another commit, it refuses and flags the instance "tag
 moved": a release tag is not supposed to move.
 
 A newer manager may stamp definitions differently. Each definition records the manager's stamping version, and
-**Update** at the same HRI version rewrites a definition stamped by an older manager. The Supervisor applies an
-installed app's definition only when the app's version changes (it refuses an update to the same version), so the new
-stamping reaches the running instance at its next HRI update, or, for a git instance, its next rebuild of a new
-commit. The manager does not force a rebuild for it.
+**Update** at the same HRI version rewrites a definition stamped by an older manager. An update applies an installed
+app's definition only when the app's version changes (the Supervisor refuses an update to the same version), so the
+new stamping reaches the running instance at its next HRI update, or, for a git instance, its next rebuild of a new
+commit. The manager does not force a rebuild for it (its allow-list has no rebuild); the Supervisor's own Rebuild
+button would apply it at once, but without the manager's checks.
 
 HRI Manager itself is updated from the App Store like any app (an app cannot update itself).
 
@@ -316,8 +322,10 @@ no action: Repair would make it the manager's, and then deletable with its data.
 
 The published single app (`<repository>_hass_remote_integration`), a local build of HRI
 (`local_hass_remote_integration`, labelled so), local apps whose slug looks like an instance but
-that the manager did not create (detached or not), and `hri_<name>/` folders whose marker the manager's registry does
-not hold are listed under **Other HRI apps**, read-only: the manager offers no action on them. So are the manager's
+that the manager did not create (detached or not), `hri_<name>/` folders whose marker the manager's registry does
+not hold, and every other app definition in the local apps folder that declares an instance's slug (a decoy, with its
+path: see [Security model](#security-model)) are listed under **Other HRI apps**, read-only: the manager offers no
+action on them. So are the manager's
 own records of an instance that is neither installed nor defined (uninstalled outside the manager, its folder gone):
 its registry entry and its copy in `/data`. **Forget** (with the name typed) drops those records and touches nothing
 else; it refuses while the app is installed or its folder exists, and for an hour after an install that was
@@ -355,45 +363,77 @@ narrows itself, in code, and the tests pin it:
   are read again right before the call (never through a symlink). Anyone who can write the local apps folder (Samba,
   SSH, another app) can write a marker, but not the manager's `/data`: a folder whose marker the registry does not
   hold is listed as not managed and gets no action, and a `local_hri_*` app without a marker is left alone.
-- **It installs only what it wrote.** The same writer could change `hri_<name>/config.yaml` after the manager wrote
-  it and before the Supervisor reads it (the store reads the folder again at every reload), and the manager's own
-  install or update would then install, say, `hassio_role: admin`. Two checks stand against that:
-  - **the folder is untouched since the manager wrote it.** For every file, folder and link of `hri_<name>/`, and
-    for the folder itself, the manager records its content hash, its inode and its change time when it writes it,
-    and checks them again before each store reload, after the store has read it and right before the install or
-    update. The change time moves on every write, rename, link or permission change, and no program can set it back:
-    a `config.yaml` swapped just for the Supervisor's reading and put back afterwards, byte for byte, is caught. This
-    covers every key, those the Supervisor never reports (`map`, `image`, `environment`, `tmpfs`, `services`,
-    `backup_pre`...) included;
+- **What it installs is checked against what it wrote.** Anyone who can write the local apps folder (Samba's
+  `addons` share, SSH, another app that maps it) can change a definition after the manager wrote it and before the
+  Supervisor reads it (the store reads the whole folder again at every reload), and the manager's own install or
+  update would then install, say, `hassio_role: admin`. Around every install and update it makes, the manager checks:
+  - **the folder holds what it wrote.** A new or updated definition is built in a hidden folder (`0700`); before it is
+    put in place, that folder must hold exactly the files, links and folders the manager wrote into it, with the same
+    bytes. A file planted during the build (a `Dockerfile.<arch>` the Supervisor would build instead of HRI's
+    Dockerfile, say) refuses the write.
+  - **the folder is untouched since.** For every file, folder and link of `hri_<name>/`, and for the folder itself,
+    the manager records its content hash, its inode and its change time, and checks them again before each store
+    reload, after the store has read it, right before the install or update and right after it (read through folder
+    descriptors, never through a link). The change time moves on every write, rename, link or permission change, and
+    no program can set it back: a `config.yaml` swapped just for the Supervisor's reading and put back afterwards, byte
+    for byte, is caught. Install of a definition the manager did not just write (restored without its app) takes the
+    folder as it is, checked to be a definition this manager writes, with no `Dockerfile.<arch>`, `build.*` or
+    `apparmor.txt`.
+  - **no other folder offers a definition of an instance.** The store reads every `config.*` (`.yaml`, `.yml`,
+    `.json`) of the whole local apps folder, outside dot folders and `rootfs/`, and keys each app by the `slug:` inside
+    the file, the last one found winning; the Supervisor does not report which file an app came from. So the manager
+    searches the folder by the same rule. Any such file that declares a slug of the manager's (`hri_…`, compared as
+    host names), other than a folder's own `hri_<name>/config.yaml` declaring `hri_<name>`, is a decoy, and so is one the manager cannot read (a FIFO, a file too
+    large): while one is there, the manager creates, installs, updates, rebuilds or repairs nothing, and starts nothing
+    of the instance it names; the page lists each with its path.
   - **the Supervisor reports what the manager stamped.** Before the install or update it compares the store's parsed
     definition (`GET /store/addons/local_hri_<name>`) with it, and after it the installed app's
     (`GET /addons/local_hri_<name>/info`): role, Supervisor, Core and auth APIs, full access, Docker API, host network,
     PID, IPC, UTS and D-Bus, privileges, devices, `uart`/`usb`/`gpio`/`video`/`audio`, kernel modules, AppArmor,
     ingress, ports, version, name, URL and whether it has an image. Neither answer reports `image` (which image, only
-    whether there is one), `map`, `backup_pre` or `backup_post`, so the check after an install or update cannot see
-    them; the store's answer also leaves out IPC, UTS, D-Bus, privileges, devices, the device flags, kernel modules
-    and ports (`hrimgr/stamp.py`, `STORE_VIEW`). Those keys rest on the folder check above alone.
+    whether there is one), `map`, `backup_pre` or `backup_post`; the store's answer also leaves out IPC, UTS, D-Bus,
+    privileges, devices, the device flags, kernel modules and ports (`hrimgr/stamp.py`, `STORE_VIEW`). Those keys rest
+    on the folder checks above alone, which see only what is in the folder when they look.
 
-  A difference before the install or update refuses it. A difference after it first marks the instance in the
-  registry, then stops and uninstalls the app at once (its `/config` folder kept), and says so in the job, the log and
-  the instance's row. Stop and uninstall go through the same allow-list, which needs the instance's marker: if the
-  writer broke the marker, they are refused, and the job and the row say plainly that the app was NOT stopped or
-  uninstalled, with what to do by hand (Settings > Apps). A marked instance is never started, installed, updated or
-  repaired by the manager; Stop and Delete stay, and Delete (or Forget) clears the mark. A field the Supervisor no
-  longer reports at all is not a difference but most likely a change of its API: the app is then stopped and marked
-  as not checked, and kept installed (an uninstall would drop its options); before an install or update, the same
-  refuses it. **Check again** on its row (or **Repair**, for an instance without its folder) checks it again and
-  clears the mark when it passes; the manager also checks, at its start, an app installed while it was not watching
-  (an update it had stopped waiting for).
-
-  These checks cover **the manager's own installs and updates**. The Supervisor's own Update button on an app's page,
-  and its auto-update, install whatever the folder holds, without them: the manager cannot stop that. What it does:
-  on every list it compares the version the store offers for each instance with the one it recorded, and flags a
-  definition it did not write, refusing to start, update or finish it until **Repair** writes its own definition
-  again (or **Delete** removes the instance); the check after an install or update still covers every key the
-  Supervisor reports. What is left: a store reload by someone else between the manager's last check and the
-  Supervisor's start of an install (both within the same moment), of a folder changed in between. Root on the host
-  can change anything and is outside this model.
+  A difference before the install or update refuses it. A difference after it (the folder changed or a decoy appeared
+  around the install, or the installed app differs) first marks the instance in the registry, then stops and
+  uninstalls the app at once (its `/config` folder kept), and says so in the job, the log and the instance's row. If it
+  cannot be uninstalled, its start at boot is turned off, so the Supervisor does not start it again at its next start.
+  Stop, uninstall and that option go through the same allow-list, which needs the instance's marker: if the writer
+  broke the marker, they are refused, and so are the manager's own Stop and Delete of that instance; the job and the
+  row then say plainly that the app was NOT stopped or uninstalled, with what to do by hand (Settings > Apps). A marked
+  instance is never started, installed, updated or repaired by the manager; while its marker is intact, Stop and
+  Delete stay, and Delete (or Forget) clears the mark. When the registry cannot record a mark (a full `/data`), the
+  manager refuses all the same while it runs and keeps the mark in the instance's marker for its next start. A field
+  the Supervisor no longer reports at all is not a difference but most likely a change of its API: the app is then
+  stopped and marked as not checked, and kept installed (an uninstall would drop its options); before an install or
+  update, the same refuses it. **Check again** on its row (or **Repair**, for an instance without its folder) checks
+  it again and clears the mark when it passes; the manager also checks, at its start, an app installed while it was
+  not watching (an update it had stopped waiting for), and holds it (stopped, marked, kept) when its folder is not a
+  definition this manager writes, or a decoy of it is there.
+- **What the Supervisor's own buttons do.** The checks above cover **the manager's own** installs and updates. The
+  Supervisor's own Update and Rebuild buttons on an app's page, and its auto-update, install whatever the store read,
+  without them: the manager cannot stop that. What it does: on every list it compares, for each instance, the
+  version the store offers and the sha256 of `hri_<name>/config.yaml` with what it recorded, and searches the folder
+  for decoys; a definition it did not write is flagged, and it refuses to start, update or finish the instance until
+  **Repair** writes its own definition again (or **Delete** removes the instance). It never records what such an
+  install gave the app as your choice (see [Bluetooth](#bluetooth)).
+- **Bluetooth (`host_dbus`).** The one access to the host the manager itself adds to a definition: `host_dbus: true`,
+  the host's D-Bus, only for an instance you created or updated with **Bluetooth**, recorded in the registry; HRI's
+  template can never add it. D-Bus reaches many of the host's system services, not only BlueZ (see
+  [Bluetooth](#bluetooth)). The checks around every install and update expect exactly the registry's choice.
+- **What the checks guarantee, and what they cannot.** They catch accidental changes and simple tampering in the
+  local apps folder, and every change they can observe that happens around the manager's own operations: the manager's
+  own install or update of a definition that differs from what it wrote, in the folder, in another folder, or in what
+  the Supervisor reports, is refused or undone (uninstalled). They cannot guarantee more. They see the local apps
+  folder only when they look, and the Supervisor reports only part of a definition: a decoy written and removed again
+  between two looks, with a store reload of someone else's in between, is caught only if it changes a field the
+  Supervisor reports (inside `hri_<name>/` the change time still tells). And someone with
+  write access to the local apps folder (root, in practice: the Samba share, SSH, an app that maps it) can still
+  install what they want themselves, through the Supervisor's own buttons: the app so installed gets whatever its
+  definition asks for, within what the Supervisor allows any local app. The manager narrows what that person can do
+  through it, and says what it notices; it does not stop them. **Do not give write access to the local apps folder to
+  anyone you would not let install apps.** Root on the host can change anything and is outside this model.
 - **No secrets passed on.** The Supervisor includes an app's options in its info (an HRI instance's options hold its
   password); the manager keeps only a list of harmless fields and never shows or logs options. A Supervisor error
   that quotes an app's options (invalid options: `… Got {…}`) is replaced by its error key and the app's slug. The
@@ -472,8 +512,9 @@ update / delete through the page's API and takes screenshots; see its header.
 
 CI runs the unit tests on Python 3.13 and 3.14, the app linter on the manager and on an instance stamped from HRI's
 template, the Supervisor's own schema checks of both and of an instance with Bluetooth
-(`.github/app_supervisor_check.py`, against a Supervisor release pinned by its commit; with its own backup filter over three instances side by side: no venv, HRI backups or logs in any of them,
-their state kept), a build of the image for amd64 and arm64, and, once `config.yaml` names an image, an anonymous
+(`.github/app_supervisor_check.py`, against a Supervisor release pinned by its commit; with its own backup filter over
+three instances side by side: no venv or logs in any of them, their state kept, and HRI's own backups left out for an
+instance of HRI 0.25.0's template and kept from HRI 0.25.2 on), a build of the image for amd64 and arm64, and, once `config.yaml` names an image, an anonymous
 pull of that image at its version for both architectures (`.github/check_published_image.py`). A published release runs the Image workflow
 (`.github/workflows/image.yml`): it pushes the image for both architectures to ghcr.io and only then moves the app's
 version on `main` (see `CLAUDE.md`, Release checklist).

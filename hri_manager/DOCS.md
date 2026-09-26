@@ -22,6 +22,13 @@ app, so the sidebar has no **HRI Manager** entry until you do (**Open web UI** w
   branch's code and Dockerfile run here. For trying a fix before its release, with a branch you trust; not for
   production. Commits, pull requests and forks are refused.
 
+**Never update or rebuild an instance with the Supervisor's own buttons** (Update or Rebuild on the instance's own
+app page, or its auto-update): they install whatever the local apps folder holds at that moment, without any of the
+manager's checks. Use the manager's **Update**. The manager's page flags an instance's definition it did not write,
+with **Repair** to write its own again, and lists any other file in the local apps folder that declares an
+instance's slug (the Supervisor's store could take it for the instance's): remove such a file, and find out who wrote
+it.
+
 **Bluetooth** (a box of the **New instance** form) gives the instance the host's D-Bus (`host_dbus`), through
 which BlueZ offers the host's Bluetooth adapters: for an integration that talks to Bluetooth devices. D-Bus is a
 powerful interface that reaches many of the host's services, so turn it on only for an integration that needs it.
@@ -67,7 +74,10 @@ Keep the manager in the same backups: its `/data` holds the registry and the cop
 
 The app has the Supervisor's **manager** role, which could stop or remove any app. The manager's code allows itself
 only the calls listed in the README's security section, and changes only the apps it created (their folder carries
-its marker, and its own registry in `/data` agrees). Its UI is reachable only through Home Assistant, and only by Home Assistant's administrators: the panel
+its marker, and its own registry in `/data` agrees). It checks what it installs against what it wrote, which catches
+accidental or simple changes to the local apps folder around its own installs and updates; it cannot stop someone who
+can write that folder (the addons share, SSH, an app that maps it) from installing things through the Supervisor's own
+buttons. Do not give that access to anyone you would not let install apps. Its UI is reachable only through Home Assistant, and only by Home Assistant's administrators: the panel
 is hidden from other users, and the app checks it on its side too, on every request (it asks Home Assistant, and
 refuses when it cannot).
 
