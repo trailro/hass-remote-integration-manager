@@ -239,8 +239,11 @@ def parse_template(raw: bytes) -> dict:
     missing = [k for k in STAMPED_KEYS if k not in data]
     if missing:
         raise TemplateError(f"HRI's app/config.yaml lacks {', '.join(missing)}: this manager cannot stamp it")
-    if data.get("slug") != names.HRI_SLUG:
-        raise TemplateError(f"HRI's app/config.yaml has slug {data.get('slug')!r}, not {names.HRI_SLUG!r}")
+    slug = data.get("slug")
+    if slug != names.HRI_SLUG:
+        # before vet_template: never the value spelled out (YAML aliases), a text only cut short
+        shown = f"slug {slug[:60]!r}" if isinstance(slug, str) else f"a slug of type {type(slug).__name__}"
+        raise TemplateError(f"HRI's app/config.yaml has {shown}, not {names.HRI_SLUG!r}")
     if not isinstance(data.get("ports"), dict):
         raise TemplateError("HRI's app/config.yaml: ports is not a mapping")
     if not isinstance(data.get("backup_exclude"), list) or not all(isinstance(e, str) for e in data["backup_exclude"]):
