@@ -297,10 +297,10 @@ narrows itself, in code, and the tests pin it:
   | `POST /store/addons/local_hri_<name>/install` and `…/update` | install and update an instance |
   | `GET /addons/local_hri_<name>/info` | an instance's state and panel |
   | `POST /addons/local_hri_<name>/options` | only `boot: auto`, `watchdog` and `ingress_panel`: never the instance's own options |
-  | `POST /addons/local_hri_<name>/start`, `…/stop`, `…/restart`, `…/uninstall` | the actions on an instance; `uninstall` only with `remove_config` |
+  | `POST /addons/local_hri_<name>/start`, `…/stop`, `…/restart`, `…/uninstall` | the actions on an instance; `uninstall` always with `remove_config` (required: never the Supervisor's default) |
 
   Paths must be plain (no `..`, escapes, queries); an app's slug is accepted only in the `local_hri_<name>` form;
-  a request body may carry only the keys and values listed. Everything else (other apps, the host, backups,
+  a request body may carry only the keys and values listed, and must carry those a call requires. Everything else (other apps, the host, backups,
   repositories, the v2 API) is refused.
 - **Only its own apps.** A call that changes an app also needs proof that the manager created it: the marker file
   `.hri-manager.json` in `hri_<name>/`, naming that instance and the slug `local_hri_<name>`, and the manager's own
