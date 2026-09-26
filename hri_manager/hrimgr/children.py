@@ -313,6 +313,15 @@ def remove_file(base: str, rel: str) -> None:
         os.close(folder_fd)
 
 
+def list_folder(base: str, rel: str) -> list[str]:
+    """The names in the folder ``rel`` below ``base``, reached without following a link."""
+    fd = _folder_fd(base, rel, False)
+    try:
+        return os.listdir(fd)
+    finally:
+        os.close(fd)
+
+
 def read_file(base: str, rel: str) -> bytes:
     """The regular file ``rel`` below ``base``, never through a link."""
     folder_fd, leaf = _in_folder(base, rel, False)
