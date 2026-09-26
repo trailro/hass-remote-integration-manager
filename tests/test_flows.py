@@ -2,6 +2,7 @@
 real HTTP; rollbacks on failure; and the marker and slug checks in front of every changing action."""
 
 import asyncio
+import datetime
 import json
 import os
 import shutil
@@ -13,6 +14,7 @@ import yaml
 
 from hrimgr import VERSION, children, stamp
 from hrimgr.registry import RegistryError
+from hrimgr.supervisor import SupervisorError
 
 from .env import Env
 from .fakes.tarballs import sha_of
@@ -243,6 +245,66 @@ class FlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(job["state"], "succeeded", job)
         _, data = await env.get("/api/instances")
         self.assertIn("finish", data["instances"][0]["actions"])  # its boot, Watchdog and panel were never set
+
+    async def test_an_install_call_without_a_clean_answer_keeps_the_instance(self):
+        """A timeout or a lost connection is no refusal: the Supervisor installs as a task of its own and may finish."""
+        env = self.env
+        install = env.sv.install
+
+        async def times_out(managed):
+            env.stub.delay = 0.2
+            asyncio.get_running_loop().create_task(install(managed))  # the Supervisor goes on
+            await asyncio.sleep(0.05)
+            raise SupervisorError(f"POST /store/addons/{managed.slug}/install: no answer from the Supervisor in 3600 s")
+
+        with mock.patch.object(env.sv, "install", side_effect=times_out):
+            job = await self.create()
+        self.assertEqual(job["state"], "failed")
+        self.assertIn("may still be installing it", job["error"])
+        entry = env.registry.get("garage")
+        self.assertTrue(entry["interrupted"])
+        self.assertEqual(os.listdir(env.local_apps), [])
+        for _ in range(100):
+            if "local_hri_garage" in env.stub.installed:
+                break
+            await asyncio.sleep(0.02)
+        await env.sv.reload_store()
+        _, data = await env.get("/api/instances")
+        (inst,) = data["instances"]
+        self.assertIn("install interrupted", inst["problem"])
+        self.assertEqual(inst["actions"], ["repair"])
+
+    async def test_forget_waits_for_an_install_that_may_still_finish(self):
+        env = self.env
+
+        async def lost(managed):
+            raise SupervisorError(f"POST /store/addons/{managed.slug}/install: ServerDisconnectedError")
+
+        with mock.patch.object(env.sv, "install", side_effect=lost):
+            job = await self.create()
+        self.assertEqual(job["state"], "failed")
+        self.assertTrue(env.registry.get("garage")["interrupted"])
+        _, data = await env.get("/api/instances")
+        (orphan,) = [o for o in data["others"] if o.get("instance") == "garage"]
+        self.assertEqual(orphan["actions"], [])
+        self.assertIn("may still finish it", orphan["problem"])
+        status, body = await env.send("POST", "/api/instances/garage/forget", {"confirm": "garage"})
+        self.assertEqual(status, 400)
+        self.assertIn("Forget is refused for 60 minutes", body["error"])
+        long_ago = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=2)
+        env.registry.update("garage", interrupted_at=long_ago.replace(microsecond=0).isoformat())
+        job = await env.job(await env.send("POST", "/api/instances/garage/forget", {"confirm": "garage"}))
+        self.assertEqual(job["state"], "succeeded", job)
+        self.assertIsNone(env.registry.get("garage"))
+
+    async def test_an_install_the_supervisor_refuses_is_rolled_back_and_forgotten(self):
+        env = self.env
+        env.stub.fail[("POST", "/store/addons/local_hri_garage/install")] = "Not enough free space"
+        job = await self.create()
+        self.assertEqual(job["state"], "failed")
+        self.assertNotIn("may still be installing", job["error"])
+        self.assertIsNone(env.registry.get("garage"))
+        self.assertEqual(os.listdir(env.local_apps), [])
 
     async def test_an_update_stopped_midway_puts_the_previous_definition_back(self):
         env = self.env
