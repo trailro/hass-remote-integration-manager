@@ -122,6 +122,20 @@ class GitHub:
     async def _fetch_releases(self) -> Any:
         return await self._api_json("releases?per_page=100", MAX_RELEASES_JSON, "release list")
 
+    async def release(self, tag: str) -> dict | None:
+        """One release of HRI by its tag (releases/tags/<tag>), parsed as in the list; None when there is no such
+        published release (a draft, or older than 0.25.0, counts as none)."""
+        if names.version_from_tag(tag) is None:
+            return None
+        try:
+            data = await self._api_json(f"releases/tags/{quote(tag, safe='._-')}", MAX_RELEASES_JSON, "release")
+        except GitHubError as err:
+            if "not found" in str(err):
+                return None
+            raise
+        parsed = parse_releases([data])
+        return parsed[0] if parsed and parsed[0]["tag"] == tag else None
+
     async def resolve_ref(self, kind: str, ref: str) -> str | None:
         """Check that a branch or tag exists in HRI's repository; its commit, when GitHub names it directly (an
         annotated tag names a tag object instead: None)."""

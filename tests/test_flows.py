@@ -249,6 +249,17 @@ class FlowTest(unittest.IsolatedAsyncioTestCase):
         job = await env.job((status, _))
         self.assertEqual(job["state"], "failed")
 
+    async def test_a_release_beyond_the_first_page_of_the_list(self):
+        """The release list is paged (100 a page): a release is checked by its own tag, not found in the first page."""
+        env = self.env
+        env.stub.page_size = 1
+        job = await self.create()
+        self.assertEqual(job["state"], "succeeded", job)
+        for version in ("0.99.0", "9.9.9"):  # none, and a draft
+            job = await self.create("attic", version=version)
+            self.assertEqual(job["state"], "failed")
+            self.assertIn("not a published release", job["error"])
+
     async def test_a_failed_download_writes_nothing(self):
         job = await self.create(version="0.99.0")
         self.assertEqual(job["state"], "failed")

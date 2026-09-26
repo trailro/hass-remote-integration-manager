@@ -308,10 +308,10 @@ class Manager:
 
     async def _check_release(self, version: str) -> None:
         try:
-            releases = await self.gh.releases()
+            release = await self.gh.release(f"v{version}")
         except GitHubError as err:
-            raise JobFailed(f"the release list: {err}") from None
-        if not any(r["version"] == version for r in releases):
+            raise JobFailed(f"the release v{version}: {err}") from None
+        if release is None:
             raise JobFailed(f"hass-remote-integration {version} is not a published release (0.25.0 or newer)")
 
     def _marker(self, name: str, channel: str, version: str, ref: tuple[str, str], sha: str | None, source: str, user: str,

@@ -70,6 +70,7 @@ class Stub:
         self.unexpected: list[tuple[str, str]] = []
         self.fail: dict[tuple[str, str], str] = {}  # (method, supervisor path) -> error message, once
         self.releases = ["0.24.0", "0.25.0", "0.25.1", "0.26.0b1"]
+        self.page_size = 100  # the release list is paged: only the newest page_size are on its first page
         self.refs = {"main": sha_of("main-1")}  # branches
         self.tags = {"test-tag": sha_of("test-tag")}  # tags that are not releases
         self.codeload_paths: list[str] = []
@@ -244,13 +245,23 @@ class Stub:
 
     # ---------------------------------------------------------------- GitHub
 
+    @staticmethod
+    def release_json(v: str) -> dict:
+        return {"tag_name": f"v{v}", "name": f"v{v}", "draft": False, "prerelease": "b" in v,
+                "published_at": "2026-09-26T07:08:22Z", "html_url": f"{HRI_URL}/releases/tag/v{v}"}
+
     async def gh_releases(self, request):
-        out = []
-        for v in reversed(self.releases):
-            out.append({"tag_name": f"v{v}", "name": f"v{v}", "draft": False, "prerelease": "b" in v,
-                        "published_at": "2026-09-26T07:08:22Z", "html_url": f"{HRI_URL}/releases/tag/v{v}"})
+        out = [self.release_json(v) for v in reversed(self.releases)][:self.page_size]
         out.append({"tag_name": "v9.9.9", "draft": True})
         return web.json_response(out)
+
+    async def gh_release(self, request):
+        tag = request.match_info["tag"]
+        if tag == "v9.9.9":
+            return web.json_response({"tag_name": "v9.9.9", "draft": True})
+        if not tag.startswith("v") or tag[1:] not in self.releases:
+            return web.json_response({"message": "Not Found"}, status=404)
+        return web.json_response(self.release_json(tag[1:]))
 
     def ref_sha(self, full: str) -> str | None:
         """The commit of refs/heads/<branch> or refs/tags/<tag>, as HRI's repository has them."""
@@ -317,6 +328,7 @@ class Stub:
         app.router.add_get("/sv/info", self.info)
         app.router.add_get("/sv/core/websocket", self.core_websocket)
         app.router.add_get("/gh/repos/trailro/hass-remote-integration/releases", self.gh_releases)
+        app.router.add_get("/gh/repos/trailro/hass-remote-integration/releases/tags/{tag}", self.gh_release)
         app.router.add_get("/gh/repos/trailro/hass-remote-integration/git/ref/{ref:.+}", self.gh_ref)
         app.router.add_get("/cl/trailro/hass-remote-integration/tar.gz/{ref:.+}", self.codeload)
         app.router.add_get("/_stub/state", self.stub_state)
