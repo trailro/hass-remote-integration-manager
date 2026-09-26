@@ -227,6 +227,13 @@ class Manager:
                 entry["ingress_panel"] = bool(info.get("ingress_panel"))
                 entry["watchdog"] = info.get("watchdog")
                 entry["boot"] = info.get("boot")
+                # the badge shows what the app has, not what the manager recorded; a difference is said
+                if isinstance(info.get("host_dbus"), bool) and info["host_dbus"] != entry["bluetooth"]:
+                    entry["problem"] = "; ".join(p for p in (entry.get("problem"), (
+                        f"Bluetooth: the installed app {'has' if info['host_dbus'] else 'does not have'} the host's "
+                        f"D-Bus, the manager's record says {'on' if entry['bluetooth'] else 'off'}; its next Update "
+                        "or Rebuild records what is installed")) if p)
+                    entry["bluetooth"] = info["host_dbus"]
         return {"instances": out, "others": others, "latest_release": latest["version"] if latest else None}
 
     def _auto_repair(self, names_: list[str]) -> dict[str, str]:
@@ -1043,7 +1050,7 @@ class Manager:
         channel = marker["channel"]
         restamp = False
         had_bluetooth = managed.entry.get("bluetooth") is True  # the registry's, never the marker's
-        bluetooth = had_bluetooth if bluetooth is None else bluetooth
+        requested, bluetooth = bluetooth, had_bluetooth if bluetooth is None else bluetooth
         try:
             info = await self._installed(managed)
         except (SupervisorError, NotAllowed) as err:
@@ -1063,8 +1070,8 @@ class Manager:
             current = max((marker.get("version"), info.get("version")), key=lambda v: names.parse_version(v) or ())
             if (names.parse_version(version) or ()) < (names.parse_version(current) or ()):
                 raise JobFailed(f"{version} is older than {current}: the manager does not downgrade")
-            if bluetooth != had_bluetooth and info.get("version") == version:
-                raise JobFailed(BLUETOOTH_NEEDS_VERSION.format(state="on" if bluetooth else "off"))
+            if info.get("version") == version:
+                bluetooth, had_bluetooth = await self._bluetooth_at_same_version(managed, requested, had_bluetooth)
             if version == marker.get("version") and info.get("version") == version:
                 if marker.get("stamp_version") == stamp.STAMP_VERSION:
                     job.log(f"already at {version}")
@@ -1081,8 +1088,8 @@ class Manager:
             raise
         sha = archive.sha
         if channel == "git":
-            if bluetooth != had_bluetooth and info.get("version") == names.git_version(sha):
-                raise JobFailed(BLUETOOTH_NEEDS_VERSION.format(state="on" if bluetooth else "off"))
+            if info.get("version") == names.git_version(sha):
+                bluetooth, had_bluetooth = await self._bluetooth_at_same_version(managed, requested, had_bluetooth)
             if sha == marker.get("sha") and info.get("version") == marker.get("version"):
                 if marker.get("stamp_version") == stamp.STAMP_VERSION:
                     job.log(f"the {new_ref[0]} {new_ref[1]} is still {sha[:12]}: nothing to rebuild")
@@ -1170,6 +1177,21 @@ class Manager:
                     "(an HRI update, or a rebuild of a new commit), not at the same version")
         result = {"version": version, "state": after.get("state"), "restamped": restamp}
         return {**result, "warning": warning} if warning else result
+
+    async def _bluetooth_at_same_version(self, managed: children.Managed, requested: bool | None,
+                                         recorded: bool) -> tuple[bool, bool]:
+        """(Bluetooth to write, Bluetooth the app has) when the installed app is already at the version being written
+        (a catch-up after an update the manager stopped waiting for, or a restamp): the Supervisor applies nothing then,
+        so the definition takes what the app has (its host_dbus, as it reports it), and a request for the other is
+        refused (BLUETOOTH_NEEDS_VERSION)."""
+        try:
+            installed = (await self.sv.app_definition(managed.slug)).get("host_dbus")
+        except (SupervisorError, NotAllowed) as err:
+            raise JobFailed(str(err)) from None
+        installed = installed if isinstance(installed, bool) else recorded
+        if requested is not None and requested != installed:
+            raise JobFailed(BLUETOOTH_NEEDS_VERSION.format(state="on" if requested else "off"))
+        return installed, installed
 
     async def _clear_updating(self, name: str) -> None:
         try:
