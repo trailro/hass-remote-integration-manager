@@ -588,6 +588,24 @@ class FlowCheckTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("not a definition this manager writes", job["error"])
         self.assertFalse(self.called("/store/addons/local_hri_garage/install", since))
 
+    async def test_install_refuses_a_file_the_supervisor_would_build_or_confine_it_with(self):
+        """R2-2: Dockerfile.<arch>, build.yaml or apparmor.txt next to the config: not what the manager writes."""
+        env = self.env
+        self.assertEqual((await self.create())["state"], "succeeded")
+        del env.stub.installed["local_hri_garage"]
+        for planted in ("Dockerfile.amd64", "build.yaml", "apparmor.txt"):
+            with self.subTest(planted=planted):
+                path = os.path.join(self.folder(), planted)
+                with open(path, "wb") as fh:
+                    fh.write(b"x\n")
+                since = len(env.stub.calls)
+                job = await env.job(await env.send("POST", "/api/instances/garage/install"))
+                os.unlink(path)
+                self.assertEqual(job["state"], "failed", job)
+                self.assertIn(f"'{planted}'", job["error"])
+                self.assertIn("not a definition this manager writes", job["error"])
+                self.assertFalse(self.called("/store/addons/local_hri_garage/install", since))
+
     async def test_the_marker_and_registry_are_what_they_were(self):
         """The checks read only; a normal create is unchanged and its log says what was checked."""
         job = await self.create()

@@ -193,6 +193,49 @@ class WriteTest(unittest.TestCase):
             children.write_new(self.root, "garage", build_with({}, marker("attic")), self.reg)
         self.assertEqual(self.entries(), [])
 
+    def planting(self, files, marker_data):
+        """A build during which another writer of the local apps folder plants a Dockerfile.<arch> (which the
+        Supervisor builds instead of the Dockerfile) and rewrites config.yaml (another image), in the folder being
+        built."""
+        def build(tmp):
+            self.modes.append(stat.S_IMODE(os.stat(tmp).st_mode))
+            build_with(files, marker_data)(tmp)
+            with open(os.path.join(tmp, "Dockerfile.amd64"), "wb") as fh:
+                fh.write(b"FROM evil/img\n")
+            with open(os.path.join(tmp, "config.yaml"), "wb") as fh:
+                fh.write(b"image: evil/img\n")
+            return marker_data
+        return build
+
+    def test_what_the_folder_holds_after_the_build_is_what_the_manager_wrote(self):
+        """R2-2: the manifest is compared with the names and bytes the manager's own build wrote, not taken from
+        whatever the folder holds when the build returns."""
+        self.modes = []
+        with self.assertRaises(children.DefinitionChanged) as ctx:
+            children.write_new(self.root, "garage", self.planting({"config.yaml": b"x"}, marker("garage")), self.reg)
+        self.assertIn("'Dockerfile.amd64'", str(ctx.exception))
+        self.assertIn("'config.yaml'", str(ctx.exception))
+        self.assertEqual(self.entries(), [])
+        m = children.write_new(self.root, "garage", build_with({"config.yaml": b"old"}, marker("garage")), self.reg)
+        with self.assertRaises(children.DefinitionChanged):
+            children.replace(m, self.planting({"config.yaml": b"new"}, marker("garage", version="0.25.1")))
+        self.assertEqual((self.entries(), self.read()), (["hri_garage"], b"old"))
+        # the folder being built is the manager's alone; the one in place is listable as before
+        self.assertEqual(self.modes, [0o700, 0o700])
+        self.assertEqual(stat.S_IMODE(os.stat(os.path.join(self.root, "hri_garage")).st_mode), 0o755)
+
+    def test_the_build_s_own_removals_and_links_are_what_it_wrote(self):
+        def build(tmp):
+            children.write_file(tmp, "a/b/c", b"x")
+            children.write_file(tmp, "docs/config.yaml", b"slug: other\n")
+            children.remove_file(tmp, "docs/config.yaml")
+            children.make_link(tmp, "a/l", "b/c")
+            children.make_dirs(tmp, "empty/d")
+            return marker("garage")
+
+        m = children.write_new(self.root, "garage", build, self.reg)
+        self.assertEqual(set(m.manifest), {".", "a", "a/b", "a/b/c", "a/l", "docs", "empty", "empty/d", children.MARKER})
+
     def test_an_existing_folder_is_never_overwritten(self):
         make_child(self.root, "garage", False)
         with self.assertRaises(children.UnsafePath):

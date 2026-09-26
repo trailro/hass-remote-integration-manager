@@ -279,9 +279,45 @@ def _in_folder(base: str, rel: str, create: bool) -> tuple[int, str]:
     return _folder_fd(base, parent, create), leaf
 
 
+class BuildFolder(str):
+    """The path of a folder being built (write_new, replace): every entry this module writes into it, the folders it
+    creates on the way, and every entry it removes are recorded in ``written`` (relative path -> what digest_tree calls
+    it, without inode and time), so that what the folder holds when the build returns can be compared with what the
+    manager wrote (_check_written), not taken as it is: another writer of the local apps folder may add or change
+    files during a build that takes seconds."""
+
+    written: dict[str, str]
+
+    def __new__(cls, path: str) -> "BuildFolder":
+        obj = super().__new__(cls, path)
+        obj.written = {}
+        return obj
+
+
+def _record(base: str, rel: str, kind: str | None) -> None:
+    """What was written at ``rel`` below ``base`` (and the folders above it), when ``base`` is a BuildFolder; None:
+    removed."""
+    written = getattr(base, "written", None)
+    if written is None:
+        return
+    parts = _parts(rel)
+    for i in range(1, len(parts)):
+        written["/".join(parts[:i])] = "dir"
+    if kind is None:
+        written.pop(rel, None)
+    else:
+        written[rel] = kind
+
+
+def _sha(data: bytes) -> str:
+    return "sha256:" + hashlib.sha256(data).hexdigest()
+
+
 def make_dirs(base: str, rel: str) -> str:
     """Create ``base/rel`` folder by folder, refusing any part that exists as something other than a real folder."""
     os.close(_folder_fd(base, rel, True))
+    if rel:
+        _record(base, rel, "dir")
     return safe_join(base, rel) if rel else base
 
 
@@ -294,6 +330,7 @@ def write_file(base: str, rel: str, data: bytes, mode: int = 0o644) -> None:
         os.close(folder_fd)
     with os.fdopen(fd, "wb") as fh:
         fh.write(data)
+    _record(base, rel, _sha(data))
 
 
 def replace_file(base: str, rel: str, data: bytes, mode: int = 0o644) -> None:
@@ -315,6 +352,7 @@ def replace_file(base: str, rel: str, data: bytes, mode: int = 0o644) -> None:
             raise
     finally:
         os.close(folder_fd)
+    _record(base, rel, _sha(data))
 
 
 def make_link(base: str, rel: str, target: str) -> None:
@@ -324,6 +362,7 @@ def make_link(base: str, rel: str, target: str) -> None:
         os.symlink(target, leaf, dir_fd=folder_fd)
     finally:
         os.close(folder_fd)
+    _record(base, rel, "link:" + target)
 
 
 def remove_file(base: str, rel: str) -> None:
@@ -333,6 +372,7 @@ def remove_file(base: str, rel: str) -> None:
         os.unlink(leaf, dir_fd=folder_fd)
     finally:
         os.close(folder_fd)
+    _record(base, rel, None)
 
 
 def list_folder(base: str, rel: str) -> list[str]:
@@ -359,10 +399,29 @@ def marker_bytes(marker: dict) -> bytes:
     return (json.dumps(marker, indent=2, sort_keys=True) + "\n").encode("utf-8")
 
 
-def _tmp_dir(real_root: str, name: str) -> str:
+def _tmp_dir(real_root: str, name: str) -> BuildFolder:
+    # 0700 while it is built (nobody but its owner lists it); 0755, as any app folder, once checked (_finish_build)
     path = os.path.join(real_root, f"{TMP_PREFIX}{name}-{secrets.token_hex(4)}")
-    os.mkdir(path, 0o755)
-    return path
+    os.mkdir(path, 0o700)
+    os.chmod(path, 0o700)  # whatever the umask
+    return BuildFolder(path)
+
+
+def _finish_build(tmp: BuildFolder, name: str, marker: dict) -> dict[str, str]:
+    """The marker written, the folder's manifest (digest_tree), checked against what the manager wrote into it
+    (BuildFolder.written): the same names, and for each the same bytes, link or folder.  DefinitionChanged
+    otherwise: something else wrote in the folder during the build."""
+    write_file(tmp, MARKER, marker_bytes(marker))
+    manifest = digest_tree(tmp)
+    found = {rel: value.rsplit(" ", 2)[0] for rel, value in manifest.items() if rel != "."}
+    if found != tmp.written:
+        changed = sorted(k for k in set(found) | set(tmp.written) if found.get(k) != tmp.written.get(k))
+        shown = ", ".join(repr(c[:80]) for c in changed[:5]) + (f" and {len(changed) - 5} more" if len(changed) > 5 else "")
+        raise DefinitionChanged(f"{names.folder_name(name)} was being written, and it holds what the manager did not "
+                                f"write ({shown}): refused. Anyone who can write the local apps folder can add or change "
+                                "files there; find out who did")
+    os.chmod(tmp, 0o755)
+    return manifest
 
 
 def _remove_tree(path: str) -> None:
@@ -381,9 +440,7 @@ def write_new(root: str, name: str, build: Callable[[str], dict], registry: Regi
         raise UnsafePath(f"{names.folder_name(name)} already exists in the local apps folder")
     tmp = _tmp_dir(os.path.dirname(final), name)
     try:
-        marker = validate_marker(build(tmp), name)
-        write_file(tmp, MARKER, marker_bytes(marker))
-        manifest = digest_tree(tmp)
+        manifest = _finish_build(tmp, name, validate_marker(build(tmp), name))
         if os.path.lexists(final):
             raise UnsafePath(f"{names.folder_name(name)} appeared while it was being written")
         os.rename(tmp, final)
@@ -423,9 +480,7 @@ def replace(managed: Managed, build: Callable[[str], dict]) -> Replacement:
     tmp = _tmp_dir(real_root, managed.name)
     old = os.path.join(real_root, f"{OLD_PREFIX}{managed.name}-{secrets.token_hex(4)}")
     try:
-        marker = validate_marker(build(tmp), managed.name)
-        write_file(tmp, MARKER, marker_bytes(marker))
-        manifest = digest_tree(tmp)
+        manifest = _finish_build(tmp, managed.name, validate_marker(build(tmp), managed.name))
         os.rename(final, old)
         try:
             os.rename(tmp, final)
