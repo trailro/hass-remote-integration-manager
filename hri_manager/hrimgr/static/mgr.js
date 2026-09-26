@@ -74,7 +74,7 @@ function channelCell(i) {
   if (i.channel === 'release') return '<span class="tag">release</span>';
   return '<span class="tag bad">unknown</span>';
 }
-const LABELS = {start: 'Start', stop: 'Stop', restart: 'Restart', update: 'Update', delete: 'Delete', repair: 'Repair'};
+const LABELS = {start: 'Start', stop: 'Stop', restart: 'Restart', update: 'Update', delete: 'Delete', repair: 'Repair', install: 'Install', finish: 'Finish setup'};
 function actionsCell(i) {
   const busy = i.job && i.job.state === 'running';
   const link = panelHref(i);

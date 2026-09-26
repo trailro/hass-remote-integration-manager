@@ -176,6 +176,11 @@ class Stub:
         store = self.store.get(slug)
         if not store:
             return err("App does not exist", 404)
+        # the real Supervisor runs an install or update as a job of its own: a client that stops waiting (the manager
+        # stopped) does not stop it
+        return await asyncio.shield(asyncio.ensure_future(self._store_action(slug, action, store)))
+
+    async def _store_action(self, slug: str, action: str, store: dict) -> web.Response:
         await asyncio.sleep(self.delay)
         if action == "install":
             if slug in self.installed:

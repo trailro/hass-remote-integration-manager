@@ -1,6 +1,7 @@
 """Create, update, start/stop/restart, delete and repair through the API, against the fake Supervisor and GitHub over
 real HTTP; rollbacks on failure; and the marker and slug checks in front of every changing action."""
 
+import asyncio
 import json
 import os
 import shutil
@@ -152,6 +153,101 @@ class FlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(os.listdir(env.local_apps), [])
         self.assertIn(("POST", "/addons/local_hri_garage/uninstall", {"remove_config": False}), env.stub.calls)
         self.assertNotIn("local_hri_garage", env.stub.store)
+
+    async def test_a_failed_info_after_a_successful_start_keeps_the_instance(self):
+        env = self.env
+        env.stub.fail[("GET", "/addons/local_hri_garage/info")] = "Supervisor busy"
+        job = await self.create()
+        self.assertEqual(job["state"], "succeeded", job)
+        self.assertEqual(env.stub.installed["local_hri_garage"]["state"], "started")
+        self.assertTrue(os.path.isdir(self.folder("garage")))
+        self.assertTrue(env.registry.get("garage")["setup_complete"])
+
+    async def _cancel_when(self, job_id: str, line: str) -> dict:
+        """Cancel a job (as the manager's stop does) once its log shows ``line``; its final state."""
+        job = self.env.manager.jobs.get(job_id)
+        for _ in range(500):
+            if any(line in l["msg"] for l in job.lines):
+                break
+            await asyncio.sleep(0.01)
+        else:
+            raise AssertionError(f"the job never logged {line!r}: {job.lines}")
+        job.task.cancel()
+        await asyncio.gather(job.task, return_exceptions=True)
+        return job.as_dict()
+
+    async def test_a_create_stopped_while_starting_is_rolled_back(self):
+        env = self.env
+        env.stub.delay = 0.3
+        status, body = await env.send("POST", "/api/instances", {"name": "garage", "channel": "release", "version": "0.25.0"})
+        job = await self._cancel_when(body["job"]["id"], "starting")
+        self.assertEqual(job["state"], "failed")
+        self.assertIn("cancelled", job["error"])
+        self.assertTrue(any("rolling back" in l["msg"] for l in job["lines"]), job["lines"])
+        self.assertNotIn("local_hri_garage", env.stub.installed)
+        self.assertEqual(os.listdir(env.local_apps), [])
+        self.assertIsNone(env.registry.get("garage"))
+
+    async def test_a_create_stopped_while_installing_says_install_interrupted(self):
+        """The Supervisor finishes an install the manager stopped waiting for: a detached app, labelled as such."""
+        env = self.env
+        env.stub.delay = 0.3
+        status, body = await env.send("POST", "/api/instances", {"name": "garage", "channel": "release", "version": "0.25.0"})
+        await self._cancel_when(body["job"]["id"], "installing")
+        self.assertEqual(os.listdir(env.local_apps), [])
+        for _ in range(100):  # the stub completes the install it was asked for
+            if "local_hri_garage" in env.stub.installed:
+                break
+            await asyncio.sleep(0.02)
+        await env.sv.reload_store()
+        _, data = await env.get("/api/instances")
+        (inst,) = data["instances"]
+        self.assertIn("install interrupted", inst["problem"])
+        self.assertNotIn("partial restore", inst["problem"])
+        self.assertEqual(inst["actions"], ["repair"])
+        env.stub.delay = 0
+        job = await env.job(await env.send("POST", "/api/instances/garage/repair"))
+        self.assertEqual(job["state"], "succeeded", job)
+        _, data = await env.get("/api/instances")
+        self.assertIn("finish", data["instances"][0]["actions"])  # its boot, Watchdog and panel were never set
+
+    async def test_an_update_stopped_midway_puts_the_previous_definition_back(self):
+        env = self.env
+        await self.create()
+        env.stub.delay = 0.3
+        status, body = await env.send("POST", "/api/instances/garage/update", {"version": "0.25.1"})
+        job = await self._cancel_when(body["job"]["id"], "updating")
+        self.assertEqual(job["state"], "failed")
+        self.assertEqual(self.config("garage")["version"], "0.25.0")
+        self.assertEqual(self.marker("garage")["version"], "0.25.0")
+        self.assertEqual(sorted(os.listdir(env.local_apps)), ["hri_garage"])
+
+    async def test_finish_setup_and_install(self):
+        env = self.env
+        await self.create()
+        env.registry.update("garage", setup_complete=False)
+        env.stub.installed["local_hri_garage"].update(boot="manual", watchdog=False, ingress_panel=False, state="stopped")
+        self.assertEqual(env.manager.pending_setup(), ["garage"])
+        _, data = await env.get("/api/instances")
+        inst = data["instances"][0]
+        self.assertIn("finish", inst["actions"])
+        self.assertIn("setup", inst["problem"])
+        job = await env.job(await env.send("POST", "/api/instances/garage/finish"))
+        self.assertEqual(job["state"], "succeeded", job)
+        app = env.stub.installed["local_hri_garage"]
+        self.assertEqual((app["boot"], app["watchdog"], app["ingress_panel"], app["state"]), ("auto", True, True, "started"))
+        self.assertTrue(env.registry.get("garage")["setup_complete"])
+        self.assertEqual(env.manager.pending_setup(), [])
+        # a definition restored without its app
+        del env.stub.installed["local_hri_garage"]
+        _, data = await env.get("/api/instances")
+        self.assertEqual(data["instances"][0]["actions"], ["install", "delete"])
+        job = await env.job(await env.send("POST", "/api/instances/garage/install"))
+        self.assertEqual(job["state"], "succeeded", job)
+        self.assertEqual(env.stub.installed["local_hri_garage"]["state"], "started")
+        status, _ = await env.send("POST", "/api/instances/garage/install")  # installed now: nothing to install
+        job = await env.job((status, _))
+        self.assertEqual(job["state"], "failed")
 
     async def test_a_failed_download_writes_nothing(self):
         job = await self.create(version="0.99.0")

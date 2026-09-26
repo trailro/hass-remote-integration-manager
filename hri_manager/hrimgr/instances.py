@@ -1,9 +1,12 @@
 """What the manager does: list, create, update, start/stop/restart, delete and repair HRI instances.
 
 Every action that changes something runs as a job (jobs.py).  An action on an instance first loads its
-``children.Managed`` (the marker check); the Supervisor client refuses any changing call without it.  A create
-that fails is rolled back (uninstalled if it got that far, its folder removed, the store reloaded); an update that
-fails puts the previous definition back."""
+``children.Managed`` (the marker and registry check); the Supervisor client refuses any changing call without it.  A
+create that fails is rolled back (uninstalled if it got that far, its folder removed, the store reloaded); an update
+that fails puts the previous definition back.  Both also when the manager itself is stopped midway (the job's task
+cancelled): the rollback then runs shielded from the cancellation, for at most ``ROLLBACK_BOUND`` seconds, and the
+cancellation goes on.  An install the Supervisor finishes after that is listed as "install interrupted"; an instance
+whose create stopped before its options and start (``setup_complete`` in the registry) gets "Finish setup"."""
 
 from __future__ import annotations
 
@@ -21,6 +24,8 @@ from .supervisor import NotAllowed, SupervisorClient, SupervisorError
 
 _LOGGER = logging.getLogger(__name__)
 HISTORY = 20
+# the Supervisor stops an app 10 s after SIGTERM by default: a rollback when the manager stops gets less than that
+ROLLBACK_BOUND = 8.0
 
 
 class InvalidRequest(ValueError):
@@ -77,6 +82,11 @@ class Manager:
         installed = {a.get("slug"): a for a in apps if isinstance(a.get("slug"), str)}
         latest = latest_stable(self.gh.cached_releases())
         folders = await asyncio.to_thread(children.scan, self.root, self.registry)
+        try:
+            registered = await asyncio.to_thread(self.registry.all)
+        except RegistryError as err:
+            _LOGGER.error("%s", err)
+            registered = {}
         out, others, seen = [], [], set()
         for name, marker, problem in folders:
             slug = names.supervisor_slug(name)
@@ -85,7 +95,7 @@ class Manager:
                 others.append({"slug": slug, "name": names.folder_name(name), "kind": "folder", "problem": problem,
                                "installed": slug in installed, "state": installed.get(slug, {}).get("state")})
                 continue
-            out.append(self._entry(name, marker, installed.get(slug), latest))
+            out.append(self._entry(name, marker, installed.get(slug), latest, registered.get(name)))
         for slug, app in sorted(installed.items()):
             name = names.name_from_slug(slug)
             if name and slug not in seen:
@@ -93,7 +103,13 @@ class Manager:
                 # detached: the Supervisor has no definition of it anywhere (a hand-made local app with this slug is
                 # not detached, and Repair would write a second definition of its slug)
                 if app.get("url") == names.HRI_URL and app.get("detached") is True:
-                    entry["problem"] = "installed, but its definition folder is gone (a partial restore?): repair writes it again"
+                    known = registered.get(name)
+                    if known and (known.get("interrupted") or not known.get("setup_complete")):
+                        entry["problem"] = ("install interrupted: the manager stopped while the Supervisor was installing "
+                                            "it. Repair writes its definition again; then Finish setup, or Delete")
+                    else:
+                        entry["problem"] = ("installed, but its definition folder is gone (restored without the local apps "
+                                            "folder?): Repair writes it again")
                     entry["actions"] = ["repair"]
                     out.append(entry)
                 else:
@@ -122,7 +138,7 @@ class Manager:
             _LOGGER.warning("info of %s: %s", slug, err)
             return None
 
-    def _entry(self, name: str, marker: dict | None, app: dict | None, latest: dict | None) -> dict:
+    def _entry(self, name: str, marker: dict | None, app: dict | None, latest: dict | None, known: dict | None = None) -> dict:
         slug = names.supervisor_slug(name)
         job = self.jobs.running_for(name)
         entry: dict[str, Any] = {
@@ -146,8 +162,13 @@ class Manager:
             entry["newer_release"] = latest["version"]
         actions = []
         if app is None:
-            entry["problem"] = "defined, but not installed"
+            entry["problem"] = "defined, but not installed: Install installs and starts it"
+            actions.append("install")
         else:
+            if known is not None and not known.get("setup_complete"):
+                entry["problem"] = ("its setup was interrupted: Finish setup turns on start at boot, the Watchdog and "
+                                    "the sidebar panel, and starts it")
+                actions.append("finish")
             state = app.get("state")
             actions += ["restart", "stop"] if state == "started" else ["start"]
             actions.append("update")
@@ -227,6 +248,20 @@ class Manager:
     def repair(self, name: str, user: str) -> Job:
         name = self.check_name(name)
         return self.jobs.start(name, "repair", user, lambda job: self._repair(job, name, user))
+
+    def setup(self, name: str, action: str, user: str) -> Job:
+        """``install`` (a definition without its app) or ``finish`` (installed, but its create stopped before the
+        options and the start)."""
+        managed = self.managed(name)
+        return self.jobs.start(name, action, user, lambda job: self._setup(job, managed, install=action == "install"))
+
+    def pending_setup(self) -> list[str]:
+        """Instances whose create stopped between the install and the start (logged when the manager starts)."""
+        try:
+            return sorted(n for n, e in self.registry.all().items() if not e.get("setup_complete") and not e.get("interrupted")
+                          and os.path.isdir(os.path.join(self.root, names.folder_name(n))))
+        except RegistryError:
+            return []
 
     # ------------------------------------------------------------------ job bodies
 
@@ -353,29 +388,55 @@ class Manager:
             await self._wait_store(job, slug, version)
             job.log("installing (a git build takes several minutes)" if channel == "git" else "installing (pulling the image)")
             await self.sv.install(managed)
-            job.log("turning on start at boot, the Watchdog and the sidebar panel")
-            await self.sv.set_options(managed, boot="auto", watchdog=True, ingress_panel=True)
-            job.log("starting")
-            await self.sv.start(managed)
-            info = await self.sv.app_info(slug)
+            await self._finish_setup(job, managed)
+        except asyncio.CancelledError:
+            job.log("the manager is stopping: rolling back")
+            await self._shielded(job, self._rollback_create(job, managed, interrupted=True), "the rollback")
+            raise
         except Exception as err:
             job.log(f"{err}: rolling back")
             await self._rollback_create(job, managed)
             if isinstance(err, (SupervisorError, NotAllowed)):
                 raise JobFailed(str(err)) from None
             raise
-        return {"slug": slug, "version": version, "ingress_url": info.get("ingress_url"), "state": info.get("state")}
+        # the instance is up: a failed read of its info no longer undoes it
+        info = await self._info(slug) or {}
+        return {"slug": slug, "version": version, "ingress_url": info.get("ingress_url"), "state": info.get("state", "started")}
 
-    async def _rollback_create(self, job: Job, managed: children.Managed) -> None:
+    async def _finish_setup(self, job: Job, managed: children.Managed) -> None:
+        job.log("turning on start at boot, the Watchdog and the sidebar panel")
+        await self.sv.set_options(managed, boot="auto", watchdog=True, ingress_panel=True)
+        job.log("starting")
+        await self.sv.start(managed)
+        await asyncio.to_thread(self.registry.update, managed.name, setup_complete=True)
+
+    @staticmethod
+    async def _shielded(job: Job, coro, what: str) -> None:
+        """Run ``coro`` to its end although the job's task is being cancelled, for at most ROLLBACK_BOUND seconds."""
+        task = asyncio.ensure_future(coro)
         try:
-            if any(a.get("slug") == managed.slug for a in await self.sv.list_apps()):
+            await asyncio.wait_for(asyncio.shield(task), ROLLBACK_BOUND)
+        except TimeoutError:
+            job.log(f"{what} did not finish within {int(ROLLBACK_BOUND)} s")
+        except asyncio.CancelledError:
+            job.log(f"{what} was interrupted")
+
+    async def _rollback_create(self, job: Job, managed: children.Managed, interrupted: bool = False) -> None:
+        try:
+            installed = any(a.get("slug") == managed.slug for a in await self.sv.list_apps())
+            if installed:
                 # remove_config False: a folder of an earlier instance of the same name (deleted with its data kept)
                 # was reused by this install, and a failed create must not take it
                 job.log("uninstalling")
                 await self.sv.uninstall(managed, remove_config=False)
             job.log("removing the definition")
             await asyncio.to_thread(children.remove, managed)
-            await asyncio.to_thread(self._forget, managed.name, managed.marker["instance_id"])
+            if interrupted and not installed:
+                # the Supervisor may still be installing what it was asked to: if it finishes, the list shows a
+                # detached app, and the registry says why
+                await asyncio.to_thread(self.registry.update, managed.name, interrupted=True, setup_complete=False)
+            else:
+                await asyncio.to_thread(self._forget, managed.name, managed.marker["instance_id"])
             await self.sv.reload_store()
         except Exception as err:  # noqa: BLE001 - the original failure is what the job reports
             job.log(f"rollback incomplete: {err}")
@@ -447,19 +508,43 @@ class Manager:
             after = await self.sv.app_info(managed.slug)
             if after.get("version") != version:
                 raise JobFailed(f"the Supervisor reports {after.get('version')} after the update, not {version}")
+        except asyncio.CancelledError:
+            job.log("the manager is stopping: putting the previous definition back")
+            await self._shielded(job, self._rollback_update(job, replacement), "putting it back")
+            raise
         except Exception as err:
             job.log(f"{err}: putting the previous definition back")
-            try:
-                await asyncio.to_thread(replacement.rollback)
-                await self.sv.reload_store()
-            except Exception as err2:  # noqa: BLE001
-                job.log(f"could not put it back: {err2}")
+            await self._rollback_update(job, replacement)
             if isinstance(err, (SupervisorError, NotAllowed)):
                 raise JobFailed(str(err)) from None
             raise
         await asyncio.to_thread(replacement.commit)
         await asyncio.to_thread(self.registry.update, managed.name, **{k: new_marker[k] for k in ("version", "ref_kind", "ref", "sha", "updated_at")})
         return {"version": version, "state": after.get("state")}
+
+    async def _rollback_update(self, job: Job, replacement: children.Replacement) -> None:
+        try:
+            await asyncio.to_thread(replacement.rollback)
+            await self.sv.reload_store()
+        except Exception as err:  # noqa: BLE001
+            job.log(f"could not put it back: {err}")
+
+    async def _setup(self, job: Job, managed: children.Managed, install: bool) -> dict:
+        try:
+            installed = any(a.get("slug") == managed.slug for a in await self.sv.list_apps())
+            if install:
+                if installed:
+                    raise JobFailed(f"{managed.slug} is installed already")
+                await self._wait_store(job, managed.slug, managed.marker["version"])
+                job.log("installing")
+                await self.sv.install(managed)
+            elif not installed:
+                raise JobFailed(f"{managed.slug} is not installed: Install it")
+            await self._finish_setup(job, managed)
+        except (SupervisorError, NotAllowed, RegistryError) as err:
+            raise JobFailed(str(err)) from None
+        info = await self._info(managed.slug) or {}
+        return {"state": info.get("state", "started")}
 
     async def _delete(self, job: Job, managed: children.Managed, remove_data: bool) -> dict:
         try:

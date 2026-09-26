@@ -55,6 +55,11 @@ def main() -> int:
             await gh.close()
             await users.close()
 
+        async def report(_app: web.Application) -> None:
+            for name in manager.pending_setup():
+                log.warning("instance %s: its create stopped before its setup finished; the page offers Finish setup", name)
+
+        app.on_startup.append(report)
         app.on_cleanup.append(close)
         return app
 

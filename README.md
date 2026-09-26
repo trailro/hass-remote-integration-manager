@@ -49,7 +49,15 @@ The manager then, as a job whose log the page shows:
    sidebar**, and starts it.
 
 If a step fails, what was done is undone: the app is uninstalled (its `/config` folder kept), the definition removed
-and the store reloaded.
+and the store reloaded. The same when the manager itself is stopped midway (for at most 8 seconds, within the
+Supervisor's stop timeout). Two cases are left for you to finish, and the page says which:
+
+- the Supervisor went on installing after the manager stopped waiting: the app is listed as **install interrupted**,
+  with **Repair** (then **Finish setup** or **Delete**);
+- the manager stopped after the install but before the options and the start: the instance offers **Finish setup**,
+  which turns on start at boot, the Watchdog and the panel, and starts it (the manager's log names such instances when
+  it starts);
+- a definition without its app (restored alone) offers **Install**.
 
 If an instance of the same name was deleted before with its `/config` folder kept, the new one reuses that folder
 (its Home Assistant, integration and credentials) but not the old options: set its password and `ingress_users` again.
@@ -102,8 +110,8 @@ rebuilds when its commit changed. Not for production.
 **Update** on an instance offers the releases at or above its version (the newest stable preselected; the page marks
 an instance for which a newer release exists). The manager writes the new release's definition, keeping the previous
 one aside, and asks the Supervisor to update the app: it pulls the new image and restarts the app with the same
-options and data. If the update fails, the previous definition is put back and the app keeps running the version it
-had. The manager does not downgrade.
+options and data. If the update fails, or the manager is stopped midway, the previous definition is put back. The
+manager does not downgrade.
 
 The Supervisor's own **Update** button on the instance's app page appears only while the manager is updating it:
 updates go through the manager, which is what moves the definition.
