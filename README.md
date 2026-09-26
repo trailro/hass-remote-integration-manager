@@ -80,8 +80,10 @@ If a step fails, what was done is undone: the app is uninstalled (its `/config` 
 and the store reloaded. The same when the manager itself is stopped midway (for at most 8 seconds, within the
 Supervisor's stop timeout). Three cases are left for you to finish, and the page says which:
 
-- the Supervisor went on installing after the manager stopped waiting: the app is listed as **install interrupted**,
-  with **Repair** (then **Finish setup** or **Delete**);
+- the Supervisor went on installing after the manager stopped waiting (the manager was stopped, or its install call
+  got no clean answer: a timeout, a lost connection, a server error): the app is listed as **install interrupted**,
+  with **Repair** (then **Finish setup** or **Delete**). Until it shows up, the manager keeps its registry entry, and
+  **Forget** is refused for an hour after the interruption;
 - the manager stopped after the install but before the options and the start: the instance offers **Finish setup**,
   which turns on start at boot, the Watchdog and the panel, and starts it (the manager's log names such instances when
   it starts);
@@ -271,7 +273,8 @@ that the manager did not create (detached or not), and `hri_<name>/` folders who
 not hold are listed under **Other HRI apps**, read-only: the manager offers no action on them. So are the manager's
 own records of an instance that is neither installed nor defined (uninstalled outside the manager, its folder gone):
 its registry entry and its copy in `/data`. **Forget** (with the name typed) drops those records and touches nothing
-else; it refuses while the app is installed or its folder exists. Adopting the single app into the
+else; it refuses while the app is installed or its folder exists, and for an hour after an install that was
+interrupted (the Supervisor may still finish it). Adopting the single app into the
 manager is on the roadmap.
 
 ## Security model

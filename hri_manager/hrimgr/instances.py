@@ -39,6 +39,9 @@ ROLLBACK_BOUND = 8.0
 AUTO_REPAIR_INTERVAL = 300.0
 AUTO_REPAIR_MAX_DELAY = 86400.0  # an instance's automatic repair that keeps failing is tried at least once a day
 AUTO_USER = "automatic repair"
+# an install the manager stopped waiting for, the Supervisor may finish later (it installs as a task of its own): its
+# registry entry is not forgotten before the install call's own timeout has passed
+INTERRUPTED_GRACE = 3600.0
 
 
 class InvalidRequest(ValueError):
@@ -170,6 +173,11 @@ class Manager:
         for name in sorted((set(registered) | kept) - present):
             if names.NAME_RE.fullmatch(name) and name not in names.RESERVED and not self.jobs.running_for(name):
                 tampered = (registered.get(name) or {}).get("tampered")
+                pending = self._install_may_finish(registered.get(name))
+                if pending:
+                    others.append({"slug": names.supervisor_slug(name), "name": name, "instance": name, "kind": "orphan",
+                                   "installed": False, "state": None, "actions": [], "problem": pending})
+                    continue
                 others.append({"slug": names.supervisor_slug(name), "name": name, "instance": name, "kind": "orphan",
                                "installed": False, "state": None, "actions": ["forget"],
                                "problem": (f"uninstalled by the manager: {str(tampered.get('reason'))[:300]}. "
@@ -444,6 +452,20 @@ class Manager:
                                  "repaired")
         return self.jobs.start(name, "repair", user, lambda job: self._repair(job, name, user))
 
+    @staticmethod
+    def _install_may_finish(entry: dict | None) -> str | None:
+        """Why an interrupted install may still finish (within INTERRUPTED_GRACE of its interruption), else None."""
+        at = (entry or {}).get("interrupted_at") if (entry or {}).get("interrupted") else None
+        try:
+            since = time.time() - datetime.datetime.fromisoformat(at).timestamp() if isinstance(at, str) else None
+        except ValueError:
+            since = None
+        if since is None or since >= INTERRUPTED_GRACE:
+            return None
+        return (f"its install was interrupted at {at} and the Supervisor may still finish it: Forget is refused for "
+                f"{int(INTERRUPTED_GRACE // 60)} minutes after that (then, or once it is listed as installed, Repair "
+                "or Delete)")
+
     def forget(self, name: str, body: dict, user: str) -> Job:
         """Drop the registry entry and the copy of an instance that is neither installed nor defined (checked again in
         the job).  Needs the name typed."""
@@ -452,6 +474,12 @@ class Manager:
             raise InvalidRequest(f"Forgetting an instance needs its name typed: {name}.")
         if os.path.lexists(os.path.join(self.root, names.folder_name(name))):
             raise InvalidRequest(f"{names.folder_name(name)} exists: {name} is defined, not something to forget")
+        try:
+            pending = self._install_may_finish(self.registry.get(name))
+        except RegistryError as err:
+            raise InvalidRequest(str(err)) from None
+        if pending:
+            raise InvalidRequest(f"{name}: {pending}")
         return self.jobs.start(name, "forget", user, lambda job: self._forget_records(job, name))
 
     async def _forget_records(self, job: Job, name: str) -> dict:
@@ -465,6 +493,9 @@ class Manager:
             raise JobFailed(f"{names.folder_name(name)} exists: not forgotten")
         try:
             known = await asyncio.to_thread(self.registry.get, name)
+            pending = self._install_may_finish(known)
+            if pending:
+                raise JobFailed(f"not forgotten: {pending}")
             if known is not None:
                 await asyncio.to_thread(self.registry.remove, name)
             await asyncio.to_thread(copies.remove, self.copies_root, name)
@@ -708,11 +739,14 @@ class Manager:
             raise JobFailed(f"the definition was not written: {err}") from None
         await self._save_copy(job, managed)
         expected = stamp.expected_view(built["config"], slug)
+        installing = False
         try:
             await self._wait_store(job, slug, version, managed.manifest)
             await self._verify_store(job, managed, expected, managed.manifest)
             job.log("installing (a git build takes several minutes)" if channel == "git" else "installing (pulling the image)")
+            installing = True
             await self.sv.install(managed)
+            installing = False
             await self._verify_installed(job, managed, expected)
             await self._finish_setup(job, managed)
         except asyncio.CancelledError:
@@ -722,9 +756,14 @@ class Manager:
         except Exception as err:
             job.log(f"{err}: rolling back")
             tampered = str(err) if isinstance(err, Tampered) else None
-            await self._rollback_create(job, managed, tampered=tampered)
+            # no clean refusal (a timeout, a lost connection, a server error): the Supervisor may be installing still
+            unsure = installing and isinstance(err, SupervisorError) and not (err.status and 400 <= err.status < 500)
+            await self._rollback_create(job, managed, interrupted=unsure, tampered=tampered)
             if tampered:
                 raise self._tampered(managed, tampered, "and its definition removed") from None
+            if unsure:
+                raise JobFailed(f"{err}. The Supervisor may still be installing it: if it finishes, the list shows "
+                                f"{slug} as install interrupted, with Repair") from None
             if isinstance(err, (SupervisorError, NotAllowed)):
                 raise JobFailed(str(err)) from None
             raise
@@ -816,7 +855,8 @@ class Manager:
             elif interrupted and not installed:
                 # the Supervisor may still be installing what it was asked to: if it finishes, the list shows a
                 # detached app, and the registry says why
-                await asyncio.to_thread(self.registry.update, managed.name, interrupted=True, setup_complete=False)
+                await asyncio.to_thread(self.registry.update, managed.name, interrupted=True, setup_complete=False,
+                                        interrupted_at=children.now_iso())
             else:
                 await asyncio.to_thread(self._forget, managed.name, managed.marker["instance_id"])
             await self.sv.reload_store()
