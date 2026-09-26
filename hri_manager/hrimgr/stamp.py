@@ -403,8 +403,11 @@ def _show_slug(slug: str) -> str:
 
 def in_manager_space(slug: str) -> bool:
     """Whether a slug is one an instance has or could have (``hri_*``), compared as the host names the Supervisor gives
-    apps (``_`` written ``-``, and without case, as DNS names are): a looser match than the store's own key."""
-    return names.host_key(slug).startswith(names.host_key(names.FOLDER_PREFIX))
+    apps (``_`` written ``-``, and without case, as DNS names are): a looser match than the store's own key.  Not a
+    reserved name (names.RESERVED): no instance can have it, and ``hri_manager`` is the manager's own slug (a clone of
+    its repository in the local apps folder defines it)."""
+    key, prefix = names.host_key(slug), names.host_key(names.FOLDER_PREFIX)
+    return key.startswith(prefix) and key[len(prefix):] not in {names.host_key(r) for r in names.RESERVED}
 
 
 def decoys(root: str) -> list[Decoy]:
