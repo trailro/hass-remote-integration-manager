@@ -74,6 +74,15 @@ The first start of an instance installs Home Assistant inside it and takes a few
 it, then set it up as the [HRI documentation](https://github.com/trailro/hass-remote-integration) says. Options
 (password, `ingress_users`, Debian packages, ...) are on the instance's own **Configuration** tab.
 
+### One integration per instance
+
+Each instance runs **one** integration, as HRI does: for a second integration, create a second instance. Two
+instances running the **same** integration cannot share an MQTT broker: HRI names everything it publishes after the
+integration's domain (base topic and client id `hass_<domain>`, not a setting), so the second would take the first's
+broker connection and clear its retained data. Give the instances different integrations. For two config entries of
+one integration, put both in one instance (as HRI's README says), or give each instance its own broker. Base topics
+per instance would lift this; they are a possible future HRI feature, not something the manager can set.
+
 ### What is stamped
 
 Only what makes the copy a separate app; everything else is HRI's, as released:

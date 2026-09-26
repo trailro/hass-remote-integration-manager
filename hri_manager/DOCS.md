@@ -22,6 +22,12 @@ app, so the sidebar has no **HRI Manager** entry until you do (**Open web UI** w
   branch's code and Dockerfile run here. For trying a fix before its release, with a branch you trust; not for
   production. Commits, pull requests and forks are refused.
 
+**One integration per instance.** Two instances running the *same* integration cannot share an MQTT broker: HRI's
+base topic and client id are `hass_<domain>`, named after the integration and not a setting, so they would take each
+other's connection and retained data. Give each instance a different integration (two config entries of one
+integration go in one instance), or give each its own broker; per-instance base topics are a possible future HRI
+feature.
+
 Each instance's options (password, `ingress_users`, ...) are set on that app's own **Configuration** tab, as for the
 single hass-remote-integration app. Its port 8087 is off; map one on its **Network** tab if you want it.
 
