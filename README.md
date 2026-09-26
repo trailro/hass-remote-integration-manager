@@ -351,7 +351,7 @@ narrows itself, in code, and the tests pin it:
   | `POST /store/reload`, `GET /store/addons/local_hri_<name>` | make the store read a new or changed definition, and wait for it |
   | `POST /store/addons/local_hri_<name>/install` and `…/update` | install and update an instance |
   | `GET /addons/local_hri_<name>/info` | an instance's state and panel |
-  | `POST /addons/local_hri_<name>/options` | only `boot` (`auto`; `manual` for an app the manager contains and could not uninstall, so the Supervisor does not start it again at the next boot), `watchdog` and `ingress_panel`: never the instance's own options |
+  | `POST /addons/local_hri_<name>/options` | only `boot` (`auto`; `manual` for an app the manager contains and could not uninstall, or holds until it is checked, so the Supervisor does not start it again at the next boot), `watchdog` and `ingress_panel`: never the instance's own options |
   | `POST /addons/local_hri_<name>/start`, `…/stop`, `…/restart`, `…/uninstall` | the actions on an instance; `uninstall` always with `remove_config` (required: never the Supervisor's default) |
 
   Paths must be plain (no `..`, escapes, queries); an app's slug is accepted only in the `local_hri_<name>` form;
@@ -406,9 +406,9 @@ narrows itself, in code, and the tests pin it:
   Delete stay, and Delete (or Forget) clears the mark. When the registry cannot record a mark (a full `/data`), the
   manager refuses all the same while it runs and keeps the mark in the instance's marker for its next start. A field
   the Supervisor no longer reports at all is not a difference but most likely a change of its API: the app is then
-  stopped and marked as not checked, and kept installed (an uninstall would drop its options); before an install or
-  update, the same refuses it. **Check again** on its row (or **Repair**, for an instance without its folder) checks
-  it again and clears the mark when it passes; the manager also checks, at its start, an app installed while it was
+  held: stopped, its start at boot turned off, marked as not checked, and kept installed (an uninstall would drop its
+  options); before an install or update, the same refuses it. **Check again** on its row (or **Repair**, for an
+  instance without its folder) checks it again and clears the mark when it passes, turning start at boot on again; the manager also checks, at its start, an app installed while it was
   not watching (an update it had stopped waiting for), and holds it (stopped, marked, kept) when its folder is not a
   definition this manager writes, or a decoy of it is there.
 - **What the Supervisor's own buttons do.** The checks above cover **the manager's own** installs and updates. The

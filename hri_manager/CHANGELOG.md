@@ -21,7 +21,8 @@ Fixes from a second external review (of 0.1.2). Still **experimental**.
 - **Containment:** an app that cannot be uninstalled gets start at boot turned off (the allow-list accepts `boot:
   manual` for this, with the instance's marker); a mark the registry cannot record is kept in memory and in the
   instance's marker for the next start; every job reads the mark again before it acts; the start's check of an app
-  installed while the manager was away holds it when its folder cannot be checked or a decoy of it is there.
+  installed while the manager was away holds it when its folder cannot be checked or a decoy of it is there. A held
+  app (stopped until it is checked) gets start at boot turned off too, and on again once Check again or Repair passes.
 - **Bluetooth is never taken from the installed app** as your choice unless you choose it (an Update with Bluetooth
   chosen) or the manager made the change; Repair stops at needs attention otherwise. Following the app writes the
   registry first.
