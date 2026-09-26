@@ -306,6 +306,50 @@ class AutoRepairTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sorted(os.listdir(copy_dir)), ["CHANGELOG.md", "DOCS.md", "config.yaml", "copy.json", "translations"])
         self.assertEqual(os.listdir(os.path.join(env.data, "definitions")), ["garage"])
 
+    async def test_a_folder_whose_copy_fails_oddly_does_not_stop_the_others(self):
+        """R2-18: one instance's copy failing with any error (a KeyError, a RecursionError) is logged, and the others
+        are copied and checked all the same."""
+        env = self.env
+        await self.create("attic")
+        await self.create("garage")
+        for name in ("attic", "garage"):
+            shutil.rmtree(os.path.join(env.data, "definitions", name))
+        for error in (KeyError("backup_exclude"), RecursionError("maximum recursion depth exceeded")):
+            with self.subTest(error=type(error).__name__):
+                save = instances.copies.save
+
+                def odd(root, name, *args, **kw):
+                    if name == "attic":
+                        raise error
+                    return save(root, name, *args, **kw)
+
+                with mock.patch.object(instances.copies, "save", side_effect=odd):
+                    await env.manager.auto_repair_loop()  # no interval here: its first round only
+                self.assertTrue(os.path.isdir(os.path.join(env.data, "definitions", "garage")))
+                self.assertFalse(os.path.exists(os.path.join(env.data, "definitions", "attic")))
+                shutil.rmtree(os.path.join(env.data, "definitions", "garage"))
+
+    async def test_the_loop_never_dies_silently(self):
+        """R2-18: an error the loop does not expect is logged, shown by the status, and the loop starts again (after
+        a back-off) instead of ending for the rest of the manager's life."""
+        env = self.env
+        manager, calls, seen = env.manager, [], []
+
+        async def check():
+            calls.append(True)
+            if len(calls) == 1:
+                raise KeyError("backup_exclude")
+            seen.append((await manager.status())["problems"])
+
+        with mock.patch.object(instances, "LOOP_RESTART_MIN", 0.01), \
+                mock.patch.object(manager, "auto_repair_check", side_effect=check), \
+                self.assertLogs("hrimgr.instances", "ERROR") as logs:
+            await asyncio.wait_for(manager.run_background(), 5)
+        self.assertEqual(len(calls), 2)
+        self.assertTrue(any("KeyError" in p and "starts again" in p for p in seen[0]), seen)
+        self.assertTrue(any("the automatic check and repair stopped" in line for line in logs.output), logs.output)
+        self.assertEqual([p for p in (await manager.status())["problems"] if "automatic" in p], [])
+
     async def test_off_when_no_interval(self):
         env = self.env
         await self.create("garage")

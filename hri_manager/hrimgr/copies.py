@@ -132,8 +132,8 @@ def save(root: str, name: str, files: dict[str, bytes], marker: dict, bluetooth:
     # (the one Repair would use is checked again when it is read)
     try:
         config = yaml.safe_load(files["config.yaml"].decode("utf-8"))
-    except (UnicodeDecodeError, yaml.YAMLError) as err:
-        raise CopyError(f"its config.yaml cannot be read: {err}") from None
+    except (UnicodeDecodeError, yaml.YAMLError, RecursionError) as err:  # nested past Python's recursion limit
+        raise CopyError(f"its config.yaml cannot be read: {str(err)[:300]}") from None
     check(config, name, str(marker.get("version")), channel, bluetooth)
     for rel, data in files.items():
         if rel != "config.yaml":
@@ -221,9 +221,12 @@ def check(config: object, name: str, version: str, channel: str, bluetooth: bool
     try:
         stamp.vet_template({**template, "slug": names.HRI_SLUG})
         restamped = stamp.stamp({**template, "slug": names.HRI_SLUG}, name, version, channel, bluetooth)
-    except (stamp.TemplateError, ValueError, TypeError, AttributeError) as err:
-        raise CopyError(str(err)) from None
-    if restamped != config:
+        same = restamped == config
+    # KeyError: stamping needs backup_exclude; RecursionError: a comparison of values nested past Python's limit
+    except (stamp.TemplateError, ValueError, TypeError, AttributeError, KeyError, RecursionError) as err:
+        raise CopyError(f"its config.yaml is not what stamping writes ({type(err).__name__})"
+                        if isinstance(err, (KeyError, RecursionError)) else str(err)) from None
+    if not same:
         raise CopyError("its config.yaml is not what stamping writes")
     return config
 
@@ -267,7 +270,7 @@ def load(root: str, name: str, entry: dict, installed_version: str) -> Copy:
             if rel != "config.yaml":
                 check_file(rel, files[rel])
         config = yaml.safe_load(files["config.yaml"].decode("utf-8")) if "config.yaml" in files else None
-    except (OSError, UnicodeDecodeError, yaml.YAMLError) as err:
-        raise CopyError(f"it cannot be read: {err}") from None
+    except (OSError, UnicodeDecodeError, yaml.YAMLError, RecursionError) as err:
+        raise CopyError(f"it cannot be read: {str(err)[:300]}") from None
     check(config, name, installed_version, channel, entry.get("bluetooth") is True)
     return Copy(meta=meta, config=config, files=files)

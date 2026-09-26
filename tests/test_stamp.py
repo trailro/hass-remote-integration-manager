@@ -264,13 +264,19 @@ class CopySaveTest(unittest.TestCase):
         stamped = stamp.dump(stamp.stamp(template(), "garage", "0.25.0", "release"), "t")
         for what, config in (("a privilege", stamped + b"full_access: true\n"),
                              ("a nested alias", stamped + f"map: {alias_bomb(25)}\n".encode()),  # the last map: counts
-                             ("not YAML", b"slug: [\n")):
+                             ("not YAML", b"slug: [\n"),
+                             # R2-18: stamping it again needs backup_exclude (KeyError); nesting past Python's recursion
+                             # limit (RecursionError): neither may escape as anything but CopyError
+                             ("no backup_exclude", stamp.dump({k: v for k, v in stamp.stamp(
+                                 template(), "garage", "0.25.0", "release").items() if k != "backup_exclude"}, "t")),
+                             ("nested too deep", stamped + b"options: " + b"[" * 1200 + b"]" * 1200 + b"\n")):
             with self.subTest(what=what):
                 root, save = self.save(config)
                 start = time.monotonic()
                 with self.assertRaises(copies.CopyError):
                     save()
-                self.assertLess(time.monotonic() - start, 0.1)
+                # an alias is never spelled out; a deep nesting is parsed until Python's recursion limit, no further
+                self.assertLess(time.monotonic() - start, 2 if what == "nested too deep" else 0.1)
                 self.assertEqual(os.listdir(root), [])
 
 
