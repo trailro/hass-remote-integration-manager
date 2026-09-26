@@ -42,6 +42,15 @@ Fixes from a second external review (of 0.1.2). Still **experimental**.
 - **Smaller fixes:** duplicate `allowed_users` entries are not reported as blank; "repaired", not "repaird"; a marked
   row offers no Repair it would refuse; refused archives are closed at once; one rule for translation names; copies
   half-written by a stop are tidied at the start.
+- **Code review of 0.1.3 before its release:** a `config.*` that is a link is always a decoy (the Supervisor resolves it
+  from its own mount); a git build's Dockerfile is patched from the archive, never read back from the folder; before
+  an install or update the store is made to read the folder again (a decoy removed with its date put back stayed in
+  the store); a file that vanishes while the folder is searched is skipped, and a search that cannot finish holds
+  the app instead of uninstalling it; a hold or containment keeps a start at boot you had turned off, and Check again
+  does not turn it on; a file the manager cannot read blocks installs and updates, with its path and what to do, but
+  not the start of a checked instance.
+- **Who is trusted:** the README and DOCS.md say plainly that anyone who can write the local apps folder as root is
+  fully trusted, and that the manager's checks of the folder are defence in depth, best effort against that person.
 
 ## 0.1.2
 
