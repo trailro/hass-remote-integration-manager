@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.1.4
+
+Still **experimental**.
+
+- **An Update or Rebuild refuses before it writes while a decoy is there.** With a decoy of another instance in the
+  local apps folder, 0.1.3 wrote the new definition first and refused at the check before the install; nothing was
+  installed, but the rollback reloaded the store. The check now comes before the update is flagged, the definition
+  written or the store reloaded, as 0.1.3's notes promised; so does the Update of an instance whose definition is
+  gone (after a restore).
+
 ## 0.1.3
 
 Fixes from a second external review (of 0.1.2). Still **experimental**.
