@@ -1201,6 +1201,31 @@ class DecoyFlowTest(FlowBase):
         self.assertEqual(env.stub.installed["local_hri_garage"]["version"], "0.25.0")
         self.assertEqual(self.config()["version"], "0.25.0")  # the previous definition is back
 
+    async def test_update_is_refused_before_it_writes_while_another_instance_s_decoy_is_there(self):
+        """An Update or Rebuild of one instance while a decoy of another is there: refused before it flags the update,
+        writes the new definition or reloads the store (its rollback reloaded it)."""
+        env = self.env
+        self.assertEqual((await self.create())["state"], "succeeded")
+        self.decoy(rel="x/config.yaml", slug="hri_attic", name="HRI Attic")
+        before = sorted(os.listdir(env.local_apps))
+        since = len(env.stub.calls)
+        job = await env.job(await env.send("POST", "/api/instances/garage/update", {"version": "0.25.1"}))
+        self.assertEqual(job["state"], "failed", job)
+        self.assertIn("'x/config.yaml' in the local apps folder declares", job["error"])
+        self.assertEqual(self.config()["version"], "0.25.0")
+        self.assertEqual(sorted(os.listdir(env.local_apps)), before)  # nothing set aside
+        self.assertIsNone(env.manager.registry.get("garage").get("updating"))
+        self.assertNotIn(("POST", "/store/reload", {}), env.stub.calls[since:])
+        self.assertFalse(self.called("/store/addons/local_hri_garage/update", since))
+        # an instance whose folder is gone (a restore): its Update writes nothing either
+        shutil.rmtree(self.folder())
+        since = len(env.stub.calls)
+        job = await env.job(await env.send("POST", "/api/instances/garage/update", {"version": "0.25.1"}))
+        self.assertEqual(job["state"], "failed", job)
+        self.assertIn("'x/config.yaml' in the local apps folder declares", job["error"])
+        self.assertFalse(os.path.exists(self.folder()))
+        self.assertNotIn(("POST", "/store/reload", {}), env.stub.calls[since:])
+
     async def test_a_decoy_that_appears_around_the_install_is_contained(self):
         """Between the manager's last look and the Supervisor's install, a reload by anyone (the Supervisor's own
         every 3 hours) can make the store take a decoy: found right after the install, the app is uninstalled."""

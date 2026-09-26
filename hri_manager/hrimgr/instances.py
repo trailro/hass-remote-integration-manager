@@ -1666,6 +1666,8 @@ class Manager:
                 raise JobFailed(f"commit {sha[:12]} has the same version {version} as the installed {marker.get('sha', '')[:12]}: "
                                 "the Supervisor would not install it")
             job.log(f"commit {sha[:12]}: version {version}")
+        # before the flag, the new definition and its rollback's store reload: not while a decoy is there
+        await self._refuse_decoys()
         new_marker = self._marker(managed.name, channel, version, new_ref, sha, source, user, previous=marker,
                                   bluetooth=bluetooth)
         recorded = {"tag_moved": None, "tampered": None, "history": self._history(new_marker["history"]),
@@ -2190,6 +2192,8 @@ class Manager:
         for.  If the update does not succeed the definition is removed again (the instance stays detached)."""
         slug = names.supervisor_slug(name)
         await self._refuse_marked_now(name)
+        # it writes a definition (and removes it again on failure, with a store reload): not while a decoy is there
+        await self._refuse_decoys()
         entry, info = await self._detached(job, name, "update")
         installed = str(info.get("version") or "")
         channel = entry.get("channel")
