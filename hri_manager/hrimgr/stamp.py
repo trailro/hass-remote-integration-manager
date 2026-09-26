@@ -363,7 +363,9 @@ def build_git(archive: tarsafe.Archive, dest: str, name: str, version: str, sha:
             pass
         children.write_file(dest, sub, data)
     children.write_file(dest, "config.yaml", dump(config, source))
-    text = children.read_file(dest, "Dockerfile")
+    # the archive's own bytes, never the file read back from the folder, which another writer of the local apps folder
+    # can swap during the build (one the manager does not rewrite is caught by children._finish_build)
+    text = archive.read("Dockerfile")
     patched, count = HRI_BUILD_ARG.subn(b"ARG HRI_BUILD=" + sha.encode("ascii"), text, count=1)
     if count:
         children.remove_file(dest, "Dockerfile")

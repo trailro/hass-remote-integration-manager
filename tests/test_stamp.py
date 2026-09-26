@@ -367,6 +367,45 @@ class BuildTest(unittest.TestCase):
             self.assertIn(f"ARG HRI_BUILD={sha}\n", fh.read())
         self.assertIn("removed 'app/config.yaml'", notes)
 
+    def test_a_dockerfile_swapped_during_a_git_build_is_never_installed(self):
+        """F2: the Dockerfile is patched from the archive's own bytes, never read back from the folder being built,
+        which a writer of the local apps folder can swap between the extraction and the patch.  A swap is then either
+        overwritten by the manager's patched bytes, or (a Dockerfile the manager does not patch) refused by the check
+        of what the build wrote."""
+        from unittest import mock
+        from .helpers import marker, new_registry, register
+
+        sha = sha_of("main")
+        evil = b"FROM example.com/evil/img\nARG HRI_BUILD=local\n"
+        for what, dockerfile in (("patched", None), ("not patched", b"FROM python:3.14-slim\n")):
+            with self.subTest(what=what):
+                root, registry = tmpdir(self), new_registry(self)
+                data = marker("garage", channel="git", version=names.git_version(sha), sha=sha)
+                register(registry, data)
+                files = hri_files() if dockerfile is None else {**hri_files(), "Dockerfile": dockerfile}
+                archive = self.archive(files, sha=sha)
+                extract = tarsafe.extract
+
+                def extract_then_swap(archive, dest):
+                    extract(archive, dest)
+                    with open(os.path.join(dest, "Dockerfile"), "wb") as fh:  # another writer, not the manager
+                        fh.write(evil)
+
+                def build(tmp):
+                    stamp.build_git(archive, tmp, "garage", names.git_version(sha), sha, "src")
+                    return data
+
+                with mock.patch.object(tarsafe, "extract", side_effect=extract_then_swap):
+                    try:
+                        children.write_new(root, "garage", build, registry)
+                    except children.DefinitionChanged:
+                        self.assertEqual(os.listdir(root), [])
+                        continue
+                with open(os.path.join(root, "hri_garage", "Dockerfile"), "rb") as fh:
+                    written = fh.read()
+                self.assertNotIn(b"evil", written)
+                self.assertIn(f"ARG HRI_BUILD={sha}\n".encode(), written)
+
     def test_git_trees_with_build_files_at_their_root_are_refused(self):
         """apparmor.txt replaces the default AppArmor profile, build.* sets base images and arguments, a
         Dockerfile.<arch> is built instead of the Dockerfile the manager patches."""
