@@ -8,6 +8,7 @@ import os
 from aiohttp.test_utils import TestClient, TestServer
 
 from hrimgr import supervisor
+from hrimgr.corews import CoreUsers
 from hrimgr.github import GitHub
 from hrimgr.instances import Manager
 from hrimgr.jobs import Jobs
@@ -15,9 +16,11 @@ from hrimgr.settings import Settings
 from hrimgr.supervisor import SupervisorClient
 from hrimgr.web import create_app
 
-from .fakes.stub import Stub
+from .fakes.stub import ALICE_ID, Stub
 
-HEADERS = {"X-Requested-With": "fetch", "X-Remote-User-Name": "alice"}
+# what the Supervisor's ingress sets for Home Assistant's administrator alice
+USER = {"X-Remote-User-Id": ALICE_ID, "X-Remote-User-Name": "alice"}
+HEADERS = {"X-Requested-With": "fetch", **USER}
 
 
 class Env:
@@ -41,23 +44,34 @@ class Env:
         self.sv = SupervisorClient(self.settings.supervisor_url, "test-token")
         self.gh = GitHub(os.path.join(self.data, "releases.json"), "", self.settings.github_api, self.settings.codeload)
         self.manager = Manager(self.local_apps, self.sv, self.gh, Jobs(), dev=True, poll_interval=0.02, store_timeout=2)
-        self.client = TestClient(TestServer(create_app(self.settings, self.manager)))
+        self.users = CoreUsers(self.settings.core_ws_url, "test-token")
+        self.client = TestClient(TestServer(create_app(self.settings, self.manager, self.users)), headers=USER)
         await self.client.start_server()
         return self
+
+    async def client_with(self, test, headers: dict | None = None, **settings) -> TestClient:
+        """Another client of the same manager, with other settings and default headers (none: no user)."""
+        for key, value in settings.items():
+            setattr(self.settings, key, value)
+        client = TestClient(TestServer(create_app(self.settings, self.manager, self.users)), headers=headers)
+        await client.start_server()
+        test.addAsyncCleanup(client.close)
+        return client
 
     async def close(self) -> None:
         await self.manager.jobs.wait_all()
         await self.client.close()
+        await self.users.close()
         await self.sv.close()
         await self.gh.close()
         await self.stub_server.close()
 
     async def get(self, path: str, **kw):
-        resp = await self.client.get(path, headers={"X-Remote-User-Name": "alice"}, **kw)
+        resp = await self.client.get(path, **kw)
         return resp.status, await resp.json()
 
     async def send(self, method: str, path: str, body: dict | None = None):
-        resp = await self.client.request(method, path, json=body or {}, headers=HEADERS)
+        resp = await self.client.request(method, path, json=body or {}, headers={"X-Requested-With": "fetch"})
         return resp.status, await resp.json()
 
     async def job(self, status_body) -> dict:

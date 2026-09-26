@@ -38,7 +38,8 @@ class AppConfigTest(unittest.TestCase):
         self.assertNotIn("webui", CONFIG)
         self.assertEqual(CONFIG["stage"], "experimental")
         self.assertEqual(sorted(CONFIG["arch"]), ["aarch64", "amd64"])
-        for key in ("host_network", "privileged", "full_access", "docker_api", "auth_api", "homeassistant_api", "devices", "uart"):
+        self.assertIs(CONFIG["homeassistant_api"], True)  # Core's config/auth/list: administrators only (corews.py)
+        for key in ("host_network", "privileged", "full_access", "docker_api", "auth_api", "devices", "uart"):
             self.assertNotIn(key, CONFIG)
 
     def test_development_mode_cannot_be_set_by_the_app(self):

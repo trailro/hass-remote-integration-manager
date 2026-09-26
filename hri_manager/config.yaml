@@ -22,6 +22,9 @@ arch:
 # the apps it created, recognised by the marker in their folder
 hassio_api: true
 hassio_role: manager
+# Core's websocket through the Supervisor's proxy, for one command: config/auth/list, to serve only Home Assistant's
+# administrators (the ingress headers say who asks, not whether they are one).  Costs no security rating
+homeassistant_api: true
 # the local apps folder, where each instance's definition is written (hri_<name>/)
 map:
   - type: local_apps

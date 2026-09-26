@@ -152,14 +152,25 @@ narrows itself, in code, and the tests pin it:
   archive, size and count caps).
 - **Network.** GitHub only: `api.github.com` (the release list, with the optional token) and `codeload.github.com`
   (source archives, never with the token); no redirect followed.
-- **UI.** Through Home Assistant's ingress only: the app publishes no port, and it serves a request only when the
-  connection comes from the Supervisor (`172.30.32.2`, checked on the socket, not in a header), so Home Assistant's
-  login is the gate. `allowed_users` narrows it to the users listed. State-changing requests need
-  `X-Requested-With: fetch` and a JSON body; the page's policy allows only its own scripts and styles and framing by
-  Home Assistant. Like every ingress app, the panel shares Home Assistant's origin with other apps' panels.
+- **Administrators only, checked by the app.** Through Home Assistant's ingress only: the app publishes no port, and
+  it serves a request only when the connection comes from the Supervisor (`172.30.32.2`, checked on the socket, not
+  in a header). Being logged in to Home Assistant is not enough: any user may open an app's ingress, and the panel
+  being hidden from non-administrators (`panel_admin`) is only cosmetic. So on every request, pages and API alike,
+  the manager takes the user id the Supervisor's ingress sets (`X-Remote-User-Id`; a request with two ids, or two user
+  names, is refused) and asks Home Assistant whether that user is an administrator: the command
+  `config/auth/list` on Core's websocket, through the Supervisor's proxy (`homeassistant_api: true`, which costs no
+  security rating), from which it computes `is_admin` as Core does (the owner, or an active member of the
+  administrators group). A small client with its own allow-list (`hrimgr/corews.py`) can send only the
+  authentication and that one command. The answer is cached for a minute. If Home Assistant cannot answer, the
+  answer has an unexpected shape or the user is unknown, the request gets 403: the check fails closed.
+  `allowed_users` narrows the administrators further. State-changing requests need `X-Requested-With: fetch` and a
+  JSON body; the page's policy allows only its own scripts and styles and framing by Home Assistant. Like every
+  ingress app, the panel shares Home Assistant's origin with other apps' panels.
 
 What remains: the token itself has the manager role, so code running inside this app's container could use it. The
-image contains only the manager (Python, aiohttp, PyYAML), built on your machine from this repository.
+image contains only the manager (Python, aiohttp, PyYAML), built on your machine from this repository. And the
+socket check trusts the hassio network: another app with the `NET_RAW` capability could spoof the Supervisor's
+address there (ARP spoofing), a risk of the platform that every ingress app shares.
 
 ## Limitations
 

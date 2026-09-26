@@ -8,6 +8,7 @@ import sys
 from aiohttp import web
 
 from . import VERSION, children
+from .corews import CoreUsers
 from .github import GitHub
 from .instances import Manager
 from .jobs import Jobs
@@ -39,7 +40,8 @@ def main() -> int:
         gh = GitHub(f"{settings.data_dir}/releases.json", settings.github_token, settings.github_api, settings.codeload)
         jobs = Jobs()
         manager = Manager(settings.local_apps, sv, gh, jobs, dev=settings.dev)
-        app = create_app(settings, manager)
+        users = CoreUsers(settings.core_ws_url, settings.supervisor_token)
+        app = create_app(settings, manager, users)
 
         async def close(_app: web.Application) -> None:
             for job in jobs.recent():
@@ -48,6 +50,7 @@ def main() -> int:
             await jobs.wait_all()
             await sv.close()
             await gh.close()
+            await users.close()
 
         app.on_cleanup.append(close)
         return app

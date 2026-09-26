@@ -4,11 +4,9 @@ fetch + JSON; the policy headers on every answer; the page and its assets."""
 import re
 import unittest
 
-from aiohttp.test_utils import TestClient, TestServer
-
 from hrimgr import web as mgrweb
 
-from .env import Env
+from .env import USER, Env
 from .helpers import tmpdir
 
 
@@ -20,12 +18,7 @@ class GuardTest(unittest.IsolatedAsyncioTestCase):
         await self.env.close()
 
     async def client_with(self, **settings):
-        for key, value in settings.items():
-            setattr(self.env.settings, key, value)
-        client = TestClient(TestServer(mgrweb.create_app(self.env.settings, self.env.manager)))
-        await client.start_server()
-        self.addAsyncCleanup(client.close)
-        return client
+        return await self.env.client_with(self, headers=USER, **settings)
 
     async def test_only_the_supervisor_peer(self):
         client = await self.client_with(peers=frozenset({"172.30.32.2"}))
@@ -49,7 +42,7 @@ class GuardTest(unittest.IsolatedAsyncioTestCase):
         client = await self.client_with(allowed_users=frozenset({"alice"}))
         for user, status in (("alice", 200), ("ALICE", 200), ("bob", 403), ("", 403), ("alice ", 403)):
             with self.subTest(user=user):
-                resp = await client.get("/", headers={"X-Remote-User-Name": user} if user else {})
+                resp = await client.get("/", headers={"X-Remote-User-Name": user})
                 self.assertEqual(resp.status, status)
 
     async def test_state_changes_need_fetch_and_json(self):

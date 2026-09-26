@@ -21,8 +21,11 @@ single hass-remote-integration app. Its port 8087 is off; map one on its **Netwo
 
 ## Options
 
-- `allowed_users`: the Home Assistant user names that may use the manager's panel. Empty: every Home Assistant user
-  who can open it (the panel shows for administrators).
+- `allowed_users`: narrows who may use the manager, by Home Assistant user name or user id (either, compared
+  without case). The manager is always for administrators only, whatever this option says: it asks Home Assistant
+  on every request, and a user who is not an administrator gets 403 even with the panel's address. Empty: every
+  administrator. A user name counts only when the request carries exactly one; users without a Home Assistant
+  login name (for example external logins) are matched by their id.
 - `github_token`: optional, raises GitHub's rate limit for the release list. A token without any scope is enough.
 - `debug`: more detail in the log.
 
@@ -30,6 +33,8 @@ single hass-remote-integration app. Its port 8087 is off; map one on its **Netwo
 
 The app has the Supervisor's **manager** role, which could stop or remove any app. The manager's code allows itself
 only the calls listed in the README's security section, and changes only the apps it created (their folder carries
-its marker). Its UI is reachable only through Home Assistant.
+its marker). Its UI is reachable only through Home Assistant, and only by Home Assistant's administrators: the panel
+is hidden from other users, and the app checks it on its side too, on every request (it asks Home Assistant, and
+refuses when it cannot).
 
 Full documentation: [README](https://github.com/trailro/hass-remote-integration-manager/blob/main/README.md).

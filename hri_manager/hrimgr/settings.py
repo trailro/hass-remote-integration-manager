@@ -44,6 +44,12 @@ class Settings:
     dev: bool = False
     secrets: tuple[str, ...] = field(default=(), repr=False)
 
+    @property
+    def core_ws_url(self) -> str:
+        """Core's websocket API behind the Supervisor's proxy (ws://supervisor/core/websocket)."""
+        base = self.supervisor_url.rstrip("/")
+        return ("wss" + base[5:] if base.startswith("https") else "ws" + base[4:]) + "/core/websocket"
+
 
 def _peer(value: str) -> str:
     try:

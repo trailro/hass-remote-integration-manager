@@ -17,4 +17,6 @@ First release, **experimental**.
 - Lists the published hass-remote-integration app, and other local apps named like instances, without touching
   them.
 - Security: the manager role is restricted in code to an allow-list of Supervisor calls, and only apps whose
-  folder carries the manager's marker are ever changed. The UI is served only through Home Assistant's ingress.
+  folder carries the manager's marker are ever changed. The UI is served only through Home Assistant's ingress, and
+  only to Home Assistant's administrators: the app asks Home Assistant on every request and refuses when it cannot
+  tell.

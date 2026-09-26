@@ -2,8 +2,9 @@
 
     python -m tests.fakes.stub --local-apps DIR --port 8080 [--host 127.0.0.1] [--token TOKEN]
 
-Paths: ``/sv/...`` is the Supervisor (the manager's supervisor URL is ``http://host:port/sv``), ``/gh/...`` the GitHub
-API, ``/cl/...`` codeload.  The Supervisor part reads the local apps folder on ``POST /store/reload`` the way the real
+Paths: ``/sv/...`` is the Supervisor (the manager's supervisor URL is ``http://host:port/sv``), with Core's websocket
+behind its proxy at ``/sv/core/websocket`` (only ``auth`` and ``config/auth/list``), ``/gh/...`` the GitHub API,
+``/cl/...`` codeload.  The Supervisor part reads the local apps folder on ``POST /store/reload`` the way the real
 one does (every config.* outside dot folders; slug ``local_<slug>``), and answers only the endpoints the manager's
 allow-list names; everything else is a 404 recorded in ``unexpected``.  ``/_stub/...`` is for the tests' eyes only."""
 
@@ -31,6 +32,22 @@ EXTERNAL = {
     "local_hri_foreign": {"slug": "local_hri_foreign", "name": "Someone's own app", "version": "1.0.0", "state": "stopped",
                           "url": "https://example.com/own-app", "repository": "local"},
 }
+# Home Assistant's users as config/auth/list answers them: an administrator, a user, an owner outside the admin group
+# (an administrator all the same) and a deactivated administrator (not one)
+ALICE_ID = "a11ce00000000000000000000000a11c"
+BOB_ID = "b0b00000000000000000000000000b0b"
+OLGA_ID = "01ga0000000000000000000000001ga0"
+DAVE_ID = "da7e00000000000000000000000da7e0"
+
+
+def core_user(uid: str, username: str | None, owner: bool = False, active: bool = True, groups=("system-users",)) -> dict:
+    return {"id": uid, "username": username, "name": (username or "someone").title(), "is_owner": owner,
+            "is_active": active, "local_only": False, "system_generated": False, "group_ids": list(groups),
+            "credentials": [{"type": "homeassistant"}] if username else []}
+
+
+USERS = [core_user(ALICE_ID, "alice", groups=("system-admin",)), core_user(BOB_ID, "bob"),
+         core_user(OLGA_ID, "olga", owner=True, groups=()), core_user(DAVE_ID, "dave", active=False, groups=("system-admin",))]
 
 
 def ok(data=None) -> web.Response:
@@ -54,6 +71,10 @@ class Stub:
         self.fail: dict[tuple[str, str], str] = {}  # (method, supervisor path) -> error message, once
         self.releases = ["0.24.0", "0.25.0", "0.25.1", "0.26.0b1"]
         self.refs = {"main": sha_of("main-1")}
+        self.users: object = [dict(u) for u in USERS]  # what config/auth/list answers (tests put other shapes here)
+        self.core_down = False
+        self.ws_messages: list[object] = []  # every message the manager sent to Core
+        self.ws_connections = 0
 
     # ---------------------------------------------------------------- Supervisor
 
@@ -85,7 +106,8 @@ class Stub:
 
     @web.middleware
     async def _auth(self, request: web.Request, handler):
-        if request.path.startswith("/sv/"):
+        # Core's websocket authenticates in its first message, as the Supervisor's proxy does
+        if request.path.startswith("/sv/") and request.path != "/sv/core/websocket":
             if request.headers.get("Authorization") != f"Bearer {self.token}":
                 return err("unauthorized", 401)
             path = request.path[len("/sv"):]
@@ -184,6 +206,31 @@ class Stub:
     async def info(self, request):
         return ok({"supervisor": "2026.09.3", "homeassistant": "2026.9.3", "hassos": "18.3", "arch": "amd64", "machine": "qemux86-64"})
 
+    async def core_websocket(self, request):
+        self.ws_connections += 1
+        ws = web.WebSocketResponse()
+        await ws.prepare(request)
+        await ws.send_json({"type": "auth_required", "ha_version": "2026.9.3"})
+        msg = await ws.receive()
+        auth = json.loads(msg.data) if msg.type == web.WSMsgType.TEXT else None
+        self.ws_messages.append(auth)
+        if self.core_down or not isinstance(auth, dict) or auth.get("access_token") != self.token:
+            await ws.send_json({"type": "auth_invalid", "message": "Invalid access"})
+            await ws.close()
+            return ws
+        await ws.send_json({"type": "auth_ok", "ha_version": "2026.9.3"})
+        async for msg in ws:
+            if msg.type != web.WSMsgType.TEXT:
+                break
+            data = json.loads(msg.data)
+            self.ws_messages.append(data)
+            if data.get("type") == "config/auth/list":
+                await ws.send_json({"id": data.get("id"), "type": "result", "success": True, "result": self.users})
+            else:
+                await ws.send_json({"id": data.get("id"), "type": "result", "success": False,
+                                    "error": {"code": "unknown_command", "message": "Unknown command."}})
+        return ws
+
     async def unexpected_call(self, request):
         self.unexpected.append((request.method, request.path))
         return err("not implemented by the stub", 404)
@@ -246,6 +293,7 @@ class Stub:
         app.router.add_post(f"/sv/store/addons/{slug}/{{action:install|update}}", self.store_action)
         app.router.add_get("/sv/supervisor/info", self.supervisor_info)
         app.router.add_get("/sv/info", self.info)
+        app.router.add_get("/sv/core/websocket", self.core_websocket)
         app.router.add_get("/gh/repos/trailro/hass-remote-integration/releases", self.gh_releases)
         app.router.add_get("/cl/trailro/hass-remote-integration/tar.gz/{ref:.+}", self.codeload)
         app.router.add_get("/_stub/state", self.stub_state)

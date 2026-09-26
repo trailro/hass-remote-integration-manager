@@ -14,13 +14,15 @@ import urllib.request
 sys.path.insert(0, "/src/hri_manager")
 
 MGR, STUB = sys.argv[1].rstrip("/"), sys.argv[2].rstrip("/")
-USER = {"X-Remote-User-Name": "alice"}
+# what the Supervisor's ingress sets: the ids of the stub's users (tests/fakes/stub.py USERS)
+ALICE_ID, BOB_ID = "a11ce00000000000000000000000a11c", "b0b00000000000000000000000000b0b"
+USER = {"X-Remote-User-Id": ALICE_ID, "X-Remote-User-Name": "alice"}
 FAILED = []
 
 
-def call(method, url, body=None, headers=None):
+def call(method, url, body=None, headers=None, user=None):
     data = json.dumps(body).encode() if body is not None else None
-    req = urllib.request.Request(url, data=data, method=method, headers={**USER, **(headers or {})})
+    req = urllib.request.Request(url, data=data, method=method, headers={**(USER if user is None else user), **(headers or {})})
     try:
         with urllib.request.urlopen(req, timeout=60) as resp:
             return resp.status, resp.read().decode()
@@ -65,6 +67,8 @@ def stub(path, body=None):
 def main() -> int:
     status, html = call("GET", f"{MGR}/")
     check("the page loads", status == 200 and "static/mgr.js?v=" in html, status)
+    status, text = call("GET", f"{MGR}/", user={"X-Remote-User-Id": BOB_ID, "X-Remote-User-Name": "bob"})
+    check("a Home Assistant user who is not an administrator gets 403", status == 403 and "administrators" in text, status)
     status, s = api("GET", "api/status")
     check("status: dev mode, role, map", status == 200 and s["dev"] and s["role_ok"] and s["map_ok"], s)
     status, r = api("GET", "api/releases")

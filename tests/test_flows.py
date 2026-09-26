@@ -255,6 +255,7 @@ class FlowTest(unittest.IsolatedAsyncioTestCase):
             resp = await env.client.get(path)
             text = await resp.text()
             with self.subTest(path=path):
+                self.assertEqual(resp.status, 200)
                 self.assertNotIn("child-secret-password", text)
                 self.assertNotIn("never-shown", text)
                 self.assertNotIn("test-token", text)

@@ -1,11 +1,18 @@
-"""The web UI and API, served only through Home Assistant's ingress.
+"""The web UI and API, served only through Home Assistant's ingress, and only to Home Assistant's administrators.
 
-Home Assistant's login is the gate: the app publishes no port, and a request is served only when its TRANSPORT peer
-(not a header) is the Supervisor, which proxies ingress from the hassio network.  ``allowed_users`` narrows it to
-the Home Assistant users listed (the Supervisor sets ``X-Remote-User-Name`` from the ingress session and drops a
-client's own).  A state-changing request needs ``X-Requested-With: fetch`` and a JSON body, which a form or a
-cross-site page cannot send without a CORS preflight this app never answers.  Every URL the page uses is relative:
-ingress serves it under a prefix the request never shows."""
+The app publishes no port, and a request is served only when its TRANSPORT peer (not a header) is the Supervisor,
+which proxies ingress from the hassio network.  Being logged in to Home Assistant is not enough: any user may open an
+app's ingress (``panel_admin`` only hides the panel), so every request, page and API alike, is checked here:
+
+- the Supervisor sets ``X-Remote-User-Id`` from the ingress session, first; a client's own copy in another spelling
+  arrives as a second value, so a request with more than one id (or more than one ``X-Remote-User-Name``) is refused;
+- Core says whether that id is an administrator (corews.py: ``config/auth/list`` through the Supervisor's proxy);
+  when Core cannot say, the request is refused: the guard fails closed;
+- ``allowed_users`` narrows the administrators further, by user id or user name.
+
+A state-changing request needs ``X-Requested-With: fetch`` and a JSON body, which a form or a cross-site page cannot
+send without a CORS preflight this app never answers.  Every URL the page uses is relative: ingress serves it under a
+prefix the request never shows."""
 
 from __future__ import annotations
 
@@ -14,10 +21,12 @@ import ipaddress
 import json
 import logging
 import os
+import re
 
 from aiohttp import web
 
 from . import VERSION, names
+from .corews import CoreError, CoreUsers
 from .github import GitHubError
 from .instances import InvalidRequest, Manager
 from .jobs import Busy
@@ -31,11 +40,13 @@ ASSETS = {"mgr.css": "text/css", "mgr.js": "application/javascript"}
 CSP = ("default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; "
        "object-src 'none'; base-uri 'none'; frame-ancestors 'self'; form-action 'self'")
 USER_HEADER = "X-Remote-User-Name"
+USER_ID_HEADER = "X-Remote-User-Id"
+USER_ID_RE = re.compile(r"[A-Za-z0-9_-]{1,64}")
 READ_ONLY = frozenset({"GET", "HEAD"})
 MAX_BODY = 64 * 1024
 SETTINGS_KEY = web.AppKey("settings", Settings)
 MANAGER_KEY = web.AppKey("manager", Manager)
-USER_KEY = web.RequestKey("user", str)  # the Home Assistant user name of the request, "" when none
+USER_KEY = web.RequestKey("user", str)  # the Home Assistant user name of the request (its id when it has none)
 
 
 def _asset_version() -> str:
@@ -77,7 +88,33 @@ def _refuse(status: int, text: str) -> web.Response:
     return response
 
 
-def make_guard(settings: Settings):
+async def _identify(request: web.Request, settings: Settings, users: CoreUsers) -> str | web.Response:
+    """The request's Home Assistant administrator (their name, or their id), or the 403 that refuses it."""
+    where = f"{request.method} {request.path}"
+    ids = request.headers.getall(USER_ID_HEADER, [])
+    user_names = request.headers.getall(USER_HEADER, [])
+    if len(ids) != 1 or len(user_names) > 1 or not USER_ID_RE.fullmatch(ids[0]):
+        _LOGGER.warning("refused %s: %d user id(s) and %d user name(s) in the request, not one", where, len(ids), len(user_names))
+        return _refuse(403, "HRI Manager could not tell which Home Assistant user is asking. Open it from Home "
+                            "Assistant's sidebar.")
+    user_id, name = ids[0], (user_names[0] if user_names else "")
+    try:
+        user = await users.user(user_id)
+    except CoreError as err:
+        _LOGGER.warning("refused %s: could not check the user with Home Assistant: %s", where, err)
+        return _refuse(403, "HRI Manager could not check with Home Assistant that you are an administrator, so it "
+                            "refuses the request. Try again in a moment; the app's log says why.")
+    if not user.is_admin:
+        _LOGGER.warning("refused %s: Home Assistant user %r is not an administrator", where, name[:64] or user_id)
+        return _refuse(403, "HRI Manager is for Home Assistant administrators only.")
+    if settings.allowed_users and user_id.casefold() not in settings.allowed_users \
+            and (not name or name.casefold() not in settings.allowed_users):
+        _LOGGER.warning("refused %s: Home Assistant user %r is not in allowed_users", where, name[:64] or user_id)
+        return _refuse(403, "This Home Assistant user may not use HRI Manager (the app's allowed_users option).")
+    return name or user_id
+
+
+def make_guard(settings: Settings, users: CoreUsers):
     @web.middleware
     async def guard(request: web.Request, handler):
         peer = transport_peer(request)
@@ -86,11 +123,10 @@ def make_guard(settings: Settings):
         if peer not in settings.peers:
             _LOGGER.warning("refused %s %s from %s: not the Supervisor's ingress", request.method, request.path, peer)
             return _refuse(403, "HRI Manager is served only through Home Assistant (the sidebar panel).")
-        user = request.headers.get(USER_HEADER, "")
-        if settings.allowed_users and user.casefold() not in settings.allowed_users:
-            _LOGGER.warning("refused %s %s: Home Assistant user %r is not in allowed_users", request.method, request.path, user)
-            return _refuse(403, "This Home Assistant user may not use HRI Manager (the app's allowed_users option).")
-        request[USER_KEY] = user
+        who = await _identify(request, settings, users)
+        if isinstance(who, web.Response):
+            return who
+        request[USER_KEY] = who
         if request.method not in READ_ONLY:
             if request.method not in ("POST", "DELETE"):
                 return _refuse(405, "method not allowed")
@@ -235,8 +271,8 @@ async def api_jobs(request: web.Request) -> web.Response:
     return _json({"ok": True, "jobs": [j.as_dict() | {"lines": j.lines[-3:]} for j in _manager(request).jobs.recent()[:20]]})
 
 
-def create_app(settings: Settings, manager: Manager) -> web.Application:
-    app = web.Application(middlewares=[make_guard(settings)], client_max_size=MAX_BODY)
+def create_app(settings: Settings, manager: Manager, users: CoreUsers) -> web.Application:
+    app = web.Application(middlewares=[make_guard(settings, users)], client_max_size=MAX_BODY)
     app[SETTINGS_KEY] = settings
     app[MANAGER_KEY] = manager
     name = names.NAME_RE.pattern

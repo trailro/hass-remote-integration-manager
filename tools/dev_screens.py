@@ -3,20 +3,22 @@
     python tools/dev_screens.py <manager URL> <output folder>
 
 Run by tools/dev_smoke.sh in a Playwright container whose address is one of the manager's development peers.  The
-page is loaded as Home Assistant's ingress would serve it, with a Home Assistant user name header."""
+page is loaded as Home Assistant's ingress would serve it, with the Home Assistant user headers of an administrator."""
 
 import sys
 
 from playwright.sync_api import sync_playwright
 
 URL, OUT = sys.argv[1].rstrip("/") + "/", sys.argv[2].rstrip("/")
+# the Supervisor's ingress headers for the stub's administrator alice (tests/fakes/stub.py USERS)
+USER = {"X-Remote-User-Id": "a11ce00000000000000000000000a11c", "X-Remote-User-Name": "alice"}
 
 
 def main() -> int:
     errors = []
     with sync_playwright() as p:
         browser = p.chromium.launch()
-        ctx = browser.new_context(viewport={"width": 1280, "height": 900}, extra_http_headers={"X-Remote-User-Name": "alice"})
+        ctx = browser.new_context(viewport={"width": 1280, "height": 900}, extra_http_headers=USER)
         page = ctx.new_page()
         page.on("console", lambda m: errors.append(m.text) if m.type == "error" else None)
         page.on("pageerror", lambda e: errors.append(str(e)))
@@ -51,7 +53,7 @@ def main() -> int:
         page.fill("#c-ref", "main")
         page.screenshot(path=f"{OUT}/06-git-form.png", clip={"x": 0, "y": 0, "width": 1280, "height": 900})
 
-        mobile = browser.new_context(viewport={"width": 390, "height": 844}, extra_http_headers={"X-Remote-User-Name": "alice"})
+        mobile = browser.new_context(viewport={"width": 390, "height": 844}, extra_http_headers=USER)
         mp = mobile.new_page()
         mp.goto(URL)
         mp.wait_for_selector("#inst tbody tr")
