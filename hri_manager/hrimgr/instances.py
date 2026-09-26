@@ -1010,7 +1010,7 @@ class Manager:
             raise JobFailed(f"the definition was not written: {err}") from None
         expected = stamp.expected_view(built["config"], managed.slug)
         try:
-            managed = children.load_managed(self.root, managed.name, self.registry)
+            managed = await asyncio.to_thread(children.load_managed, self.root, managed.name, self.registry)
             await self._wait_store(job, managed.slug, version, replacement.manifest)
             if info.get("version") != version:
                 await self._verify_store(job, managed, expected, replacement.manifest)

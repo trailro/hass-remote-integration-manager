@@ -17,6 +17,7 @@ from __future__ import annotations
 import dataclasses
 import datetime as _dt
 import errno
+import fcntl
 import hashlib
 import json
 import os
@@ -109,6 +110,21 @@ def check_registry(marker: dict, registry: Registry, name: str) -> dict:
     return entry
 
 
+def open_regular(path: str, dir_fd: int | None = None) -> int:
+    """A descriptor of the regular file ``path`` (relative to ``dir_fd``), for reading: opened without following a
+    link and without blocking (a FIFO put in its place would block an open forever), then checked with fstat.
+    UnsafePath for anything but a regular file; OSError as os.open raises it."""
+    fd = os.open(path, os.O_RDONLY | _NOFOLLOW | _CLOEXEC | os.O_NONBLOCK, dir_fd=dir_fd)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise UnsafePath(f"{os.path.basename(path)!r} is not a regular file")
+        fcntl.fcntl(fd, fcntl.F_SETFL, fcntl.fcntl(fd, fcntl.F_GETFL) & ~os.O_NONBLOCK)
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
 def read_marker(folder: str, name: str) -> dict:
     try:
         folder_fd = os.open(folder, _DIR_FLAGS)
@@ -119,9 +135,11 @@ def read_marker(folder: str, name: str) -> dict:
             raise NotManaged(f"{names.folder_name(name)} is not a folder") from None
         raise NotManaged(f"{names.folder_name(name)} cannot be read: {err.strerror}") from None
     try:
-        fd = os.open(MARKER, os.O_RDONLY | _NOFOLLOW | _CLOEXEC, dir_fd=folder_fd)
+        fd = open_regular(MARKER, folder_fd)
     except FileNotFoundError:
         raise NotManaged(f"{names.folder_name(name)} has no {MARKER}") from None
+    except UnsafePath:
+        raise NotManaged(f"{MARKER} of {names.folder_name(name)} is not a small regular file") from None
     except OSError as err:
         if err.errno == errno.ELOOP:
             raise NotManaged(f"{MARKER} of {names.folder_name(name)} is a link") from None
@@ -299,12 +317,10 @@ def read_file(base: str, rel: str) -> bytes:
     """The regular file ``rel`` below ``base``, never through a link."""
     folder_fd, leaf = _in_folder(base, rel, False)
     try:
-        fd = os.open(leaf, os.O_RDONLY | _NOFOLLOW | _CLOEXEC, dir_fd=folder_fd)
+        fd = open_regular(leaf, folder_fd)
     finally:
         os.close(folder_fd)
     with os.fdopen(fd, "rb") as fh:
-        if not stat.S_ISREG(os.fstat(fh.fileno()).st_mode):
-            raise UnsafePath(f"{rel!r} is not a regular file")
         return fh.read()
 
 
@@ -415,8 +431,7 @@ def digest_tree(folder: str) -> dict[str, str]:
                 out[rel] = "dir"
             elif stat.S_ISREG(mode):
                 digest = hashlib.sha256()
-                fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
-                with os.fdopen(fd, "rb") as fh:
+                with os.fdopen(open_regular(path), "rb") as fh:
                     for chunk in iter(lambda: fh.read(1024 * 1024), b""):
                         digest.update(chunk)
                 out[rel] = "sha256:" + digest.hexdigest()
