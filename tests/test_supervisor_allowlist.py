@@ -3,6 +3,7 @@ an app needs the Managed (checked marker) of that app's slug, bodies carry only 
 an app's info holds beyond the listed fields (its options: an instance's password) never leaves the client."""
 
 import asyncio
+import json
 import os
 import unittest
 from unittest import mock
@@ -10,6 +11,7 @@ from unittest import mock
 from hrimgr import children, supervisor
 from hrimgr.supervisor import NotAllowed, SupervisorClient, authorize
 
+from .fakes.stub import captured
 from .helpers import make_child, new_registry, tmpdir
 
 # the allow-list, pinned: a rule added or widened must be added here too, with a reason in supervisor.py
@@ -311,6 +313,20 @@ class AllowListTest(unittest.TestCase):
         self.assertEqual(ctx.exception.status, 400)
         missing = SupervisorClient("http://s", "t", session=RecordingSession(status=404, body=b'{"result":"error","message":"App does not exist"}'))
         self.assertIsNone(asyncio.run(missing.store_app("local_hri_garage")))
+
+    def test_the_store_entry_as_a_real_supervisor_sends_it(self):
+        """GET /store/addons/<slug> of Supervisor 2026.09.2, captured: its version is the INSTALLED version (null
+        before the install); the definition's is version_latest, which is what the manager waits for."""
+        for fixture, latest in (("store_app_not_installed.json", "0.25.0"), ("store_app_installed.json", "0.25.0")):
+            real = captured(fixture)
+            session = RecordingSession(status=real["status"], body=json.dumps(real["answer"]).encode())
+            entry = asyncio.run(SupervisorClient("http://s", "t", session=session).store_app("local_hri_garage"))
+            with self.subTest(fixture=fixture):
+                self.assertEqual(entry["version_latest"], latest)
+                self.assertNotIn("version", entry)  # the installed version, under a name that invites the mistake
+        real = captured("store_app_missing.json")
+        session = RecordingSession(status=real["status"], body=json.dumps(real["answer"]).encode())
+        self.assertIsNone(asyncio.run(SupervisorClient("http://s", "t", session=session).store_app("local_hri_nosuch")))
 
 
 if __name__ == "__main__":

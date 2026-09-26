@@ -224,14 +224,16 @@ class SupervisorClient:
         return pick(await self.call("GET", f"/addons/{slug}/info"), INFO_FIELDS)
 
     async def store_app(self, slug: str) -> dict | None:
-        """The store's entry of a local app, or None while the store does not know it."""
+        """The store's entry of a local app, or None while the store does not know it.  ``version_latest`` is the
+        version of the definition the store read; the Supervisor's ``version`` here is the INSTALLED app's (null
+        before the install), so it is not passed on (tests/fixtures/supervisor/store_app_*.json)."""
         try:
             data = await self.call("GET", f"/store/addons/{slug}")
         except SupervisorError as err:
             if err.status in (400, 404):
                 return None
             raise
-        return pick(data, ("slug", "name", "version", "installed", "available", "update_available", "build", "url"))
+        return pick(data, ("slug", "name", "version_latest", "installed", "available", "update_available", "build", "url"))
 
     async def reload_store(self) -> None:
         await self.call("POST", "/store/reload")

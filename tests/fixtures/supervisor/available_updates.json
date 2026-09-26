@@ -1,0 +1,11 @@
+{
+ "answer": {
+  "data": {
+   "available_updates": []
+  },
+  "result": "ok"
+ },
+ "method": "GET",
+ "path": "/available_updates",
+ "status": 200
+}

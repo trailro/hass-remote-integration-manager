@@ -276,7 +276,7 @@ class Manager:
         reloaded_again = False
         while True:
             entry = await self.sv.store_app(slug)
-            if entry and entry.get("version") == version:
+            if entry and entry.get("version_latest") == version:
                 job.log(f"the store has {slug} {version}")
                 return
             if waited >= self.store_timeout:

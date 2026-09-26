@@ -1,0 +1,171 @@
+{
+ "answer": {
+  "data": {
+   "advanced": false,
+   "apparmor": "default",
+   "arch": [
+    "aarch64",
+    "amd64"
+   ],
+   "audio": false,
+   "audio_input": null,
+   "audio_output": null,
+   "auth_api": false,
+   "auto_update": false,
+   "available": true,
+   "boot": "auto",
+   "boot_config": "auto",
+   "build": false,
+   "changelog": true,
+   "description": "Run one Home Assistant integration in its own container, mirrored to your Home Assistant over MQTT",
+   "detached": false,
+   "devices": [],
+   "devicetree": false,
+   "discovery": [],
+   "dns": [
+    "local-hri-garage.local.hass.io"
+   ],
+   "docker_api": false,
+   "documentation": true,
+   "full_access": false,
+   "gpio": false,
+   "hassio_api": false,
+   "hassio_role": "default",
+   "homeassistant": "2025.10.0",
+   "homeassistant_api": false,
+   "host_dbus": false,
+   "host_ipc": false,
+   "host_network": false,
+   "host_pid": false,
+   "host_uts": false,
+   "hostname": "local-hri-garage",
+   "icon": false,
+   "ingress": true,
+   "ingress_entry": "/api/hassio_ingress/0000000000000000000000000000000000000000000",
+   "ingress_panel": true,
+   "ingress_port": 8087,
+   "ingress_url": "/api/hassio_ingress/0000000000000000000000000000000000000000000/",
+   "ip_address": "198.51.100.2",
+   "kernel_modules": false,
+   "logo": false,
+   "long_description": null,
+   "machine": [],
+   "name": "HRI Garage",
+   "network": {
+    "8087/tcp": null
+   },
+   "network_description": {
+    "8087/tcp": "Web UI and API"
+   },
+   "options": {
+    "cookie_secure": false,
+    "debug": false,
+    "ha_version_latest": true
+   },
+   "privileged": [],
+   "protected": true,
+   "rating": 7,
+   "repository": "local",
+   "schema": [
+    {
+     "format": "password",
+     "name": "password",
+     "optional": true,
+     "type": "string"
+    },
+    {
+     "name": "apt_packages",
+     "optional": true,
+     "type": "string"
+    },
+    {
+     "lengthMin": 1.0,
+     "name": "call_timeout",
+     "optional": true,
+     "type": "integer"
+    },
+    {
+     "name": "ha_version_latest",
+     "required": true,
+     "type": "boolean"
+    },
+    {
+     "name": "debug",
+     "required": true,
+     "type": "boolean"
+    },
+    {
+     "name": "cookie_secure",
+     "required": true,
+     "type": "boolean"
+    },
+    {
+     "multiple": true,
+     "name": "ingress_users",
+     "optional": true,
+     "type": "string"
+    }
+   ],
+   "services": [],
+   "signed": false,
+   "slug": "local_hri_garage",
+   "stage": "stable",
+   "startup": "application",
+   "state": "started",
+   "stdin": false,
+   "system_managed": false,
+   "system_managed_config_entry": null,
+   "translations": {
+    "en": {
+     "configuration": {
+      "apt_packages": {
+       "description": "Installed at boot, before Home Assistant, for what pip cannot install, such as ffmpeg (HRI_APT_PACKAGES). Names separated by spaces or commas.",
+       "name": "Debian packages"
+      },
+      "call_timeout": {
+       "description": "Seconds a service call or command may take before it is reported as a timeout (HRI_CALL_TIMEOUT). Empty means 60.",
+       "name": "Service call timeout"
+      },
+      "cookie_secure": {
+       "description": "Mark the session cookie Secure, behind a reverse proxy with TLS (HRI_COOKIE_SECURE).",
+       "name": "Secure session cookie"
+      },
+      "debug": {
+       "description": "Debug logging for the manager, and blocking-call detection (HRI_DEBUG).",
+       "name": "Debug logging"
+      },
+      "ha_version_latest": {
+       "description": "Off installs the image's default Home Assistant on a fresh app instead of the newest (HA_VERSION_LATEST).",
+       "name": "Newest Home Assistant on first boot"
+      },
+      "ingress_users": {
+       "description": "Only these Home Assistant users (their user names) may open the sidebar panel (HRI_INGRESS_USERS). Empty means every Home Assistant user. The app's port keeps its own password.",
+       "name": "Home Assistant users (sidebar panel)"
+      },
+      "password": {
+       "description": "Password for the web UI and API on the app's port (HRI_PASSWORD). Empty means no login there. The sidebar panel always uses Home Assistant's login.",
+       "name": "Password"
+      }
+     },
+     "network": {
+      "8087/tcp": "Web UI and API"
+     }
+    }
+   },
+   "uart": true,
+   "udev": false,
+   "update_available": false,
+   "url": "https://github.com/trailro/hass-remote-integration",
+   "usb": false,
+   "version": "0.25.0",
+   "version_latest": "0.25.0",
+   "video": false,
+   "watchdog": true,
+   "webui": null
+  },
+  "result": "ok"
+ },
+ "method": "GET",
+ "path": "/addons/local_hri_garage/info",
+ "status": 200
+}
