@@ -216,6 +216,17 @@ class AliasTest(unittest.TestCase):
         err = self.refused_quickly(lambda: stamp.vet_template({"map": yaml.safe_load(alias_bomb(self.LEVELS))}))
         self.assertIsInstance(err, stamp.TemplateError)
 
+    def test_a_template_with_a_nested_alias_slug_is_refused_at_once(self):
+        """R2-17: the slug is checked before the template is vetted; its refusal must not spell it out either."""
+        doc = yaml.safe_dump({k: v for k, v in template().items() if k != "slug"}) + f"slug: {alias_bomb(self.LEVELS)}\n"
+        err = self.refused_quickly(lambda: stamp.parse_template(doc.encode()))
+        self.assertIsInstance(err, stamp.TemplateError)
+        self.assertIn("has a slug of type list, not 'hass_remote_integration'", str(err))
+        self.assertLess(len(str(err)), 200)
+        err = self.refused_quickly(lambda: stamp.parse_template(
+            (yaml.safe_dump({**template(), "slug": "x" * 5000})).encode()))
+        self.assertLess(len(str(err)), 200)
+
     def test_a_copy_with_a_nested_alias_is_refused_at_once(self):
         config = yaml.safe_load(stamp.dump(stamp.stamp(template(), "garage", "0.25.0", "release"), "t"))
         for key in ("map", "version", "arch", "options"):
