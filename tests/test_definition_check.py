@@ -896,6 +896,25 @@ class DecoyScanTest(unittest.TestCase):
         self.assertLess(time.monotonic() - started, 2)
         self.assertLess(len(decoy.problem), 400)
 
+    def test_what_vanishes_while_the_folder_is_searched_is_skipped(self):
+        """F4: a file or folder removed while the search runs (another job, an editor's temporary file) is skipped, as
+        the Supervisor's glob skips it, not a folder that cannot be searched."""
+        write(os.path.join(self.root, "a", "gone.txt"), b"x")
+        os.makedirs(os.path.join(self.root, "b", "gone_dir"))
+        write(os.path.join(self.root, "c", "config.yaml"), b"slug: hri_garage\n")
+        real_stat = os.stat
+
+        def vanish(path, *args, **kw):
+            if path == "gone.txt":
+                os.unlink(os.path.join(self.root, "a", "gone.txt"))
+            result = real_stat(path, *args, **kw)
+            if path == "gone_dir":
+                os.rmdir(os.path.join(self.root, "b", "gone_dir"))  # listed and stat'ed, gone before it is opened
+            return result
+
+        with mock.patch("os.stat", side_effect=vanish):
+            self.assertEqual(self.found(), {"c/config.yaml": "hri_garage"})
+
     def test_a_folder_too_deep_or_too_large_cannot_be_searched(self):
         path = self.root
         for _ in range(stamp.MAX_SCAN_DEPTH + 1):
@@ -1051,6 +1070,29 @@ class DecoyFlowTest(FlowBase):
         self.assertIn("uninstalled at once", job["error"])
         self.assertNotIn("local_hri_garage", env.stub.installed)
         self.assertFalse(self.called("/addons/local_hri_garage/start"))
+
+    async def test_a_search_that_fails_around_the_install_holds_it_never_contains_it(self):
+        """F4: the folder cannot be searched right after the install (twice: it is tried again once).  That is not a
+        decoy found: the app is held (stopped, marked as not checked, kept installed), not uninstalled."""
+        env = self.env
+        decoys = stamp.decoys
+
+        def after_install(root):
+            if "local_hri_garage" in env.stub.installed:
+                raise stamp.ScanError("the local apps folder could not be searched: 'x' is more than 40 folders deep")
+            return decoys(root)
+
+        with mock.patch.object(stamp, "decoys", side_effect=after_install):
+            job = await self.create()
+        self.assertEqual(job["state"], "failed", job)
+        self.assertIn("could not be searched", job["error"])
+        self.assertNotIn("uninstalled", job["error"])
+        self.assertIn("local_hri_garage", env.stub.installed)
+        self.assertNotIn(("POST", "/addons/local_hri_garage/uninstall", {"remove_config": False}), env.stub.calls)
+        mark = env.registry.get("garage")["tampered"]
+        self.assertEqual((mark["unverified"], mark["uninstalled"]), (True, False))
+        job = await env.job(await env.send("POST", "/api/instances/garage/finish"))  # searchable again: Check again
+        self.assertEqual(job["state"], "succeeded", job)
 
     async def test_a_folder_changed_around_the_update_is_contained(self):
         """R2-3: the folder is checked right after the update too, before the installed app is compared."""

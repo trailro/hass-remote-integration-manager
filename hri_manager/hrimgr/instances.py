@@ -885,12 +885,17 @@ class Manager:
             raise JobFailed(message) from None
 
     async def _decoys(self) -> list[stamp.Decoy]:
-        """stamp.decoys of the local apps folder, read off the event loop; a folder that cannot be searched is a decoy
-        of every instance (slug None), whose problem says why."""
-        try:
-            return await asyncio.to_thread(stamp.decoys, self.root)
-        except stamp.ScanError as err:
-            return [stamp.Decoy(".", None, str(err))]
+        """stamp.decoys of the local apps folder, read off the event loop.  A folder that cannot be searched (tried
+        twice: what changed in between may have been another job's own) is a decoy of every instance (slug None,
+        ``scan_failed``) whose problem says why and what to do: nothing is installed or updated then, but it is never
+        taken for a decoy found (_check_installed_source holds, never contains, for it)."""
+        for attempt in (1, 2):
+            try:
+                return await asyncio.to_thread(stamp.decoys, self.root)
+            except stamp.ScanError as err:
+                failure = str(err)
+        return [stamp.Decoy(".", None, f"{failure}: move or remove what is too deep or too large there, or fix its "
+                                       "permissions", scan_failed=True)]
 
     @staticmethod
     def _decoys_of(found: list[stamp.Decoy], slug: str) -> list[stamp.Decoy]:
@@ -903,26 +908,32 @@ class Manager:
     def _decoy_text(found: list[stamp.Decoy]) -> str:
         return "; ".join(d.problem for d in found[:3]) + (f"; and {len(found) - 3} more" if len(found) > 3 else "")
 
-    async def _refuse_decoys(self, installed: bool = False) -> None:
-        """While the local apps folder holds a decoy of any instance (stamp.decoys: a store reload makes the Supervisor
-        read it, and an install or update may take it): JobFailed, or Tampered when found right after an install or
-        update (``installed``): the Supervisor may have installed it."""
+    async def _refuse_decoys(self) -> None:
+        """JobFailed while the local apps folder holds a decoy of any instance, or cannot be searched (stamp.decoys: a
+        store reload makes the Supervisor read it, and an install or update may take it).  Right after an install or
+        update, _check_installed_source decides instead."""
         found = await self._decoys()
         if not found:
             return
-        if installed:
-            raise Tampered(f"after the install or update, {self._decoy_text(found)}")
         message = f"{self._decoy_text(found)}: refused, nothing installed or updated"
         _LOGGER.error("%s", message)
         raise JobFailed(message)
 
-    async def _check_installed_source(self, managed: children.Managed, manifest: dict | None) -> None:
+    async def _check_installed_source(self, managed: children.Managed, manifest: dict | None) -> str | None:
         """Right after an install or update, before the installed app is compared with the definition: the folder is
         still what the manager wrote, and no decoy has appeared; either may be what the Supervisor installed (a store
         reload by anyone, the Supervisor's own every 3 hours among them, can come between the last check and the
-        install).  Tampered otherwise."""
+        install).  Tampered otherwise.  When the folder could not be searched, why the app must be held (not
+        contained: nothing was found), for the caller."""
         await self._check_tree(managed.slug, manifest, installed=True)
-        await self._refuse_decoys(installed=True)
+        found = await self._decoys()
+        decoys = [d for d in found if not d.scan_failed]
+        if decoys:
+            raise Tampered(f"after the install or update, {self._decoy_text(decoys)}")
+        if found:
+            return (f"after the install or update, {self._decoy_text(found)}; so the manager could not check that the "
+                    f"Supervisor installed {managed.slug} from its definition")
+        return None
 
     @staticmethod
     def _future_text(future: tuple[str, float]) -> str:
@@ -1198,10 +1209,10 @@ class Manager:
             installing = True
             await self.sv.install(managed)
             installing = False
-            await self._check_installed_source(managed, managed.manifest)
+            unsearched = await self._check_installed_source(managed, managed.manifest)
             missing = await self._verify_installed(job, managed, expected)
-            if missing:
-                raise await self._hold(job, managed, missing)
+            if missing or unsearched:
+                raise await self._hold(job, managed, missing, reason=unsearched)
             await self._finish_setup(job, managed)
         except asyncio.CancelledError:
             job.log("the manager is stopping: rolling back")
@@ -1634,6 +1645,7 @@ class Manager:
             raise JobFailed(f"the definition was not written: {err}") from None
         expected = stamp.expected_view(built["config"], managed.slug)
         missing: list[str] = []
+        unsearched: str | None = None
         sent = verified = False
         try:
             managed = await asyncio.to_thread(children.load_managed, self.root, managed.name, self.registry)
@@ -1643,9 +1655,9 @@ class Manager:
                 job.log(f"updating {info.get('version')} -> {version}" + (" (building)" if channel == "git" else ""))
                 sent = True
                 await self.sv.update(managed)
-                await self._check_installed_source(managed, replacement.manifest)
+                unsearched = await self._check_installed_source(managed, replacement.manifest)
                 missing = await self._verify_installed(job, managed, expected)
-                verified = not missing
+                verified = not missing and not unsearched
             elif version != marker.get("version"):
                 # the Supervisor finished an update the manager stopped waiting for: the app is taken over only as
                 # checked (a restamp at the same version is not: a newer stamping may report otherwise)
@@ -1697,8 +1709,8 @@ class Manager:
             job.log(f"warning: {warning}")
             _LOGGER.warning("%s: %s", managed.name, warning)
         await self._save_copy(job, managed, bluetooth, built["files"])
-        if missing:  # updated and recorded, as far as the manager can tell: stopped and marked, not uninstalled
-            raise await self._hold(job, managed, missing)
+        if missing or unsearched:  # updated and recorded, as far as the manager can tell: stopped and marked, kept
+            raise await self._hold(job, managed, missing, reason=unsearched)
         if restamp:
             job.log(f"the definition is stamped by this manager now (stamping {marker.get('stamp_version')} -> "
                     f"{stamp.STAMP_VERSION}); the manager applies it to the running app at its next version change (an "
@@ -1873,10 +1885,10 @@ class Manager:
                 await self._verify_store(job, managed, expected, manifest)
                 job.log("installing")
                 await self.sv.install(managed)
-                await self._check_installed_source(managed, manifest)
+                unsearched = await self._check_installed_source(managed, manifest)
                 missing = await self._verify_installed(job, managed, expected)
-                if missing:
-                    raise await self._hold(job, managed, missing)
+                if missing or unsearched:
+                    raise await self._hold(job, managed, missing, reason=unsearched)
             elif not installed:
                 raise JobFailed(f"{managed.slug} is not installed: Install it")
             else:
@@ -2178,7 +2190,7 @@ class Manager:
             await self._verify_store(job, managed, expected, managed.manifest)
             job.log(f"updating {installed} -> {version}" + (" (building)" if channel == "git" else ""))
             await self.sv.update(managed)
-            await self._check_installed_source(managed, managed.manifest)
+            unsearched = await self._check_installed_source(managed, managed.manifest)
             missing = await self._verify_installed(job, managed, expected)
             after = await self.sv.app_info(slug)
             if after.get("version") != version:
@@ -2201,8 +2213,8 @@ class Manager:
             raise
         self._clear_auto(name)
         await self._save_copy(job, managed, bluetooth, built["files"])
-        if missing:
-            raise await self._hold(job, managed, missing)
+        if missing or unsearched:
+            raise await self._hold(job, managed, missing, reason=unsearched)
         return {"version": version, "state": after.get("state")}
 
     async def _adopt_installed_commit(self, job: Job, name: str, entry: dict, info: dict, ref: tuple[str, str], archive,

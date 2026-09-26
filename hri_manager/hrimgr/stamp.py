@@ -394,6 +394,7 @@ class Decoy:
     path: str  # of its config file, relative to the local apps folder
     slug: str | None  # the slug it declares; None when the manager cannot read it
     problem: str
+    scan_failed: bool = False  # not a file found: the folder could not be searched to its end (ScanError)
 
 
 def _show_slug(slug: str) -> str:

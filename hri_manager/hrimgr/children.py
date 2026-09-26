@@ -520,8 +520,10 @@ def walk(base: str, skip: Callable[[str], bool] | None = None, max_depth: int = 
     descriptor of the folder holding it, its stat): each folder is opened from its parent's descriptor with O_NOFOLLOW,
     so a folder swapped for a link after it was listed is refused (UnsafePath), never followed, and a link is listed,
     never followed.  A folder's stat is its descriptor's, taken after it was opened (what is walked is what is
-    described).  ``skip(name)``: an entry neither listed nor walked into.  Deeper than ``max_depth``, or more than
-    ``max_entries`` entries: UnsafePath.  The descriptors are valid only until the next entry is asked for."""
+    described).  ``skip(name)``: an entry neither listed nor walked into.  An entry gone between its listing and its
+    stat or opening is skipped, as the Supervisor's glob skips it (a caller that compares, check_tree, sees it as
+    missing).  Deeper than ``max_depth``, or more than ``max_entries`` entries: UnsafePath.  The descriptors are valid
+    only until the next entry is asked for."""
     count = [0]
 
     def folder(fd: int, rel_dir: str, depth: int):
@@ -532,13 +534,19 @@ def walk(base: str, skip: Callable[[str], bool] | None = None, max_depth: int = 
             if max_entries is not None and count[0] > max_entries:
                 raise UnsafePath(f"more than {max_entries} entries")
             rel = f"{rel_dir}/{name}" if rel_dir else name
-            st = os.stat(name, dir_fd=fd, follow_symlinks=False)
+            try:
+                st = os.stat(name, dir_fd=fd, follow_symlinks=False)
+            except FileNotFoundError:
+                continue
             if not stat.S_ISDIR(st.st_mode):
                 yield rel, name, fd, st
                 continue
             if depth >= max_depth:
                 raise UnsafePath(f"{rel[:80]!r} is more than {max_depth} folders deep")
-            sub = _open_folder(name, fd, rel)
+            try:
+                sub = _open_folder(name, fd, rel)
+            except FileNotFoundError:
+                continue
             try:
                 yield rel, name, fd, os.fstat(sub)
                 yield from folder(sub, rel, depth + 1)
