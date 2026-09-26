@@ -369,7 +369,10 @@ narrows itself, in code, and the tests pin it:
     definition (`GET /store/addons/local_hri_<name>`) with it, and after it the installed app's
     (`GET /addons/local_hri_<name>/info`): role, Supervisor, Core and auth APIs, full access, Docker API, host network,
     PID, IPC, UTS and D-Bus, privileges, devices, `uart`/`usb`/`gpio`/`video`/`audio`, kernel modules, AppArmor,
-    ingress, ports, version, name, URL and whether it has an image.
+    ingress, ports, version, name, URL and whether it has an image. Neither answer reports `image` (which image, only
+    whether there is one), `map`, `backup_pre` or `backup_post`, so the check after an install or update cannot see
+    them; the store's answer also leaves out IPC, UTS, D-Bus, privileges, devices, the device flags, kernel modules
+    and ports (`hrimgr/stamp.py`, `STORE_VIEW`). Those keys rest on the folder check above alone.
 
   A difference before the install or update refuses it. A difference after it first marks the instance in the
   registry, then stops and uninstalls the app at once (its `/config` folder kept), and says so in the job, the log and
