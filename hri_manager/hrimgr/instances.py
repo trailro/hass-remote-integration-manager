@@ -67,11 +67,20 @@ WRITE_ERRORS = (stamp.TemplateError, children.UnsafePath, children.NotManaged, c
 
 REGISTRY_FIELDS = ("name", "slug", "channel", "version", "ref_kind", "ref", "sha", "instance_id", "created_at", "updated_at",
                    "stamp_version", "created_by", "updated_by", "history", "bluetooth")
-# the Supervisor applies an installed app's definition only when the app's version changes (an update at the same
-# version is refused, AppNoUpdateAvailableError; apps/data.py copies the store's definition at install and update)
+# an update applies an installed app's definition only when the app's version changes (an update at the same version
+# is refused, AppNoUpdateAvailableError; apps/data.py copies the store's definition at install, update and rebuild).
+# The Supervisor's own Rebuild applies it at the same version, but the manager's allow-list has no rebuild
 BLUETOOTH_NEEDS_VERSION = ("the Supervisor applies Bluetooth (the host's D-Bus) only when the app's version changes: "
                            "turn it {state} with an Update to a newer release, or a Rebuild once its branch or tag has a "
                            "new commit; or Delete the instance keeping its data and create it again with Bluetooth {state}")
+# the installed app's host_dbus differs from the registry's Bluetooth, and nothing says the manager made that change
+# (the Supervisor's own Update or Rebuild of a definition someone changed would): never recorded without the admin
+BLUETOOTH_NOT_CHOSEN = ("the installed {slug} {has} the host's D-Bus (Bluetooth), the manager's record says {record}, and "
+                        "the manager did not make that change (the Supervisor's own Update or Rebuild of a changed "
+                        "definition would): nothing was recorded. {what}")
+BLUETOOTH_CHOOSE = ("Update it at its installed version with Bluetooth {state} to keep that as your choice (the other "
+                    "needs a newer version), or Delete it")
+BLUETOOTH_CHOOSE_DETACHED = "Update it to a newer release (or Rebuild it) with Bluetooth chosen, or Delete it"
 HISTORY_KEYS = ("channel", "version", "ref_kind", "ref", "sha", "updated_at", "event", "by")
 
 
@@ -259,10 +268,15 @@ class Manager:
                 entry["boot"] = info.get("boot")
                 # the badge shows what the app has, not what the manager recorded; a difference is said
                 if isinstance(info.get("host_dbus"), bool) and info["host_dbus"] != entry["bluetooth"]:
+                    known = registered.get(entry["name"])
+                    what = ("an update the manager made set it; its next Update or Repair records it"
+                            if self._bluetooth_confirmed(known, info["host_dbus"], None) else
+                            "the manager did not make that change: " + (
+                                BLUETOOTH_CHOOSE_DETACHED if entry.get("detached")
+                                else BLUETOOTH_CHOOSE.format(state="on" if info["host_dbus"] else "off")))
                     entry["problem"] = "; ".join(p for p in (entry.get("problem"), (
                         f"Bluetooth: the installed app {'has' if info['host_dbus'] else 'does not have'} the host's "
-                        f"D-Bus, the manager's record says {'on' if entry['bluetooth'] else 'off'}; its next Update "
-                        "or Rebuild records what is installed")) if p)
+                        f"D-Bus, the manager's record says {'on' if entry['bluetooth'] else 'off'}; {what}")) if p)
                     entry["bluetooth"] = info["host_dbus"]
         return {"instances": out, "others": others, "latest_release": latest["version"] if latest else None}
 
@@ -1450,7 +1464,8 @@ class Manager:
             if (names.parse_version(version) or ()) < (names.parse_version(current) or ()):
                 raise JobFailed(f"{version} is older than {current}: the manager does not downgrade")
             if info.get("version") == version:
-                bluetooth, had_bluetooth = await self._bluetooth_at_same_version(managed.slug, requested, had_bluetooth)
+                bluetooth, had_bluetooth = await self._bluetooth_at_same_version(managed.slug, requested, had_bluetooth,
+                                                                                 managed.entry)
             if version == marker.get("version") and info.get("version") == version:
                 # unchanged only when the record says what the app has: otherwise rewritten to it, and recorded
                 if marker.get("stamp_version") == stamp.STAMP_VERSION and bluetooth == recorded_bt:
@@ -1469,7 +1484,8 @@ class Manager:
         sha = archive.sha
         if channel == "git":
             if info.get("version") == names.git_version(sha):
-                bluetooth, had_bluetooth = await self._bluetooth_at_same_version(managed.slug, requested, had_bluetooth)
+                bluetooth, had_bluetooth = await self._bluetooth_at_same_version(managed.slug, requested, had_bluetooth,
+                                                                                 managed.entry)
             if sha == marker.get("sha") and info.get("version") == marker.get("version"):
                 if marker.get("stamp_version") == stamp.STAMP_VERSION and bluetooth == recorded_bt:
                     job.log(f"the {new_ref[0]} {new_ref[1]} is still {sha[:12]}: nothing to rebuild")
@@ -1624,14 +1640,35 @@ class Manager:
             raise JobFailed(str(err)) from None
         return installed if isinstance(installed, bool) else recorded
 
-    async def _bluetooth_at_same_version(self, slug: str, requested: bool | None, recorded: bool) -> tuple[bool, bool]:
+    @staticmethod
+    def _bluetooth_confirmed(entry: dict | None, installed: bool, requested: bool | None) -> bool:
+        """Whether ``installed`` (the app's host_dbus) may be recorded as the instance's Bluetooth where the registry
+        says the other: the admin chose it (``requested``), or the manager made that change itself, in an update whose
+        record is late (the registry's ``updating`` flag names it)."""
+        if requested is not None:
+            return requested is installed
+        flag = (entry or {}).get("updating")
+        fields = flag.get("fields") if isinstance(flag, dict) and isinstance(flag.get("fields"), dict) else {}
+        return fields.get("bluetooth") is installed
+
+    @staticmethod
+    def _bluetooth_not_chosen(slug: str, installed: bool, detached: bool = False) -> str:
+        return BLUETOOTH_NOT_CHOSEN.format(
+            slug=slug, has="has" if installed else "does not have", record="off" if installed else "on",
+            what=BLUETOOTH_CHOOSE_DETACHED if detached else BLUETOOTH_CHOOSE.format(state="on" if installed else "off"))
+
+    async def _bluetooth_at_same_version(self, slug: str, requested: bool | None, recorded: bool,
+                                         entry: dict | None) -> tuple[bool, bool]:
         """(Bluetooth to write, Bluetooth the app has) when the installed app is already at the version being written
         (a catch-up after an update the manager stopped waiting for, or a restamp): the Supervisor applies nothing then,
         so the definition takes what the app has (its host_dbus, as it reports it), and a request for the other is
-        refused (BLUETOOTH_NEEDS_VERSION)."""
+        refused (BLUETOOTH_NEEDS_VERSION).  What the app has, when the registry says otherwise, only as the admin's
+        choice or the manager's own change (_bluetooth_confirmed)."""
         installed = await self._installed_bluetooth(slug, recorded)
         if requested is not None and requested != installed:
             raise JobFailed(BLUETOOTH_NEEDS_VERSION.format(state="on" if requested else "off"))
+        if installed != recorded and not self._bluetooth_confirmed(entry, installed, requested):
+            raise JobFailed(self._bluetooth_not_chosen(slug, installed))
         return installed, installed
 
     async def _clear_updating(self, name: str) -> None:
@@ -1687,9 +1724,22 @@ class Manager:
             template = {k: v for k, v in config.items() if k != "host_dbus"}
             new = stamp.stamp({**template, "slug": names.HRI_SLUG}, managed.name, version, channel, bluetooth)
             data = stamp.dump(new, managed.marker["template_source"])
-            children.replace_file(folder, "config.yaml", data)
-            children.replace_file(folder, children.MARKER, children.marker_bytes({**managed.marker, "bluetooth": bluetooth}))
+            previous = {k: managed.entry.get(k) for k in ("bluetooth", "config_sha256")}
+            # the record first: when the registry cannot be written, the definition stays as it was (a definition and
+            # a record that disagree refuse every later check of it)
             self.registry.update(managed.name, bluetooth=bluetooth, config_sha256=hashlib.sha256(data).hexdigest())
+            try:
+                children.replace_file(folder, "config.yaml", data)
+                children.replace_file(folder, children.MARKER,
+                                      children.marker_bytes({**managed.marker, "bluetooth": bluetooth}))
+            except BaseException:
+                try:  # both back as they were
+                    children.replace_file(folder, "config.yaml", raw)
+                    children.replace_file(folder, children.MARKER, children.marker_bytes(managed.marker))
+                    self.registry.update(managed.name, **previous)
+                except (OSError, children.UnsafePath, RegistryError) as err:
+                    _LOGGER.error("%s: its definition and its record of Bluetooth may disagree now: %s", managed.name, err)
+                raise
             try:
                 kept = copies.read_definition(copies.folder(self.copies_root, managed.name), channel)
             except (OSError, children.UnsafePath):
@@ -1729,6 +1779,8 @@ class Manager:
                 await self._refuse_decoys()
                 recorded = managed.entry.get("bluetooth") is True
                 if await self._installed_bluetooth(managed.slug, recorded) != recorded:
+                    if not self._bluetooth_confirmed(managed.entry, not recorded, None):
+                        raise JobFailed(self._bluetooth_not_chosen(managed.slug, not recorded))
                     managed = await self._follow_bluetooth(job, managed, not recorded)
                 expected, manifest = await asyncio.to_thread(self._definition_on_disk, managed)
                 await self._check_tree(managed.slug, manifest)
@@ -1846,9 +1898,12 @@ class Manager:
         else:
             ref = ("tag", f"v{version}")
         # the definition of the installed version says what the installed app has: its host_dbus, when the registry's
-        # Bluetooth record lags (an update recorded late, an older /data restored)
+        # Bluetooth record lags behind a change the manager made (an update recorded late); any other difference is
+        # not recorded without the admin (an older /data restored, or the Supervisor's own Update of a changed folder)
         bluetooth = await self._installed_bluetooth(slug, entry.get("bluetooth") is True)
         if bluetooth != (entry.get("bluetooth") is True):
+            if not self._bluetooth_confirmed(entry, bluetooth, None):
+                raise NeedsAttention(self._bluetooth_not_chosen(slug, bluetooth, detached=True))
             job.log(f"Bluetooth: the installed app {'has' if bluetooth else 'does not have'} the host's D-Bus, the "
                     "manager's record said otherwise: the definition follows the app, and the record too")
             entry = {**entry, "bluetooth": bluetooth}
@@ -1958,10 +2013,10 @@ class Manager:
         entry, info = await self._detached(job, name, "update")
         installed = str(info.get("version") or "")
         channel = entry.get("channel")
-        # what the app has (the registry's record may lag): the default for a newer version, and the only value for its
-        # own version
-        had_bluetooth = await self._installed_bluetooth(slug, entry.get("bluetooth") is True)
-        requested, bluetooth = bluetooth, had_bluetooth if bluetooth is None else bluetooth
+        # the registry's choice: the default for a newer version (never what the installed app has, which the manager
+        # may not have made); at the installed version only the app's, as the admin's choice (_bluetooth_at_same_version)
+        recorded_bt = entry.get("bluetooth") is True
+        requested, bluetooth = bluetooth, recorded_bt if bluetooth is None else bluetooth
         if channel == "release":
             if version is None:
                 try:
@@ -1987,7 +2042,7 @@ class Manager:
             if version == installed:
                 if not isinstance(entry.get("needs_attention"), dict):
                     raise JobFailed(f"the {new_ref[0]} {new_ref[1]} is at the installed commit: Repair writes its definition")
-                bluetooth, _ = await self._bluetooth_at_same_version(slug, requested, had_bluetooth)
+                bluetooth, _ = await self._bluetooth_at_same_version(slug, requested, recorded_bt, entry)
                 return await self._adopt_installed_commit(job, name, {**entry, "bluetooth": bluetooth}, info, new_ref,
                                                           archive, source, user)
         sha = archive.sha
