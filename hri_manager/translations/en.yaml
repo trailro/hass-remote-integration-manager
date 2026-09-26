@@ -1,7 +1,7 @@
 configuration:
   allowed_users:
     name: Home Assistant users
-    description: Only these Home Assistant administrators may use the manager, matched on the user id Home Assistant verifies, or the login name or display name it reports for that id. The manager is for administrators only in any case, checked on every request; empty means every administrator.
+    description: Only these Home Assistant administrators may use the manager, matched on the user id Home Assistant verifies, or the login name it reports for that id (never the display name). The manager is for administrators only in any case, checked on every request; empty means every administrator, and entries that are all blank refuse everyone.
   github_token:
     name: GitHub token
     description: Optional. A token without scopes raises GitHub's rate limit for the release list (60 an hour per address without one). Sent only to api.github.com.

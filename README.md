@@ -346,11 +346,14 @@ narrows itself, in code, and the tests pin it:
   `config/auth/list` on Core's websocket, through the Supervisor's proxy (`homeassistant_api: true`, which costs no
   security rating), from which it computes `is_admin` as Core does (the owner, or an active member of the
   administrators group). A small client with its own allow-list (`hrimgr/corews.py`) can send only the
-  authentication and that one command. The answer is cached for a minute. If Home Assistant cannot answer, the
-  answer has an unexpected shape or the user is unknown, the request gets 403: the check fails closed.
-  `allowed_users` narrows the administrators further, keyed on the verified id: an entry matches the id, or the
-  login name or display name Core reports for that id; the `X-Remote-User-Name` header is shown and logged, never
-  trusted. State-changing requests need `X-Requested-With: fetch` and a
+  authentication and that one command. The answer is cached for a minute, so an administrator who is demoted (or
+  deactivated) in Home Assistant keeps access to the manager for up to 60 seconds. One question is asked at a time
+  and every request waiting meanwhile takes its answer; a failed question is not asked again for 5 seconds. If Home
+  Assistant cannot answer, the answer has an unexpected shape or the user is unknown, the request gets 403: the
+  check fails closed. `allowed_users` narrows the administrators further, keyed on the verified id: an entry
+  matches the id, or the login name Core reports for that id, never the display name (any administrator can change
+  it); a list whose entries are all blank refuses everyone. The `X-Remote-User-Name` header is shown and logged,
+  never trusted. State-changing requests need `X-Requested-With: fetch` and a
   JSON body; the page's policy allows only its own scripts and styles and framing by Home Assistant. Like every
   ingress app, the panel shares Home Assistant's origin with other apps' panels.
 

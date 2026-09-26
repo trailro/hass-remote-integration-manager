@@ -37,6 +37,8 @@ class Settings:
     port: int = INGRESS_PORT
     peers: frozenset[str] = frozenset({SUPERVISOR_PEER})
     allowed_users: frozenset[str] = frozenset()
+    # allowed_users has entries and none of them names anyone (all blank, or not text): nobody is served
+    allowed_users_unusable: bool = False
     github_token: str = field(default="", repr=False)
     github_api: str = github.API_URL
     codeload: str = github.CODELOAD_URL
@@ -88,11 +90,18 @@ def from_environment(env: dict[str, str] | None = None) -> Settings:
     data_dir = dev_given.get("DATA", "/data") if dev else "/data"
     options = read_options(os.path.join(data_dir, "options.json"))
     users = options.get("allowed_users") or []
+    if not isinstance(users, list):
+        users = [users]
+    allowed = frozenset(u.strip().casefold() for u in users if isinstance(u, str) and u.strip())
+    if len(allowed) < len(users):
+        _LOGGER.warning("allowed_users: %d of its %d entries are blank or not text and are ignored%s", len(users) - len(allowed),
+                        len(users), "; none is left, so nobody may use the manager until it is corrected" if not allowed else "")
     gh_token = str(options.get("github_token") or "")
     settings = Settings(
         supervisor_token=token,
         data_dir=data_dir,
-        allowed_users=frozenset(str(u).strip().casefold() for u in users if isinstance(u, str) and u.strip()),
+        allowed_users=allowed,
+        allowed_users_unusable=bool(users) and not allowed,
         github_token=gh_token,
         debug=bool(options.get("debug")),
         secrets=tuple(s for s in (token, gh_token) if s),

@@ -32,9 +32,19 @@ class SettingsTest(unittest.TestCase):
                "HRI_MANAGER_DEV_DATA": data}
         s = from_environment(env)
         self.assertEqual(s.allowed_users, frozenset({"alice", "bob"}))
+        self.assertFalse(s.allowed_users_unusable)
         self.assertEqual(s.github_token, "ghp_x123456")
         self.assertTrue(s.debug)
         self.assertIn("ghp_x123456", s.secrets)
+        for users in (["", "  "], [None, 3], "   "):
+            with self.subTest(users=users):
+                with open(os.path.join(data, "options.json"), "w") as fh:
+                    json.dump({"allowed_users": users}, fh)
+                s = from_environment(env)
+                self.assertEqual((s.allowed_users, s.allowed_users_unusable), (frozenset(), True))
+        with open(os.path.join(data, "options.json"), "w") as fh:
+            json.dump({"allowed_users": []}, fh)
+        self.assertFalse(from_environment(env).allowed_users_unusable)  # empty: every administrator
 
     def test_development_mode_needs_both_variables_and_a_fake_supervisor(self):
         base = {"SUPERVISOR_TOKEN": "t" * 10}
