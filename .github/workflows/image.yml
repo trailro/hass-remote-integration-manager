@@ -42,7 +42,9 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
-          ref: ${{ env.TAG }}
+          # the tag, by its full name: a bare name is looked up as a branch first, and a branch of the same name
+          # would be built and pushed as this release's image
+          ref: refs/tags/${{ env.TAG }}
           fetch-depth: 0
           persist-credentials: false
       - name: The tag's code is that version
@@ -124,6 +126,9 @@ jobs:
         with:
           ref: ${{ github.event.repository.default_branch }}
           fetch-depth: 0
+          # the token that can write the repository is not left in .git/config for every step: the push below
+          # takes it for that one command
+          persist-credentials: false
       - id: decide
         name: Decide whether the app version moves
         # the newest stable release from the releases (see the image job), the version never lowered, and something
@@ -140,11 +145,15 @@ jobs:
         run: python3 .github/check_published_image.py --ref "$IMAGE:${TAG#v}"
       - name: Set hri_manager/config.yaml version and image
         if: steps.decide.outputs.move == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           python3 .github/app_version.py apply "$TAG" "$IMAGE" hri_manager/config.yaml
           git diff --stat
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git commit -q -m "hri_manager: version ${TAG#v}, the image of $TAG is published" -- hri_manager/config.yaml
-          git pull -q --rebase origin "$BRANCH"   # a merge since the checkout
-          git push origin "HEAD:$BRANCH"
+          # the token for these two commands only, as the checkout would have set it (never in a URL or a file)
+          auth="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GH_TOKEN" | base64 | tr -d '\n')"
+          git -c "http.https://github.com/.extraheader=$auth" pull -q --rebase origin "$BRANCH"   # a merge since the checkout
+          git -c "http.https://github.com/.extraheader=$auth" push origin "HEAD:$BRANCH"

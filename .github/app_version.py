@@ -22,8 +22,12 @@ IMAGE_LINE = re.compile(r"^image: .*$", re.M)
 
 
 def key(version: str) -> tuple:
+    """(X, Y, Z) of a stable version; ValueError for anything else (never a key that sorts below every version, which
+    would let any tag move the version)."""
     m = re.fullmatch(r"(\d+)\.(\d+)\.(\d+)", version)
-    return tuple(int(x) for x in m.groups()) if m else (-1,)
+    if not m:
+        raise ValueError(f"{version!r} is not a stable version X.Y.Z")
+    return tuple(int(x) for x in m.groups())
 
 
 def newest_stable(releases: list) -> str:
@@ -35,7 +39,10 @@ def newest_stable(releases: list) -> str:
 def state(path: str) -> tuple[str, str, bool]:
     with open(path, encoding="utf-8") as fh:
         text = fh.read()
-    return text, VERSION_LINE.search(text).group(1), IMAGE_LINE.search(text) is not None
+    line = VERSION_LINE.search(text)
+    if line is None:
+        raise ValueError(f"{path} has no version: line")
+    return text, line.group(1), IMAGE_LINE.search(text) is not None
 
 
 def decide(tag: str, image: str, path: str, releases: list) -> tuple[bool, str]:
@@ -46,7 +53,11 @@ def decide(tag: str, image: str, path: str, releases: list) -> tuple[bool, str]:
     _, current, has_image = state(path)
     if current == version and has_image:
         return False, f"{path} already names {version} and its image"
-    if key(current) > key(version):
+    try:
+        newer = key(current) > key(version)
+    except ValueError as err:
+        raise ValueError(f"{path}: its version {err}; the job does not guess whether {version} is newer: fix it by hand") from None
+    if newer:
         return False, f"{path} names {current}, newer than {version}: the app version stays as it is"
     return True, f"{path}: version {current} -> {version}" + ("" if has_image else f", image {image}")
 
@@ -68,10 +79,14 @@ def main(argv: list[str]) -> int:
         print(__doc__.split("\n\n", 2)[1], file=sys.stderr)
         return 2
     mode, tag, image, path = argv[1:]
-    if mode == "apply":
-        print(apply(tag, image, path))
-        return 0
-    move, why = decide(tag, image, path, json.load(sys.stdin))
+    try:
+        if mode == "apply":
+            print(apply(tag, image, path))
+            return 0
+        move, why = decide(tag, image, path, json.load(sys.stdin))
+    except ValueError as err:
+        print(f"::error::{err}", file=sys.stderr)
+        return 1
     print(why)
     with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as fh:
         fh.write(f"move={'true' if move else 'false'}\n")
