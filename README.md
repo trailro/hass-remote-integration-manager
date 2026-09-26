@@ -203,6 +203,22 @@ has moved it to `apps/local` (an upstream issue of the Supervisor, not of this a
   which writes that definition and installs it in one step (and removes it again if the update fails); **Delete**; or
   **Repair** again once the cause is gone. GitHub being unreachable is not such a case: automatic repair tries again.
 
+**If the manager's `/data` is lost** (the manager uninstalled with its data, or a restore without the manager's
+backup), its registry and its copies are gone. By design the manager then takes no instance for its own (anyone who
+can write the local apps folder can write a marker): every instance is listed under **Other HRI apps** as not
+managed, with no action, and keeps running as it is. To manage one again:
+
+1. in **Settings > Apps**, uninstall the instance **without** deleting its data;
+2. if its `hri_<name>/` folder is still in the local apps folder (the `addons` share over Samba, or `/addons` over
+   SSH), delete that folder;
+3. in the manager, **Create** an instance with the **same name**: it reuses the instance's `/config` folder
+   (`app_configs/local_hri_<name>`: its Home Assistant, integration, credentials and configuration).
+
+What is lost: the instance's options (password, `ingress_users`, Debian packages...; the uninstall drops them, set
+them again before anyone else opens it), its sidebar, start-at-boot and Watchdog settings (the create turns them on
+again), and the manager's history of it (created, updates, the stamping version). A git instance is created again
+from the branch or tag you name.
+
 Repair is offered only for an app the Supervisor reports as detached **and** that the manager's registry holds (an
 instance this manager created), and runs only if, after a store reload, the store still has no definition of its
 slug. A detached `local_hri_*` app the registry does not hold (one made by hand, say) is listed as not managed, with

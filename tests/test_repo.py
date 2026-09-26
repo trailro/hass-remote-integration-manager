@@ -8,7 +8,7 @@ import unittest
 
 import yaml
 
-from hrimgr import VERSION, names, settings, stamp
+from hrimgr import VERSION, settings, stamp
 
 from . import APP_DIR, ROOT
 
@@ -23,6 +23,28 @@ def repo_files() -> list[pathlib.Path]:
         return [p for p in ROOT.rglob("*") if p.is_file() and ".git" not in p.parts and "__pycache__" not in p.parts]
 
 
+# the manager's own versions: semver, pre-releases as X.Y.Z-rcN (docker/metadata-action tags only semver)
+RELEASE_VERSION = re.compile(r"(\d+)\.(\d+)\.(\d+)(?:-(rc|beta|alpha)\.?(\d+))?")
+
+
+def release_key(version: str) -> tuple:
+    m = RELEASE_VERSION.fullmatch(version)
+    if not m:
+        raise ValueError(f"{version!r} is not a semver release or pre-release (X.Y.Z or X.Y.Z-rcN)")
+    pre = {"alpha": 1, "beta": 2, "rc": 3}.get(m.group(4) or "", 0)
+    return (int(m.group(1)), int(m.group(2)), int(m.group(3)), 0 if m.group(4) else 1, pre, int(m.group(5) or 0))
+
+
+class ReleaseVersionTest(unittest.TestCase):
+    def test_semver_shape(self):
+        release_key(VERSION)
+        self.assertLess(release_key("0.2.0-rc1"), release_key("0.2.0"))
+        self.assertLess(release_key("0.1.1"), release_key("0.2.0-rc1"))
+        for bad in ("0.2.0b1", "0.2.0rc1", "v0.2.0", "0.2"):  # HRI's form, or no version at all
+            with self.subTest(version=bad), self.assertRaises(ValueError):
+                release_key(bad)
+
+
 class AppConfigTest(unittest.TestCase):
     def test_the_store_finds_one_app(self):
         self.assertEqual(stamp.find_configs(str(ROOT)), ["hri_manager/config.yaml"])
@@ -31,7 +53,7 @@ class AppConfigTest(unittest.TestCase):
         self.assertEqual(CONFIG["slug"], "hri_manager")
         # the version, and the image: line, are the Image workflow's app-version job's to write, after the image of
         # that version is pushed (tests/test_image_workflow.py): never ahead of the code, and only this image
-        self.assertLessEqual(names.parse_version(CONFIG["version"]), names.parse_version(VERSION))
+        self.assertLessEqual(release_key(CONFIG["version"]), release_key(VERSION))
         self.assertIn(CONFIG.get("image"), (None, "ghcr.io/trailro/hass-remote-integration-manager"))
         self.assertEqual((CONFIG["hassio_api"], CONFIG["hassio_role"]), (True, "manager"))
         self.assertEqual(CONFIG["map"], [{"type": "local_apps", "read_only": False}])

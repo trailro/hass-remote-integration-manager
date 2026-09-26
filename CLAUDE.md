@@ -54,3 +54,6 @@ Keep venvs out of the repo. Check the exit code, never `| tail` the runner. All 
 5. The first release with an image only: the new ghcr.io package is private, so the anonymous-pull step fails and
    nothing moves. Make the package public (its settings, Change visibility), then re-run the failed `app-version` job.
 6. Check the store offers the new version and that updating pulls the image instead of building.
+7. Pre-releases: the tag and `hrimgr/__init__.py` in semver shape, `vX.Y.Z-rcN` / `X.Y.Z-rcN` (not HRI's `b1` form):
+   `docker/metadata-action`'s semver tags emit nothing for a tag that is not semver, and the image push then has no
+   tag. A test checks `__init__.py`.
