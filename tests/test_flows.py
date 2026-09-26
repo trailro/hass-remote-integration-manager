@@ -15,7 +15,7 @@ from hrimgr import children, stamp
 
 from .env import Env
 from .fakes.tarballs import sha_of
-from .helpers import marker, tmpdir
+from .helpers import marker, register, tmpdir
 
 
 class FlowTest(unittest.IsolatedAsyncioTestCase):
@@ -398,18 +398,46 @@ class FlowTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_repair_only_for_a_detached_app_the_store_does_not_define(self):
         """A hand-made local app with an instance's slug and HRI's url is not detached: Repair would write a second
-        definition of its slug and make it the manager's (deletable with its data)."""
+        definition of its slug and make it the manager's (deletable with its data).  Refused even when the registry
+        holds that name (an instance of it created once, its folder gone)."""
         env = self.env
         self._hand_made_app()
         await env.sv.reload_store()
         _, data = await env.get("/api/instances")
         self.assertEqual(data["instances"], [])
         self.assertIn("local_hri_garage", [o["slug"] for o in data["others"]])
+        status, body = await env.send("POST", "/api/instances/garage/repair")
+        self.assertEqual(status, 400, body)  # not in the registry: not even a job
+        register(env.registry, marker("garage"))
         job = await env.job(await env.send("POST", "/api/instances/garage/repair"))
         self.assertEqual(job["state"], "failed")
         self.assertIn("not detached", job["error"])
         self.assertFalse(os.path.lexists(self.folder("garage")))
+
+    async def test_a_detached_app_the_registry_does_not_hold_is_never_repaired(self):
+        """A hand-made local app with an instance's slug and HRI's url, detached (its folder gone): not the manager's.
+        Repair would write a marker and a registry entry for it, and it could then be deleted with its data."""
+        env = self.env
+        self._hand_made_app()
+        shutil.rmtree(os.path.join(env.local_apps, "my_garage"))
+        await env.sv.reload_store()
+        _, data = await env.get("/api/instances")
+        self.assertEqual(data["instances"], [])
+        (other,) = [o for o in data["others"] if o["slug"] == "local_hri_garage"]
+        self.assertEqual(other["kind"], "local")
+        self.assertIn("not managed", other["problem"])
+        self.assertNotIn("actions", other)
+        status, body = await env.send("POST", "/api/instances/garage/repair")
+        self.assertEqual(status, 400, body)
+        self.assertIn("registry", body["error"])
+        self.assertFalse(os.path.lexists(self.folder("garage")))
         self.assertIsNone(env.registry.get("garage"))
+        # and the job itself refuses too, whoever starts it
+        job = await env.job((202, {"job": env.manager.jobs.start("garage", "repair", "t", lambda j: env.manager._repair(j, "garage", "t")).as_dict()}))
+        self.assertEqual(job["state"], "failed")
+        self.assertIn("registry", job["error"])
+        self.assertFalse(os.path.lexists(self.folder("garage")))
+        self.assertEqual(env.changing_calls(), [])
 
     async def test_repair_refuses_when_the_store_finds_a_definition_after_reloading(self):
         env = self.env
@@ -441,12 +469,7 @@ class FlowTest(unittest.IsolatedAsyncioTestCase):
         env = self.env
         for action in ("start", "stop", "restart", "update", "repair"):
             status, body = await env.send("POST", f"/api/instances/foreign/{action}")
-            if action == "repair":  # a job that looks and refuses
-                job = await env.job((status, body))
-                self.assertEqual(job["state"], "failed")
-                self.assertIn("left alone", job["error"])
-            else:
-                self.assertEqual(status, 400, body)
+            self.assertEqual(status, 400, body)
         status, _ = await env.send("DELETE", "/api/instances/foreign")
         self.assertEqual(status, 400)
         job = await self.create("foreign")
