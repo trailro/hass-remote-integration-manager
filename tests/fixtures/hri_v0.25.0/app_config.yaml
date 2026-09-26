@@ -1,0 +1,89 @@
+# Home Assistant OS / Supervised app ("add-on" before 2026; Supervised is deprecated): the published image, run with
+# the app's own folder (/app_configs/<id>_hass_remote_integration on the host) as the /config volume.  Reference:
+# docs/app.md.
+name: hass-remote-integration
+# the image tag the Supervisor pulls: .github/workflows/image.yml moves it once that image is pushed
+version: "0.24.0"
+slug: hass_remote_integration
+description: Run one Home Assistant integration in its own container, mirrored to your Home Assistant over MQTT
+url: https://github.com/trailro/hass-remote-integration
+# the oldest Core the Supervisor installs, updates or restores the app on: below 2025.10 the MQTT discovery HRI
+# sends loses its entity ids, below 2024.11 nothing arrives (docs/mqtt.md, "What the main Home Assistant needs")
+homeassistant: "2025.10.0"
+arch:
+  - aarch64
+  - amd64
+# ghcr.io, as the compose file: Docker Hub limits anonymous pulls per address, and a Supervisor pulls anonymously
+image: ghcr.io/trailro/hass-remote-integration
+# Home Assistant inside writes its registries last when it stops (the compose file's stop_grace_period)
+timeout: 240
+map:
+  # the same /config the compose file mounts its volume at.  addon_config before Supervisor 2026.07.1, same mount;
+  # installing or updating an app needs the newest Supervisor anyway
+  - type: app_config
+    read_only: false
+# the sidebar panel: the Supervisor proxies Home Assistant's ingress to the same port as the one published below,
+# with the prefix stripped (ingress.py).  Streamed: backup uploads (up to 200 MiB) and a Home Assistant import (up to
+# 2 GiB) are more than the 16 MiB the Supervisor buffers otherwise.  No webui: the linter refuses it next to ingress,
+# and "Open web UI" opens the panel
+ingress: true
+ingress_port: 8087
+ingress_stream: true
+panel_icon: mdi:transit-connection-variant
+panel_title: HRI
+# the same UI straight on the host, with HRI's own password and host guard; can be turned off on the Network tab
+ports:
+  8087/tcp: 8087
+ports_description:
+  8087/tcp: Web UI and API
+# serial sticks (/dev/ttyUSB*, /dev/ttyACM*, /dev/serial/by-id/*) for the integrations that need one
+uart: true
+options:
+  ha_version_latest: true
+  debug: false
+  cookie_secure: false
+# each option becomes an environment variable of a plain Docker install (entrypoint.py, APP_OPTIONS)
+schema:
+  password: password?
+  apt_packages: str?
+  call_timeout: int(1,)?
+  ha_version_latest: bool
+  debug: bool
+  cookie_secure: bool
+  ingress_users: ["str?"]
+# what HRI's own backups leave out too (backupkit.py DISPOSABLE_GLOBS), matched the way the Supervisor matches:
+# against the end of the full path, so "*_hass_remote_integration/" ties a name to the top of this app's folder.
+# That part is the slug above: a fork or a local build with another slug must change it in every entry, or its
+# Home Assistant backups hold the venv (about 800 MB)
+backup_exclude:
+  - "*_hass_remote_integration/integration_manager/auth_key"
+  - "*_hass_remote_integration/integration_manager/auth_key.tmp"
+  - "*_hass_remote_integration/integration_manager/auth_revoked"
+  - "*_hass_remote_integration/integration_manager/auth_revoked.tmp"
+  - "*_hass_remote_integration/venv-*"
+  - "*_hass_remote_integration/venv-current"
+  - "*_hass_remote_integration/backups"
+  - "*.log"
+  - "*.log.*"
+  - "*_hass_remote_integration/__pycache__"
+  - "*/__pycache__"
+  - "*.pyc"
+  - "*_hass_remote_integration/deps"
+  - "*_hass_remote_integration/tts"
+  - "*_hass_remote_integration/integration_manager/restore-pending*.zip"
+  - "*_hass_remote_integration/integration_manager/restore-pending.json"
+  - "*_hass_remote_integration/integration_manager/restore-applied.json"
+  - "*_hass_remote_integration/integration_manager/restore-failed.json"
+  - "*_hass_remote_integration/integration_manager/*.tmp"
+  - "*_hass_remote_integration/integration_manager/pre-restore-*"
+  - "*_hass_remote_integration/integration_manager/ha-install.log"
+  - "*_hass_remote_integration/integration_manager/staging-*"
+  - "*_hass_remote_integration/integration_manager/backups"
+  - "*_hass_remote_integration/integration_manager/import.tar"
+  - "*_hass_remote_integration/integration_manager/import.tar.tmp"
+  - "*_hass_remote_integration/integration_manager/import-extracted"
+  - "*_hass_remote_integration/integration_manager/hacs_catalog.json"
+  - "*_hass_remote_integration/.storage/*.log"
+  - "*_hass_remote_integration/.storage/tmp[a-z0-9_][a-z0-9_][a-z0-9_][a-z0-9_][a-z0-9_][a-z0-9_][a-z0-9_][a-z0-9_]"
+  - "*_hass_remote_integration/.storage/*.pre-import"
+  - "*_hass_remote_integration/.storage/*.pre-import.done"
