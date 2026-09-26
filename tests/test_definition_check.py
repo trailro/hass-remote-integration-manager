@@ -6,6 +6,7 @@ the installed app's after it, uninstalling it at once when they differ."""
 
 import json
 import os
+import time
 import unittest
 from unittest import mock
 
@@ -83,8 +84,39 @@ class TreeTest(unittest.TestCase):
         self.manifest = children.digest_tree(os.path.join(self.root, "hri_garage"))
 
     def test_unchanged(self):
-        self.assertEqual(set(self.manifest), {"config.yaml", "translations", "translations/en.yaml"})
+        self.assertEqual(set(self.manifest), {".", "config.yaml", "translations", "translations/en.yaml"})
         children.check_tree(self.root, "garage", self.manifest)
+
+    def test_changed_and_put_back_as_it_was(self):
+        """Same content afterwards: the change time of the file, or of its folder, tells."""
+        def config():
+            return os.path.join(self.root, "hri_garage", "config.yaml")
+
+        def rewritten():
+            with open(config(), "rb") as fh:
+                original = fh.read()
+            with open(config(), "wb") as fh:
+                fh.write(b"slug: hri_garage\nfull_access: true\n")
+            with open(config(), "wb") as fh:
+                fh.write(original)
+
+        def swapped_by_rename():
+            os.rename(config(), config() + ".aside")
+            with open(config(), "wb") as fh:
+                fh.write(b"slug: hri_garage\nfull_access: true\n")
+            os.replace(config() + ".aside", config())  # the original file, its inode, back in place
+
+        for what, change in (("rewritten", rewritten), ("swapped by rename", swapped_by_rename)):
+            with self.subTest(what=what):
+                self.setUp()
+                time.sleep(0.01)
+                with open(config(), "rb") as fh:
+                    before = fh.read()
+                change()
+                with open(config(), "rb") as fh:
+                    self.assertEqual(fh.read(), before)
+                with self.assertRaises(children.DefinitionChanged):
+                    children.check_tree(self.root, "garage", self.manifest)
 
     def test_changed_added_removed_or_linked(self):
         def write(rel, data, mode="wb"):
@@ -231,6 +263,32 @@ class FlowCheckTest(unittest.IsolatedAsyncioTestCase):
         job = await self.create()
         self.assertEqual(job["state"], "failed", job)
         self.assertIn("changed after the manager wrote it", job["error"])
+        self.assertFalse(self.called("/store/addons/local_hri_garage/install"))
+
+    async def test_a_definition_swapped_while_the_store_reads_it_and_put_back_is_refused(self):
+        """The writer puts a changed config.yaml in place just for the Supervisor's reload (privileged: neither
+        Supervisor answer reports it) and puts the original back: content identical, but it was written."""
+        env = self.env
+        scan = env.stub._scan
+
+        def swap_scan_restore():
+            config = os.path.join(self.folder(), "config.yaml")
+            if not os.path.exists(config):
+                return scan()
+            with open(config, "rb") as fh:
+                original = fh.read()
+            with open(config, "ab") as fh:
+                fh.write(b"privileged:\n  - SYS_ADMIN\n")
+            try:
+                return scan()
+            finally:
+                with open(config, "wb") as fh:
+                    fh.write(original)
+
+        env.stub._scan = swap_scan_restore
+        job = await self.create()
+        self.assertEqual(job["state"], "failed", job)
+        self.assertIn("hri_garage was changed after the manager wrote it", job["error"])
         self.assertFalse(self.called("/store/addons/local_hri_garage/install"))
 
     async def test_install_of_a_definition_it_did_not_just_write_checks_it_first(self):

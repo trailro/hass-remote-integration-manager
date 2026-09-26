@@ -1078,7 +1078,7 @@ class Manager:
         manifest = children.digest_tree(folder)
         try:
             raw = copies.read_file(os.path.join(folder, "config.yaml"))
-            if manifest.get("config.yaml") != "sha256:" + hashlib.sha256(raw).hexdigest():
+            if manifest.get("config.yaml", "").split(" ")[0] != "sha256:" + hashlib.sha256(raw).hexdigest():
                 raise copies.CopyError("its config.yaml changed while it was read")
             config = copies.check(yaml.safe_load(raw.decode("utf-8")), managed.name, str(managed.marker.get("version")),
                                   managed.entry.get("channel"), managed.entry.get("bluetooth") is True)

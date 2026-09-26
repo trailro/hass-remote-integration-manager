@@ -356,6 +356,7 @@ def write_new(root: str, name: str, build: Callable[[str], dict], registry: Regi
         if os.path.lexists(final):
             raise UnsafePath(f"{names.folder_name(name)} appeared while it was being written")
         os.rename(tmp, final)
+        manifest["."] = folder_identity(final)
     except BaseException:
         _remove_tree(tmp)
         raise
@@ -400,6 +401,7 @@ def replace(managed: Managed, build: Callable[[str], dict]) -> Replacement:
         except BaseException:
             os.rename(old, final)
             raise
+        manifest["."] = folder_identity(final)
     except BaseException:
         _remove_tree(tmp)
         raise
@@ -415,28 +417,42 @@ def remove(managed: Managed) -> None:
     _remove_tree(doomed)
 
 
+def _identity(st: os.stat_result) -> str:
+    return f"ino:{st.st_ino} ctime:{st.st_ctime_ns}"
+
+
+def folder_identity(folder: str) -> str:
+    """The manifest entry of a folder itself (``.``): taken again after the rename that puts it in place, which
+    changes its change time."""
+    return "dir " + _identity(os.lstat(folder))
+
+
 def digest_tree(folder: str) -> dict[str, str]:
-    """Every entry below ``folder``, never through a link: its relative POSIX path -> ``sha256:<hex>`` for a file,
-    ``link:<target>`` for a symlink, ``dir`` for a folder, ``other`` for anything else."""
-    out: dict[str, str] = {}
+    """Every entry below ``folder``, and ``.`` for the folder itself, never through a link: its relative POSIX path ->
+    what it is (``sha256:<hex>`` for a file, ``link:<target>`` for a symlink, ``dir`` for a folder, ``other`` for
+    anything else), its inode and its change time.  The change time moves on every write, rename, link or metadata
+    change of an entry (a folder's, on every entry added to or removed from it) and user space cannot set it back: a
+    definition changed and put back as it was, around the Supervisor's reading of it, differs here."""
+    out: dict[str, str] = {".": folder_identity(folder)}
     for current, dirnames, filenames in os.walk(folder):  # links to folders are listed, not followed
         rel_dir = os.path.relpath(current, folder)
         for entry in dirnames + filenames:
             path = os.path.join(current, entry)
             rel = entry if rel_dir == "." else f"{rel_dir.replace(os.sep, '/')}/{entry}"
-            mode = os.lstat(path).st_mode
-            if stat.S_ISLNK(mode):
-                out[rel] = "link:" + os.readlink(path)
-            elif stat.S_ISDIR(mode):
-                out[rel] = "dir"
-            elif stat.S_ISREG(mode):
+            st = os.lstat(path)
+            if stat.S_ISLNK(st.st_mode):
+                kind = "link:" + os.readlink(path)
+            elif stat.S_ISDIR(st.st_mode):
+                kind = "dir"
+            elif stat.S_ISREG(st.st_mode):
                 digest = hashlib.sha256()
                 with os.fdopen(open_regular(path), "rb") as fh:
                     for chunk in iter(lambda: fh.read(1024 * 1024), b""):
                         digest.update(chunk)
-                out[rel] = "sha256:" + digest.hexdigest()
+                kind = "sha256:" + digest.hexdigest()
             else:
-                out[rel] = "other"
+                kind = "other"
+            out[rel] = f"{kind} {_identity(st)}"
     return out
 
 
