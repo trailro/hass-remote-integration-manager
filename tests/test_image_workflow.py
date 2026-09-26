@@ -73,8 +73,17 @@ class ImageJobTest(unittest.TestCase):
         self.assertEqual(job["if"], "needs.image.result == 'success'")
         self.assertEqual(job["permissions"], {"contents": "write"})
         steps = [s.get("name") or s.get("uses") for s in job["steps"]]
+        # decide first; the pull check and the write only when the version really moves (a pre-release, or a manual
+        # re-run of an old tag, with a still private package must not fail)
+        self.assertLess(steps.index("Decide whether the app version moves"),
+                        steps.index("Anyone can pull the image, for both architectures"))
         self.assertLess(steps.index("Anyone can pull the image, for both architectures"),
                         steps.index("Set hri_manager/config.yaml version and image"))
+        decide = next(s for s in job["steps"] if s.get("name") == "Decide whether the app version moves")
+        self.assertNotIn("if", decide)
+        for name in ("Anyone can pull the image, for both architectures", "Set hri_manager/config.yaml version and image"):
+            step = next(s for s in job["steps"] if s.get("name") == name)
+            self.assertEqual(step.get("if"), f"steps.{decide['id']}.outputs.move == 'true'", name)
         pull = _step(job, "Anyone can pull the image, for both architectures")
         self.assertIn('DOCKER_CONFIG="$(mktemp -d)"', pull)  # no credentials: as a Supervisor pulls
         self.assertIn("linux/arm64", pull)
@@ -85,7 +94,9 @@ class AppVersionStepTest(unittest.TestCase):
     def setUp(self):
         if shutil.which("git") is None or shutil.which("bash") is None:
             self.skipTest("needs git and bash")
-        self.script = _step(_workflow()["jobs"]["app-version"], "Set hri_manager/config.yaml version and image")
+        job = _workflow()["jobs"]["app-version"]
+        self.decide = _step(job, "Decide whether the app version moves")
+        self.script = _step(job, "Set hri_manager/config.yaml version and image")
         tmp = pathlib.Path(tempfile.mkdtemp(prefix="hri-mgr-test-"))
         self.addCleanup(shutil.rmtree, tmp, True)
         self.remote, self.work, self.bin = tmp / "remote.git", tmp / "work", tmp / "bin"
@@ -101,6 +112,8 @@ class AppVersionStepTest(unittest.TestCase):
         self.git("init", "-q", "--bare", "-b", "main", str(self.remote))
         self.git("clone", "-q", str(self.remote), str(self.work))
         (self.work / "hri_manager").mkdir()
+        (self.work / ".github").mkdir()
+        shutil.copy(ROOT / ".github" / "app_version.py", self.work / ".github" / "app_version.py")
         # main as a release leaves it: the previous version and, before the first image, no image: line
         self.original = re.sub(r"(?m)^image: .*\n", "", APP_CONFIG.read_text(encoding="utf-8"))
         self.original = re.sub(r'(?m)^version: .*$', 'version: "0.1.0"', self.original)
@@ -117,24 +130,34 @@ class AppVersionStepTest(unittest.TestCase):
         self.git("push", "-q", "origin", "HEAD:main", cwd=self.work)
 
     def run_step(self, tag, releases=(("v0.1.0", False), ("v0.1.1", False), ("v0.2.0b1", True))):
-        env = {**self.env, "TAG": tag, "BRANCH": "main", "IMAGE": IMAGE,
+        """The job as GitHub runs it: the decision, then (only when it says so) the pull check and the write."""
+        output = self.work.parent / "github_output"
+        output.write_text("", encoding="utf-8")
+        env = {**self.env, "TAG": tag, "BRANCH": "main", "IMAGE": IMAGE, "GITHUB_OUTPUT": str(output),
                "GITHUB_REPOSITORY": "trailro/hass-remote-integration-manager",
                "STUB_RELEASES": json.dumps([{"tagName": t, "isPrerelease": pre, "isDraft": False} for t, pre in releases])}
-        proc = subprocess.run(["bash", "-e", "-o", "pipefail", "-c", self.script], cwd=self.work, env=env,
-                              capture_output=True, text=True)
-        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        out = ""
+        for script in (self.decide, self.script):
+            if script is self.script and "move=true" not in output.read_text(encoding="utf-8").split():
+                break
+            proc = subprocess.run(["bash", "-e", "-o", "pipefail", "-c", script], cwd=self.work, env=env,
+                                  capture_output=True, text=True)
+            self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+            out += proc.stdout
+        self.moved = "move=true" in output.read_text(encoding="utf-8").split()
         text = self.git("--git-dir", str(self.remote), "show", "main:hri_manager/config.yaml")
-        return yaml.safe_load(text), text, proc.stdout
+        return yaml.safe_load(text), text, out
 
     def log(self):
         return self.git("--git-dir", str(self.remote), "log", "--format=%s", "main").splitlines()
 
     def test_the_newest_stable_release_sets_version_and_image_once(self):
-        config, _, _ = self.run_step("v0.1.0")  # not the newest: nothing moves
-        self.assertEqual((config["version"], config.get("image")), ("0.1.0", None))
+        config, _, _ = self.run_step("v0.1.0")  # not the newest: nothing moves, nothing is checked
+        self.assertEqual((config["version"], config.get("image"), self.moved), ("0.1.0", None, False))
         config, _, _ = self.run_step("v0.1.1", releases=(("v0.1.0", False), ("v0.1.1", True)))  # a pre-release
-        self.assertEqual((config["version"], config.get("image")), ("0.1.0", None))
+        self.assertEqual((config["version"], config.get("image"), self.moved), ("0.1.0", None, False))
         config, text, _ = self.run_step("v0.1.1")
+        self.assertTrue(self.moved)
         self.assertEqual((config["version"], config["image"]), ("0.1.1", IMAGE))
         self.assertIn(f'version: "0.1.1"\nimage: {IMAGE}\n', text)
         self.assertEqual(self.log()[0], "hri_manager: version 0.1.1, the image of v0.1.1 is published")
@@ -142,8 +165,9 @@ class AppVersionStepTest(unittest.TestCase):
         original = {k: v for k, v in yaml.safe_load(self.original).items() if k != "version"}
         self.assertEqual(rest, original)  # only the version line changed, and the image line was added
         commits = len(self.log())
-        config, _, out = self.run_step("v0.1.1")  # a manual re-run: nothing to commit
+        config, _, out = self.run_step("v0.1.1")  # a manual re-run: nothing to commit, no pull check
         self.assertIn("already names 0.1.1 and its image", out)
+        self.assertFalse(self.moved)
         self.assertEqual(len(self.log()), commits)
         config, text, _ = self.run_step("v0.1.2", releases=(("v0.1.1", False), ("v0.1.2", False)))
         self.assertEqual((config["version"], config["image"]), ("0.1.2", IMAGE))
@@ -159,7 +183,7 @@ class AppVersionStepTest(unittest.TestCase):
         self.config_path.write_text(self.original.replace('version: "0.1.0"', 'version: "0.3.0"'), encoding="utf-8")
         self.commit("a newer version by hand")
         config, _, out = self.run_step("v0.1.1")
-        self.assertEqual((config["version"], config.get("image")), ("0.3.0", None))
+        self.assertEqual((config["version"], config.get("image"), self.moved), ("0.3.0", None, False))
         self.assertIn("newer than 0.1.1", out)
 
     def test_versions_compare_as_numbers(self):
