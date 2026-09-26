@@ -57,7 +57,9 @@ Keep the manager in the same backups: its `/data` holds the registry and the cop
   (compared without case); never the display name, which any administrator can change. The user name a request
   carries is never trusted for this. The manager is always for administrators only, whatever this option says: a
   user who is not one gets 403 even with the panel's address. Empty: every administrator. Entries that are all blank
-  refuse everyone (the log says so) instead of admitting every administrator.
+  refuse everyone (the log says so) instead of admitting every administrator. It is **not a security boundary between
+  administrators**: any administrator can edit this option (the app's Configuration tab) and change other users'
+  login names, so it only narrows which of them use the panel day to day.
 - `github_token`: optional, raises GitHub's rate limit for the release list. A token without any scope is enough.
 - `debug`: more detail in the log.
 
