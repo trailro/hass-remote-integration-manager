@@ -2000,6 +2000,8 @@ class Manager:
                         "manager's record said otherwise: the definition follows the app, and the record too")
         folder = children.child_path(self.root, managed.name)
         channel, version = managed.entry.get("channel"), str(managed.marker.get("version"))
+        # what follows, in the messages below: "Bluetooth", "Host network", or both
+        what = " and ".join(label for access, (_, label, _) in ACCESS.items() if installed[access] != recorded[access])
 
         def rewrite() -> dict[str, bytes]:
             raw = children.read_file(folder, "config.yaml")
@@ -2021,8 +2023,8 @@ class Manager:
                     children.replace_file(folder, children.MARKER, children.marker_bytes(managed.marker))
                     self.registry.update(managed.name, **previous)
                 except (OSError, children.UnsafePath, RegistryError) as err:
-                    _LOGGER.error("%s: its definition and its record of its access to the host may disagree now: %s",
-                                  managed.name, err)
+                    _LOGGER.error("%s: its definition and its record of %s may disagree now: %s", managed.name, what,
+                                  err)
                 raise
             try:
                 kept = copies.read_definition(copies.folder(self.copies_root, managed.name), channel)
@@ -2035,8 +2037,7 @@ class Manager:
             managed = await asyncio.to_thread(children.load_managed, self.root, managed.name, self.registry)
         except (copies.CopyError, children.UnsafePath, children.NotManaged, stamp.TemplateError, RegistryError, OSError,
                 UnicodeDecodeError, yaml.YAMLError, RecursionError) as err:
-            raise JobFailed(f"{names.folder_name(managed.name)} could not follow the installed app's access to the host: "
-                            f"{err}") from None
+            raise JobFailed(f"{names.folder_name(managed.name)} could not follow the installed app's {what}: {err}") from None
         await self._save_copy(job, managed, installed, files)
         return managed
 
