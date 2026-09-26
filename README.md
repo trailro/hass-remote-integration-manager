@@ -381,9 +381,13 @@ The app is `hri_manager/`; its Python package is `hri_manager/hrimgr/` (aiohttp,
 and a fake GitHub (`tests/fakes/stub.py`) reached over real HTTP:
 
 ```bash
-python3 -m venv /tmp/hri-mgr-venv && /tmp/hri-mgr-venv/bin/pip install -r hri_manager/requirements.txt
+python3 -m venv /tmp/hri-mgr-venv && /tmp/hri-mgr-venv/bin/pip install --require-hashes -r hri_manager/requirements.txt
 /tmp/hri-mgr-venv/bin/python -m unittest discover -s tests -t .
 ```
+
+`hri_manager/requirements.in` names the dependencies; `hri_manager/requirements.txt` is its lock, every package pinned
+with its hashes (`pip-compile --generate-hashes --strip-extras --output-file=requirements.txt requirements.in` in
+`hri_manager/`), which the image, CI and the tests install. Dependabot compiles it again when it bumps a dependency.
 
 `tools/dev_smoke.sh` builds the app's image and runs it next to the fake Supervisor in throwaway containers (the
 manager in its development mode, which only environment variables the app cannot set turn on), drives create /
