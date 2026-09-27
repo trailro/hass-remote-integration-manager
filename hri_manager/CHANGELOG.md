@@ -9,9 +9,20 @@ Still **experimental**.
   broadcast. The manager adds `host_network: true` and `ingress_port: 0` (a port the Supervisor picks per app, so
   instances never clash on the host); off unless chosen, and HRI's template can never turn it on. The instance's web
   port is then on the LAN, which HRI refuses without the app's password; the sidebar panel keeps working. Only for an
-  HRI that reads that port: a release from 0.26.0 on, or a git branch or tag whose `entrypoint.py` has
-  `APP_DYNAMIC_PORT = True` (a Rebuild onto one without it is refused unless it turns Host network off). The installed
-  app's `host_network` is recorded as your choice only as Bluetooth's is. See the README's Host network section.
+  HRI that reads that port and refuses the LAN without a password: a release from 0.26.0 on whose `entrypoint.py` sets
+  `APP_DYNAMIC_PORT = True` (the manager reads the downloaded release, never trusting the version alone), or a git
+  branch or tag that sets it (read with a parse, never run). Anything else is refused unless Host network is off. The
+  installed app's `host_network` is recorded as your choice only as Bluetooth's is. The Supervisor applies a change of
+  it only with a new version: to turn it off at the same version, Delete the instance keeping its data and create it
+  again. See the README's Host network section.
+- **The Update and Rebuild dialogs start from the manager's record** of Bluetooth and Host network, and say when the
+  installed app differs.
+- **Two instances of one integration on one broker** work from HRI 0.26.0: each instance derives a per-instance MQTT
+  identity from its app slug, and one that already published under the plain name keeps it (HRI's docs/mqtt.md). The
+  manager sets nothing for it.
+- **Fixes:** an update recorded late is settled only when the definition in place has its Bluetooth and Host network
+  too (turning an access off in place could be refused as "not checked"); the Update of a detached instance is
+  described as the API takes it.
 - **`hrimgr.stamp` is a contract with HRI's CI**: it imports with only PyYAML installed, and `vet_template` and
   `stamp(..., bluetooth=..., host_network=...)` keep their shape (a test pins both), so HRI can check its app template
   against the latest released manager before it releases.
