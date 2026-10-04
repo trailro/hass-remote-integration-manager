@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import datetime
 import hashlib
+import json
 import logging
 import os
 import secrets
@@ -309,7 +310,7 @@ class Manager:
                         continue
                     known = registered.get(entry["name"])
                     choose = ("an update the manager made set it; its next Update or Repair records it"
-                              if self._access_confirmed(known, access, has, None) else
+                              if self._access_confirmed(known, access, has, None, info.get("version")) else
                               "the manager did not make that change: " + (
                                   CHOOSE_DETACHED.format(label=label) if entry.get("detached")
                                   else CHOOSE.format(label=label, state="on" if has else "off")))
@@ -813,6 +814,10 @@ class Manager:
             return hashlib.sha256(children.read_file(children.child_path(self.root, name), "config.yaml")).hexdigest()
         except (OSError, children.UnsafePath, names.InvalidName):
             return None
+
+    @staticmethod
+    def _manifest_sha256(manifest: dict) -> str:
+        return hashlib.sha256(json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
 
     def _record_config(self, name: str):
         """A builder's on_built: the registry records the sha256 of the config.yaml written for ``name``."""
@@ -1684,6 +1689,9 @@ class Manager:
                 # this update would set its own previous definition aside and leave that one to be deleted
                 raise JobFailed(f"an earlier update of {managed.name} left its previous definition aside ({aside[0]}) "
                                 f"and it could not be settled ({'; '.join(notes)[:300]}): nothing was written")
+            pending = managed.entry.get("updating")
+            if isinstance(pending, dict) and pending.get("detached") is True:
+                return await self._retry_detached_update(job, managed, version, ref, requested, info.get("version"))
             # an update recorded late is marked to be checked first: this one must not record over that mark
             await self._refuse_marked_now(managed.name)
         marker = managed.marker
@@ -1853,13 +1861,14 @@ class Manager:
         result = {"version": version, "state": after.get("state"), "restamped": restamp}
         return {**result, "warning": warning} if warning else result
 
-    async def _after_failed_update(self, job: Job, managed: children.Managed, replacement: children.Replacement,
+    async def _after_failed_update(self, job: Job, managed: children.Managed, replacement: children.Replacement | None,
                                    version: str, recorded: dict, err: Exception, verified: bool,
                                    files: dict[str, bytes], access: dict) -> None:
         """An update call that failed after it was sent: what the Supervisor has now decides.  Installed all the same:
         the new definition stays and is recorded (marked to be checked unless it was), never the previous one put
-        back (the Supervisor would offer a downgrade).  Not known yet (no answer, or no clean refusal): both stay for
-        the next start to settle.  Returns only when the update did not happen: the caller puts the previous one back."""
+        back (the Supervisor would offer a downgrade).  Not known yet (no answer, or no clean refusal): the definition
+        and flag stay for the next start to settle.  A detached update has no previous definition (replacement None).
+        Returns only when the update did not happen: the caller undoes the new definition."""
         try:
             now = (await self.sv.app_info(managed.slug)).get("version")
         except Exception:  # noqa: BLE001 - not known
@@ -1870,8 +1879,13 @@ class Manager:
                 f"its update to {version} was not checked: the update call failed ({str(err)[:200]}) after the "
                 "Supervisor had installed it")
             try:
-                await asyncio.to_thread(self.registry.update, managed.name, updating=None, **{**recorded, "tampered": mark})
-                await asyncio.to_thread(replacement.commit)
+                if replacement is None:
+                    await asyncio.to_thread(self.registry.put, managed.name,
+                                            {"name": managed.name, **recorded, "updating": None, "tampered": mark})
+                else:
+                    await asyncio.to_thread(self.registry.update, managed.name, updating=None,
+                                            **{**recorded, "tampered": mark})
+                    await asyncio.to_thread(replacement.commit)
             except (RegistryError, OSError) as err2:
                 job.log(f"warning: {err2}; the next start records it")
             await self._save_copy(job, managed, access, files)
@@ -1879,9 +1893,11 @@ class Manager:
                             "is recorded" + ("" if verified else "; the manager has not checked it yet: Check again "
                                                                "on its row")) from None
         if now is None or unsure:
-            raise JobFailed(f"{err}. Whether the Supervisor installed {version} is not known yet: both definitions "
-                            "stay, and the manager's next start keeps the new one if it did, or puts the previous one "
-                            "back") from None
+            recovery = ("both definitions stay, and the manager's next start keeps the new one if it did, or puts the "
+                        "previous one back" if replacement is not None else
+                        "its new definition and the requested update's record stay until the Supervisor reports "
+                        "the target version; Check again after it finishes or restart the manager")
+            raise JobFailed(f"{err}. Whether the Supervisor installed {version} is not known yet: {recovery}") from None
 
     async def _installed_access(self, slug: str, recorded: dict[str, bool]) -> dict[str, bool]:
         """Each access (ACCESS) the installed app has, as the Supervisor reports it (its host_dbus, host_network; the
@@ -1895,7 +1911,8 @@ class Manager:
                 for access, (key, _, _) in ACCESS.items()}
 
     @staticmethod
-    def _access_confirmed(entry: dict | None, access: str, installed: bool, requested: bool | None) -> bool:
+    def _access_confirmed(entry: dict | None, access: str, installed: bool, requested: bool | None,
+                          installed_version: str | None = None) -> bool:
         """Whether ``installed`` (what the app has of ``access``) may be recorded as the instance's choice where the
         registry says the other: the admin chose it (``requested``), or the manager made that change itself, in an
         update whose record is late (the registry's ``updating`` flag names it)."""
@@ -1903,6 +1920,8 @@ class Manager:
             return requested is installed
         flag = (entry or {}).get("updating")
         fields = flag.get("fields") if isinstance(flag, dict) and isinstance(flag.get("fields"), dict) else {}
+        if isinstance(flag, dict) and flag.get("detached") is True and fields.get("version") != installed_version:
+            return False
         return fields.get(access) is installed
 
     @staticmethod
@@ -2057,6 +2076,21 @@ class Manager:
 
     async def _setup(self, job: Job, managed: children.Managed, install: bool) -> dict:
         entry = await self._refuse_marked_now(managed.name, check=not install)
+        pending = (entry or {}).get("updating")
+        if isinstance(pending, dict) and pending.get("detached") is True:
+            try:
+                info = await self.sv.app_info(managed.slug)
+                notes = await asyncio.to_thread(children.settle_instance, self.root, self.registry, managed.name,
+                                                info.get("version"))
+                managed = await asyncio.to_thread(children.load_managed, self.root, managed.name, self.registry)
+            except (SupervisorError, NotAllowed, RegistryError, children.NotManaged, OSError) as err:
+                raise JobFailed(str(err)) from None
+            for note in notes:
+                job.log(note)
+            if isinstance(managed.entry.get("updating"), dict):
+                raise JobFailed("its earlier detached update may still finish: wait for its target before Check "
+                                "again, or retry the same Update")
+            entry = await self._refuse_marked_now(managed.name, check=not install)
         mark = (entry or {}).get("tampered")
         # Check again of a hold that found start at boot off (the admin's choice) leaves it off
         boot = not (isinstance(mark, dict) and "boot_manual" in mark and mark["boot_manual"] is None)
@@ -2205,6 +2239,16 @@ class Manager:
             raise NeedsAttention(f"the installed {slug} is a {'git build' if channel == 'git' else 'release'} "
                                  f"({version}), the manager's registry says {entry.get('channel')}: which source it "
                                  "was built from is not known")
+        flag = entry.get("updating")
+        fields = flag.get("fields") if isinstance(flag, dict) and isinstance(flag.get("fields"), dict) else {}
+        if isinstance(flag, dict) and flag.get("detached") is True:
+            if fields.get("version") != version:
+                raise JobFailed(f"its detached update to {fields.get('version')} may still finish: the Supervisor "
+                                f"currently reports {version}; its requested update's record stays. Wait for it or "
+                                "let the Supervisor finish before Repair")
+            # A restore may also have lost the definition of an update whose answer was lost.  Keep its exact source
+            # and authorized choices; the ordinary repair checks below still verify the installed definition.
+            entry = {**entry, **fields, "updating": flag}
         if channel == "git":
             try:
                 ref = names.validate_ref(entry.get("ref_kind"), entry.get("ref"))
@@ -2221,7 +2265,7 @@ class Manager:
         for access, (_, label, what) in ACCESS.items():
             if installed_access[access] == recorded_access[access]:
                 continue
-            if not self._access_confirmed(entry, access, installed_access[access], None):
+            if not self._access_confirmed(entry, access, installed_access[access], None, version):
                 raise NeedsAttention(self._access_not_chosen(slug, access, installed_access[access], detached=True))
             job.log(f"{label}: the installed app {'has' if installed_access[access] else 'does not have'} {what}, the "
                     "manager's record said otherwise: the definition follows the app, and the record too")
@@ -2330,18 +2374,36 @@ class Manager:
         """Update (release) or Rebuild (git) of an instance whose definition is gone (installed, detached, in the
         registry): the definition of a NEWER version, written and installed in one job the user asked for.  The page
         offers it for an instance that needs attention (Repair could not write its installed version) and Repair for
-        any other; the API takes it for either.  If the update does not succeed the definition is removed again (the
-        instance stays detached)."""
+        any other; the API takes it for either.  A definite refusal removes the definition again; after a lost answer
+        or cancellation the target and its authorized choices stay until the installed version settles it."""
         slug = names.supervisor_slug(name)
         await self._refuse_marked_now(name)
         # it writes a definition (and removes it again on failure, with a store reload): not while a decoy is there
         await self._refuse_decoys()
         entry, info = await self._detached(job, name, "update")
+        pending = entry.get("updating")
+        retry = isinstance(pending, dict) and pending.get("detached") is True
+        pending_fields = pending.get("fields", {}) if retry else {}
+        if retry:
+            pending_ref = (pending_fields.get("ref_kind"), pending_fields.get("ref"))
+            pending_access = self._access_of(pending_fields)
+            if ((version is not None and version != pending_fields.get("version"))
+                    or (ref is not None and ref != pending_ref)
+                    or any(v is not None and v != pending_access[a] for a, v in (requested or {}).items())):
+                raise JobFailed("its earlier detached update may still finish: only the same version, source and "
+                                "access choices can be retried until it is checked")
+            if info.get("version") == pending_fields.get("version"):
+                raise JobFailed("its earlier detached update has installed its target: Repair checks that version "
+                                "before another Update")
+            if info.get("version") != pending.get("from_version", entry.get("version")):
+                raise JobFailed("the installed version differs from the version its pending detached update began "
+                                "with: not retried or downgraded")
+            version, ref = pending_fields.get("version"), pending_ref
         installed = str(info.get("version") or "")
         channel = entry.get("channel")
         # the registry's choices: the default for a newer version (never what the installed app has, which the manager
         # may not have made); at the installed version only the app's, as the admin's choice (_access_at_same_version)
-        recorded = self._access_of(entry)
+        recorded = self._access_of(pending_fields if retry else entry)
         requested = {a: (requested or {}).get(a) for a in ACCESS}
         access = {a: recorded[a] if requested[a] is None else requested[a] for a in ACCESS}
         if channel == "release":
@@ -2358,13 +2420,18 @@ class Manager:
                                 "and the installed version is Repair's")
             await self._check_release(version)
             new_ref = ("tag", f"v{version}")
-            archive, source = await self._fetch(job, "release", version, new_ref)
+            archive, source = await self._fetch(job, "release", version, new_ref,
+                                                recorded=pending_fields.get("sha") if retry else None)
         else:
             try:
                 new_ref = ref or names.validate_ref(entry.get("ref_kind"), entry.get("ref"))
             except ValueError as err:
                 raise JobFailed(f"the manager's registry has no usable branch or tag for {name}: {err}; name one") from None
-            archive, source = await self._fetch(job, "git", None, new_ref)
+            if retry:
+                archive, source = await self.gh.tarball_of_commit(pending_fields["sha"], *new_ref)
+                job.keep(archive)
+            else:
+                archive, source = await self._fetch(job, "git", None, new_ref)
             version = names.git_version(archive.sha)
             if version == installed:
                 if not isinstance(entry.get("needs_attention"), dict):
@@ -2382,29 +2449,46 @@ class Manager:
         marker["created_at"] = entry.get("created_at") or marker["created_at"]
         job.log(f"writing {names.folder_name(name)} for {version} (installed: {installed}), then updating")
         built: dict = {}
+        target = self._registry_entry(marker, setup_complete=entry.get("setup_complete", True))
+        target.pop("name")  # Registry.update takes the name as its argument, never as an updated field
+        flag = {"at": children.now_iso(), "fields": target, "detached": True,
+                "from_version": pending.get("from_version", installed) if retry else installed}
+
+        def record_config(digest: str) -> None:
+            target["config_sha256"] = digest
+            self.registry.update(name, updating=flag)
+
         try:
-            await asyncio.to_thread(self.registry.put, name,
-                                    self._registry_entry(marker, setup_complete=entry.get("setup_complete", True)))
+            await asyncio.to_thread(self.registry.update, name, updating=flag)
             managed = await asyncio.to_thread(
                 children.write_new, self.root, name,
                 self._builder(job, archive, channel, name, version, sha, marker, source, built=built, access=access,
-                              on_built=self._record_config(name)),
+                              on_built=record_config),
                 self.registry)
         except WRITE_ERRORS as err:
             await self._undo_registry(job, self._restore_entry, name, entry, marker["instance_id"])
             raise JobFailed(f"the definition was not written: {err}") from None
         expected = stamp.expected_view(built["config"], slug)
+        sent = verified = False
         try:
+            flag["manifest_sha256"] = self._manifest_sha256(managed.manifest)
+            await asyncio.to_thread(self.registry.update, name, updating=flag)
             await self._wait_store(job, slug, version, managed.manifest)
             await self._verify_store(job, managed, expected, managed.manifest)
             job.log(f"updating {installed} -> {version}" + (" (building)" if channel == "git" else ""))
+            sent = True
             await self.sv.update(managed)
             unsearched = await self._check_installed_source(managed, managed.manifest)
             missing = await self._verify_installed(job, managed, expected)
+            verified = not missing and not unsearched
             after = await self.sv.app_info(slug)
             if after.get("version") != version:
                 raise JobFailed(f"the Supervisor reports {after.get('version')} after the update, not {version}")
         except asyncio.CancelledError:
+            if sent:
+                job.log("the manager is stopping while the Supervisor updates it: its new definition and requested "
+                        "update's record stay; the next start settles whether it was installed")
+                raise
             job.log("the manager is stopping: removing the definition again")
             await self._shielded(job, self._undo_detached(job, managed, entry), "removing it")
             raise
@@ -2415,16 +2499,80 @@ class Manager:
             await self._set_mark(name, mark)  # the entry put back has no mark
             raise self._tampered(managed, str(err), mark, "and its definition removed again") from None
         except Exception as err:
+            if sent:
+                await self._after_failed_update(job, managed, None, version, target, err, verified,
+                                                built["files"], access)
             job.log(f"{err}: removing the definition again (the instance stays as it was)")
             await self._undo_detached(job, managed, entry)
             if isinstance(err, (SupervisorError, NotAllowed)):
                 raise JobFailed(str(err)) from None
             raise
+        try:
+            await asyncio.to_thread(self.registry.put, name, {"name": name, **target, "updating": None})
+        except RegistryError as err:
+            job.log(f"warning: {err}; its update flag lets the next start record it")
         self._clear_auto(name)
         await self._save_copy(job, managed, access, built["files"])
         if missing or unsearched:
             raise await self._hold(job, managed, missing, reason=unsearched)
         return {"version": version, "state": after.get("state")}
+
+    async def _retry_detached_update(self, job: Job, managed: children.Managed, version: str | None,
+                                     ref: tuple[str, str] | None, requested: dict | None, installed: str | None) -> dict:
+        """Retry the exact authorized target of an uncertain detached update, without superseding its provenance.
+        Even a clean retry refusal cannot establish that the earlier Supervisor task will never finish."""
+        pending = managed.entry["updating"]
+        target = pending["fields"]
+        if installed != pending.get("from_version", managed.entry.get("version")):
+            raise JobFailed("the installed version differs from the version its pending detached update began "
+                            "with: not retried or downgraded")
+        access = self._access_of(target)
+        target_ref = (target.get("ref_kind"), target.get("ref"))
+        if ((version is not None and version != target.get("version")) or (ref is not None and ref != target_ref)
+                or any(v is not None and v != access[a] for a, v in (requested or {}).items())):
+            raise JobFailed("its earlier detached update may still finish: only the same version, source and access "
+                            "choices can be retried until it is checked")
+        if (any(managed.marker.get(k) != target.get(k) for k in ("version", "sha", "ref_kind", "ref", "stamp_version"))
+                or self._access_of(managed.marker) != access
+                or await asyncio.to_thread(self._config_sha256, managed.name) != target.get("config_sha256")):
+            raise JobFailed("its pending detached update's definition changed: not retried; restore its definition "
+                            "before retrying, or Repair once its target is installed")
+        await self._refuse_decoys()
+        effective = children.Managed(root=managed.root, name=managed.name, marker=managed.marker,
+                                     registry=managed.registry, entry={**managed.entry, **target})
+        expected, manifest = await asyncio.to_thread(self._definition_on_disk, effective)
+        if self._manifest_sha256(manifest) != pending.get("manifest_sha256"):
+            raise JobFailed("its pending detached update's source files changed: not retried from the local tree; "
+                            "restore its definition from the recorded source before retrying")
+        files = await asyncio.to_thread(copies.read_definition, children.child_path(self.root, managed.name),
+                                        target.get("channel"))
+        sent = verified = False
+        try:
+            await self._wait_store(job, managed.slug, target["version"], manifest)
+            await self._verify_store(job, managed, expected, manifest)
+            job.log(f"retrying its earlier detached update to {target['version']}, with the same source and choices")
+            sent = True
+            await self.sv.update(managed)
+            unsearched = await self._check_installed_source(managed, manifest)
+            missing = await self._verify_installed(job, managed, expected)
+            verified = not missing and not unsearched
+            after = await self.sv.app_info(managed.slug)
+            if after.get("version") != target["version"]:
+                raise JobFailed(f"the Supervisor reports {after.get('version')} after the retry, not {target['version']}")
+        except Tampered as err:
+            mark = await self._contain(job, managed, str(err))
+            raise self._tampered(managed, str(err), mark, "") from None
+        except Exception as err:
+            if sent:
+                await self._after_failed_update(job, managed, None, target["version"], target, err, verified, files, access)
+            raise JobFailed(f"{err}. Its earlier detached update may still finish; its target and requested update's "
+                            "record stay for another retry") from None
+        await asyncio.to_thread(self.registry.put, managed.name, {"name": managed.name, **target, "updating": None})
+        await self._save_copy(job, managed, access, files)
+        self._clear_auto(managed.name)
+        if missing or unsearched:
+            raise await self._hold(job, managed, missing, reason=unsearched)
+        return {"version": target["version"], "state": after.get("state")}
 
     async def _adopt_installed_commit(self, job: Job, name: str, entry: dict, info: dict, ref: tuple[str, str], archive,
                                       source: str, user: str) -> dict:
