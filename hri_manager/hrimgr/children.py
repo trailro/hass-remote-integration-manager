@@ -696,17 +696,25 @@ def settle_update(registry: Registry, name: str, entry: dict, marker: dict, inst
     if not isinstance(target, dict):
         return None
     fields = target.get("fields") if isinstance(target.get("fields"), dict) else {}
+    if target.get("detached") is True and installed_version != fields.get("version"):
+        return None  # the earlier Supervisor task may finish after this snapshot, even after a restart
 
     def key(d: dict) -> tuple:
         return (d.get("version"), d.get("sha"), d.get("stamp_version"), *(d.get(a) is True for a in ACCESS_FIELDS))
 
+    if target.get("detached") is True and key(marker) != key(fields):
+        return None  # a restored/changed old marker does not erase the authorized uncertain target
     if fields and key(marker) == key(fields):
         if installed_version is None:
             return None
         if installed_version == fields.get("version"):
-            registry.update(name, updating=None, **{**fields, "tampered": pending_mark(
+            recorded = {**fields, "tampered": pending_mark(
                 f"its update to {fields.get('version')} was recorded late: the manager had stopped before it compared "
-                "the installed app with the definition it wrote")})
+                "the installed app with the definition it wrote")}
+            if target.get("detached") is True:
+                registry.put(name, {"name": name, **recorded, "updating": None})
+            else:
+                registry.update(name, updating=None, **recorded)
             return f"{name}: its update to {fields.get('version')} had finished; the registry records it now"
         registry.update(name, updating=None)
         return f"{name}: its update to {fields.get('version')} was not installed; its flag is cleared"
@@ -728,6 +736,15 @@ def _settle_updates(real_root: str, registry: Registry, done: list[str], install
         try:
             marker = read_marker(os.path.join(real_root, names.folder_name(name)), name)
         except NotManaged:
+            continue
+        target = entry["updating"]
+        fields = target.get("fields") if isinstance(target.get("fields"), dict) else {}
+        version = installed.get(name)
+        if target.get("detached") is True and version != fields.get("version"):
+            # An old installed version is no refusal: the Supervisor may still finish a sent update after this
+            # restart.  Keep the authorized target and its provenance until it is seen, even across more starts.
+            done.append(f"{name}: its detached update to {fields.get('version')} may still finish; "
+                        "its definition and requested update's record were kept")
             continue
         note = settle_update(registry, name, entry, marker, installed.get(name))
         if note:
