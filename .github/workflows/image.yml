@@ -1,7 +1,8 @@
 name: Image
 
 # Publishes the manager's image for amd64 and arm64 to GitHub Container Registry, ghcr.io/<owner>/<repo>:
-# :<version>, :<major>.<minor> when it is the highest stable release of that series, and :latest when a published,
+# Builds :<version> first, then promotes its digest under a shared lock to :<major>.<minor> when it is the highest
+# stable release of that series, and :latest when a published,
 # non-prerelease release carries the highest stable tag.  Runs when a release is published; "Run workflow" publishes
 # an existing tag again (after a registry cleanup, say) and never moves :latest.
 #
@@ -25,6 +26,7 @@ permissions:
 concurrency:
   group: image-${{ github.event.release.tag_name || inputs.tag }}
   cancel-in-progress: false
+  queue: max
 
 jobs:
   image:
@@ -37,6 +39,8 @@ jobs:
     permissions:
       contents: read
       packages: write
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
     env:
       TAG: ${{ github.event.release.tag_name || inputs.tag }}
     steps:
@@ -55,9 +59,74 @@ jobs:
             echo "::error::$TAG, but hri_manager/hrimgr/__init__.py says $code"
             exit 1
           fi
+      - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1  # v4.4.0
+      - uses: docker/setup-buildx-action@594f3bf4285d9ea8dc53c9a0c9c4092420091003  # v4.4.0
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f  # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302  # v6.2.0
+        with:
+          images: ghcr.io/${{ github.repository }}
+          context: git   # labels from the checked-out tag, not from the default branch of a manual run
+          flavor: latest=false
+          tags: |
+            type=semver,pattern={{version}},value=${{ env.TAG }}
+      - id: build
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc  # v7.4.0
+        with:
+          # the app's folder, as the Supervisor builds it on the device
+          context: hri_manager
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=image
+          cache-to: type=gha,mode=max,scope=image
+
+  app-version:
+    # the version and the image: line move here, after the image is pushed and pullable, never in the release PR (the
+    # update would be offered before the image could be pulled). Newest stable releases only; floating tag
+    # promotion uses the same lock so a slower old build cannot overwrite a newer promotion.
+    name: Promote image and app version on the default branch
+    needs: image
+    if: needs.image.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # All floating tags and config writes share this lock. Queue every promotion instead of replacing the
+    # pending newest release with a slower old build; version-specific image builds remain independent.
+    concurrency:
+      group: image-promotion
+      cancel-in-progress: false
+      queue: max
+    permissions:
+      contents: write   # the one commit below
+      packages: write   # promote the already pushed multi-architecture digest
+    env:
+      TAG: ${{ github.event.release.tag_name || inputs.tag }}
+      BRANCH: ${{ github.event.repository.default_branch }}
+      IMAGE: ghcr.io/${{ github.repository }}
+      DIGEST: ${{ needs.image.outputs.digest }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          fetch-depth: 0
+          # the token that can write the repository is not left in .git/config for every step: the push below
+          # takes it for that one command
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@594f3bf4285d9ea8dc53c9a0c9c4092420091003  # v4.4.0
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f  # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
       - id: latest
         name: Is this the newest stable release, and the newest of its X.Y series?
-        # from the releases, not from the event or the tags: a manual run knows nothing of the release it builds, and a
+        # Recheck after acquiring the shared promotion lock, immediately before moving the tags.
+        # From the releases, not from the event or the tags: a manual run knows nothing of the release it builds, and a
         # pre-release can carry a plain vX.Y.Z tag
         env:
           GH_TOKEN: ${{ github.token }}
@@ -79,59 +148,21 @@ jobs:
           fi
           echo "tag $TAG, newest stable $newest, newest of ${TAG%.*}: ${series:-none}"
           cat "$GITHUB_OUTPUT"
-      - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1  # v4.4.0
-      - uses: docker/setup-buildx-action@594f3bf4285d9ea8dc53c9a0c9c4092420091003  # v4.4.0
-      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f  # v4.6.0
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-      - id: meta
-        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302  # v6.2.0
-        with:
-          images: ghcr.io/${{ github.repository }}
-          context: git   # labels from the checked-out tag, not from the default branch of a manual run
-          flavor: latest=false
-          tags: |
-            type=semver,pattern={{version}},value=${{ env.TAG }}
-            type=semver,pattern={{major}}.{{minor}},value=${{ env.TAG }},enable=${{ steps.latest.outputs.minor }}
-            type=raw,value=latest,enable=${{ steps.latest.outputs.enable }}
-      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc  # v7.4.0
-        with:
-          # the app's folder, as the Supervisor builds it on the device
-          context: hri_manager
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha,scope=image
-          cache-to: type=gha,mode=max,scope=image
-
-  app-version:
-    # the version and the image: line move here, after the image is pushed and pullable, never in the release PR (the
-    # update would be offered before the image could be pulled).  Newest stable releases only
-    name: App version on the default branch
-    needs: image
-    if: needs.image.result == 'success'
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    permissions:
-      contents: write   # the one commit below
-    env:
-      TAG: ${{ github.event.release.tag_name || inputs.tag }}
-      BRANCH: ${{ github.event.repository.default_branch }}
-      IMAGE: ghcr.io/${{ github.repository }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          ref: ${{ github.event.repository.default_branch }}
-          fetch-depth: 0
-          # the token that can write the repository is not left in .git/config for every step: the push below
-          # takes it for that one command
-          persist-credentials: false
+      - name: Promote the built digest to shared tags
+        env:
+          LATEST: ${{ steps.latest.outputs.enable }}
+          MINOR: ${{ steps.latest.outputs.minor }}
+        run: |
+          set --
+          if [ "$LATEST" = true ]; then set -- "$@" --tag "$IMAGE:latest"; fi
+          if [ "$MINOR" = true ]; then
+            version=${TAG#v}
+            set -- "$@" --tag "$IMAGE:${version%.*}"
+          fi
+          if [ "$#" -gt 0 ]; then docker buildx imagetools create "$@" "$IMAGE@$DIGEST"; fi
       - id: decide
         name: Decide whether the app version moves
-        # the newest stable release from the releases (see the image job), the version never lowered, and something
+        # the newest stable release from the releases, the version never lowered, and something
         # to change: only then is the image checked and the file written
         env:
           GH_TOKEN: ${{ github.token }}

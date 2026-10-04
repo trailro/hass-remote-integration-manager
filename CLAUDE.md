@@ -47,7 +47,9 @@ Keep venvs out of the repo. Check the exit code, never `| tail` the runner. All 
 3. Docs match the code.
 4. Merge, then publish the GitHub release `vX.Y.Z` from `main`. The Image workflow checks that the tag's
    `__init__.py` says X.Y.Z, builds amd64 + arm64, pushes `ghcr.io/trailro/hass-remote-integration-manager:X.Y.Z`
-   (`:X.Y` and `:latest` for the newest stable). The `app-version` job then decides (`.github/app_version.py`): only
+   first. The `app-version` job queues under a shared promotion lock, rechecks the stable releases and promotes that
+   build's digest to `:X.Y` for the newest of its series and `:latest` for the newest stable release event. Under the
+   same lock it then decides (`.github/app_version.py`): only
    for the newest stable release, never lowering the version, does it check an anonymous pull and commit the version
    (and the first time the `image:` line) to `main`. Pre-releases and re-runs of old tags get an image but move
    nothing and check nothing.
