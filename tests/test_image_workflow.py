@@ -76,7 +76,7 @@ class ImageJobTest(unittest.TestCase):
         job = _workflow()["jobs"]["app-version"]
         self.assertEqual(job["needs"], "image")
         self.assertEqual(job["if"], "needs.image.result == 'success'")
-        self.assertEqual(job["permissions"], {"contents": "write"})
+        self.assertEqual(job["permissions"], {"contents": "write", "packages": "write"})
         steps = [s.get("name") or s.get("uses") for s in job["steps"]]
         # decide first; the pull check and the write only when the version really moves (a pre-release, or a manual
         # re-run of an old tag, with a still private package must not fail)
@@ -100,6 +100,97 @@ class ImageJobTest(unittest.TestCase):
         authed = [line for line in write["run"].splitlines() if "GH_TOKEN" in line or "extraheader" in line]
         self.assertEqual(len(authed), 3, authed)  # the header built once, then the pull and the push
         self.assertNotRegex(write["run"], r"https://[^ ]*\$GH_TOKEN|x-access-token:\$")
+
+
+class ImagePromotionStepTest(unittest.TestCase):
+    """Run the locked job's own decision/promotion scripts; docker is a command-recording stub."""
+
+    def setUp(self):
+        self.job = _workflow()["jobs"]["app-version"]
+        self.decide = _step(self.job, "Is this the newest stable release, and the newest of its X.Y series?")
+        self.promote = _step(self.job, "Promote the built digest to shared tags")
+        self.tmp = pathlib.Path(tempfile.mkdtemp(prefix="hri-mgr-test-"))
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.bin = self.tmp / "bin"
+        self.bin.mkdir()
+        for name, script in {"gh": GH, "docker": """#!/usr/bin/env python3
+import json, os, sys
+with open(os.environ["STUB_DOCKER_LOG"], "a", encoding="utf-8") as fh:
+    fh.write(json.dumps(sys.argv[1:]) + "\\n")
+"""}.items():
+            path = self.bin / name
+            path.write_text(script, encoding="utf-8")
+            path.chmod(stat.S_IRWXU)
+        (self.bin / "python3").symlink_to(sys.executable)
+        self.output = self.tmp / "output"
+        self.log = self.tmp / "docker_log"
+        self.env = {**os.environ, "PATH": f"{self.bin}{os.pathsep}{os.environ.get('PATH', '')}",
+                    "GITHUB_REPOSITORY": "trailro/hass-remote-integration-manager", "IMAGE": IMAGE,
+                    "GITHUB_OUTPUT": str(self.output), "STUB_DOCKER_LOG": str(self.log)}
+
+    def run_promotion(self, tag, releases, event="release", digest="sha256:" + "a" * 64):
+        self.output.write_text("", encoding="utf-8")
+        env = {**self.env, "TAG": tag, "DIGEST": digest, "GITHUB_EVENT_NAME": event,
+               "STUB_RELEASES": json.dumps(releases)}
+        for script in (self.decide, self.promote):
+            if script == self.promote:
+                outputs = dict(line.split("=", 1) for line in self.output.read_text().splitlines())
+                env.update(LATEST=outputs["enable"], MINOR=outputs["minor"])
+            run = subprocess.run(["bash", "-e", "-o", "pipefail", "-c", script], cwd=ROOT, env=env,
+                                 capture_output=True, text=True, timeout=10)
+            self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        return [json.loads(line) for line in self.log.read_text().splitlines()] if self.log.exists() else []
+
+    @staticmethod
+    def releases(*tags):
+        return [{"tagName": tag, "isPrerelease": False, "isDraft": False} for tag in tags]
+
+    def test_only_exact_version_is_built_and_all_promotions_share_a_queue(self):
+        wf = _workflow()
+        image = wf["jobs"]["image"]
+        meta = next(step for step in image["steps"] if step.get("id") == "meta")
+        self.assertEqual(meta["with"]["flavor"], "latest=false")
+        self.assertEqual(meta["with"]["tags"].strip(), "type=semver,pattern={{version}},value=${{ env.TAG }}")
+        self.assertEqual(image["outputs"]["digest"], "${{ steps.build.outputs.digest }}")
+        self.assertEqual(self.job["env"]["DIGEST"], "${{ needs.image.outputs.digest }}")
+        self.assertEqual(self.job["concurrency"],
+                         {"group": "image-promotion", "cancel-in-progress": False, "queue": "max"})
+        self.assertIn("inputs.tag", wf["concurrency"]["group"])
+        self.assertEqual(wf["concurrency"]["queue"], "max")
+        self.assertNotIn("latest", [step.get("id") for step in image["steps"]])
+        names = [step.get("name") for step in self.job["steps"]]
+        self.assertLess(names.index("Is this the newest stable release, and the newest of its X.Y series?"),
+                        names.index("Promote the built digest to shared tags"))
+        self.assertLess(names.index("Promote the built digest to shared tags"),
+                        names.index("Decide whether the app version moves"))
+
+    def test_old_build_finishing_after_new_promotion_cannot_lower_shared_tags(self):
+        releases = self.releases("v0.2.1", "v0.2.2")
+        newest_digest = "sha256:" + "b" * 64
+        expected = [["buildx", "imagetools", "create", "--tag", f"{IMAGE}:latest", "--tag", f"{IMAGE}:0.2",
+                     f"{IMAGE}@{newest_digest}"]]
+        self.assertEqual(self.run_promotion("v0.2.2", releases, digest=newest_digest), expected)
+        self.assertEqual(self.run_promotion("v0.2.1", releases), expected)
+
+    def test_each_series_is_promoted_independently_and_versions_compare_numerically(self):
+        releases = self.releases("v0.9.0", "v0.9.1", "v0.10.0")
+        self.assertEqual(self.run_promotion("v0.9.0", releases), [])
+        commands = self.run_promotion("v0.9.1", releases)
+        self.assertEqual(commands[0][3:5], ["--tag", f"{IMAGE}:0.9"])
+        self.assertNotIn(f"{IMAGE}:latest", commands[0])
+        commands = self.run_promotion("v0.10.0", releases)
+        self.assertIn(f"{IMAGE}:latest", commands[-1])
+        self.assertIn(f"{IMAGE}:0.10", commands[-1])
+
+    def test_manual_runs_never_move_latest_and_prereleases_and_drafts_move_nothing(self):
+        releases = self.releases("v0.2.1") + [
+            {"tagName": "v0.2.2", "isPrerelease": True, "isDraft": False},
+            {"tagName": "v0.3.0", "isPrerelease": False, "isDraft": True}]
+        for tag in ("v0.2.2", "v0.3.0", "v0.2.3-rc1"):
+            self.assertEqual(self.run_promotion(tag, releases), [])
+        command = self.run_promotion("v0.2.1", releases, event="workflow_dispatch")[0]
+        self.assertEqual(command[3:5], ["--tag", f"{IMAGE}:0.2"])
+        self.assertNotIn(f"{IMAGE}:latest", command)
 
 
 class AppVersionScriptTest(unittest.TestCase):

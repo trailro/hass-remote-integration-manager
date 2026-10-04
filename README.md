@@ -582,7 +582,9 @@ three instances side by side: no venv or logs in any of them, their state kept, 
 instance of HRI 0.25.0's template and kept from HRI 0.25.2 on), a build of the image for amd64 and arm64, and, once `config.yaml` names an image, an anonymous
 pull of that image at its version for both architectures (`.github/check_published_image.py`). A published release runs the Image workflow
 (`.github/workflows/image.yml`): it pushes the image for both architectures to ghcr.io and only then moves the app's
-version on `main` (see `CLAUDE.md`, Release checklist).
+version on `main` (see `CLAUDE.md`, Release checklist). Builds push only the exact version tag; a shared promotion
+queue rechecks the stable releases before moving `:latest`, `:X.Y` and the app version, so an older build finishing
+later cannot overwrite a newer promotion.
 
 ## License
 
