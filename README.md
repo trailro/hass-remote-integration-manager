@@ -571,7 +571,9 @@ with its hashes (`pip-compile --generate-hashes --strip-extras --output-file=req
 
 `tools/dev_smoke.sh` builds the app's image and runs it next to the fake Supervisor in throwaway containers (the
 manager in its development mode, which only environment variables the app cannot set turn on), drives create /
-update / delete through the page's API and takes screenshots; see its header.
+update / delete through the page's API and takes screenshots; see its header. Its fixed Docker resources, subnet
+and host port are protected by `/tmp/hri-mgr-dev.lock`: concurrent smoke invocations stop before any Docker
+cleanup. An abrupt kill can leave that lock; remove it only after confirming no smoke run is active.
 
 CI runs the unit tests on Python 3.13 and 3.14, the app linter on the manager and on an instance stamped from HRI's
 template, the Supervisor's own schema checks of both and of an instance with Bluetooth or Host network

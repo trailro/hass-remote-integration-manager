@@ -1,11 +1,15 @@
 """The repository as the Supervisor and a reader see it: one app, its config pinned, versions in step, relative URLs
 only, development mode unreachable from the app, and nothing private."""
 
+import json
 import os
 import pathlib
 import re
+import signal
 import subprocess
+import sys
 import tempfile
+import time
 import unittest
 
 import yaml
@@ -161,6 +165,83 @@ class DevSmokeTest(unittest.TestCase):
         self.assertEqual(run.returncode, 130, run)
         self.assertNotIn("went on", run.stdout)
         self.assertIn("cleaned", run.stdout)
+
+
+    def test_overlapping_runs_cannot_cleanup_the_owner_and_lock_is_released_on_interrupt(self):
+        """Execute the smoke script with filesystem and command stubs, without contacting Docker or HTTP."""
+        with tempfile.TemporaryDirectory(prefix="hri-mgr-test-") as tmp_name:
+            tmp = pathlib.Path(tmp_name)
+            bin_dir = tmp / "bin"
+            bin_dir.mkdir()
+            stub = bin_dir / "stub"
+            stub.write_text(f"#!{sys.executable}\n" + r'''import json, os, pathlib, sys, time
+name = pathlib.Path(sys.argv[0]).name
+if name in ("mkdir", "rmdir"):
+    if sys.argv[1:] != ["/tmp/hri-mgr-dev.lock"]:
+        sys.exit("unexpected lock command")
+    try:
+        getattr(os, name)(os.environ["STUB_LOCK"])
+    except OSError:
+        sys.exit(1)
+elif name == "curl":
+    print("403", end="")
+elif name == "docker":
+    args = sys.argv[1:]
+    with open(os.environ["STUB_LOG"], "a", encoding="utf-8") as fh:
+        fh.write(json.dumps(args) + "\n")
+    if args[0] == "info":
+        print("amd64")
+    elif args[0] == "build" and os.environ.get("STUB_HOLD") == "1":
+        pathlib.Path(os.environ["STUB_READY"]).touch()
+        while not pathlib.Path(os.environ["STUB_RELEASE"]).exists():
+            time.sleep(0.01)
+    elif args[0] == "inspect":
+        print("healthy")
+    elif args[0] == "build" and os.environ.get("STUB_FAIL") == "1":
+        sys.exit(1)
+else:
+    sys.exit("unexpected tool")
+''', encoding="utf-8")
+            stub.chmod(0o700)
+            for tool in ("docker", "curl", "mkdir", "rmdir"):
+                (bin_dir / tool).symlink_to(stub)
+            env = {**os.environ, "PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}",
+                   "STUB_LOCK": str(tmp / "lock"), "STUB_READY": str(tmp / "ready"),
+                   "STUB_RELEASE": str(tmp / "release")}
+            script = ["sh", str(ROOT / "tools" / "dev_smoke.sh")]
+            owner = subprocess.Popen(script, cwd=ROOT, env={**env, "STUB_LOG": str(tmp / "owner.log"), "STUB_HOLD": "1"},
+                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            try:
+                deadline = time.monotonic() + 10
+                while not (tmp / "ready").exists() and time.monotonic() < deadline and owner.poll() is None:
+                    time.sleep(0.01)
+                self.assertTrue((tmp / "ready").exists(), "owner did not reach the build barrier")
+                refused = subprocess.run(script, cwd=ROOT, env={**env, "STUB_LOG": str(tmp / "other.log")},
+                                         capture_output=True, text=True, timeout=10)
+                self.assertEqual(refused.returncode, 1, refused.stdout + refused.stderr)
+                self.assertIn("Smoke resources are locked", refused.stderr)
+                self.assertFalse((tmp / "other.log").exists(), "rejected invocation touched Docker")
+                self.assertTrue((tmp / "lock").is_dir())
+                owner.send_signal(signal.SIGTERM)
+                (tmp / "release").touch()
+                out, err = owner.communicate(timeout=10)
+                self.assertEqual(owner.returncode, 130, out + err)
+                self.assertNotIn("== fake Supervisor", out)
+                commands = [json.loads(line) for line in (tmp / "owner.log").read_text().splitlines()]
+                # One stale-resource cleanup under the lock, then one exit cleanup; INT/TERM and EXIT do not
+                # each remove resources after ownership has already been released.
+                self.assertEqual(sum(command[:2] == ["rm", "-f"] for command in commands), 2)
+                self.assertFalse((tmp / "lock").exists())
+            finally:
+                (tmp / "release").touch()
+                if owner.poll() is None:
+                    owner.kill()
+                owner.communicate(timeout=10)
+            for run_env, expected in (({"STUB_FAIL": "1"}, 1), ({}, 0)):
+                run = subprocess.run(script, cwd=ROOT, env={**env, "STUB_LOG": str(tmp / "next.log"), **run_env},
+                                     capture_output=True, text=True, timeout=10)
+                self.assertEqual(run.returncode, expected, run.stdout + run.stderr)
+                self.assertFalse((tmp / "lock").exists(), "failure or success leaked the lock")
 
     def test_the_playwright_image_and_package_are_pinned_together(self):
         smoke = (ROOT / "tools" / "dev_smoke.sh").read_text(encoding="utf-8")

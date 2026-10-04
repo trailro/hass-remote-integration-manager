@@ -11,7 +11,9 @@
 #   hri-mgr-dev-driver  tools/dev_driver.py: create / update / rebuild / delete through the page's API
 #   hri-mgr-dev-shots   tools/dev_screens.py in the Playwright image, when it is present locally
 # The manager's port is published on 127.0.0.1 only, to show that a request from anywhere else is refused.
-# Everything is removed at the end, also on failure.
+# Everything is removed at the end, also on failure. A lock in /tmp rejects another run before it
+# can touch these fixed resources, including their subnet and host port. After a SIGKILL, remove
+# /tmp/hri-mgr-dev.lock only once no smoke run is active.
 set -eu
 
 cd "$(dirname "$0")/.."
@@ -26,17 +28,31 @@ SHOTS=${1:-}
 PLAYWRIGHT=${PLAYWRIGHT_IMAGE:-mcr.microsoft.com/playwright/python@sha256:98e88016a5705def757564f70469e80161c4e4dbf787bbe35a710fabb70bb7da}
 PLAYWRIGHT_PIP=${PLAYWRIGHT_PIP:-1.46.0}
 PORT=${HRI_MGR_DEV_PORT:-18099}
+LOCK=/tmp/hri-mgr-dev.lock
+LOCKED=0
 
-cleanup() {
+cleanup_resources() {
     docker rm -f $P-stub $P-mgr $P-driver $P-shots >/dev/null 2>&1 || true
     docker network rm $NET >/dev/null 2>&1 || true
     docker volume rm $VOL >/dev/null 2>&1 || true
     docker image rm $IMG >/dev/null 2>&1 || true
 }
+cleanup() {
+    [ "$LOCKED" -eq 1 ] || return 0
+    # INT/TERM also triggers EXIT: release ownership once, so that second cleanup cannot touch a new run.
+    LOCKED=0
+    cleanup_resources
+    rmdir "$LOCK" >/dev/null 2>&1 || true
+}
 trap cleanup EXIT
 # an interrupted run stops after its cleanup (a bare INT or TERM trap would run the cleanup and go on)
 trap 'cleanup; exit 130' INT TERM
-cleanup
+if ! mkdir "$LOCK" 2>/dev/null; then
+    echo "Smoke resources are locked ($LOCK). Another run may be active; after an abrupt exit, remove the lock only once it has stopped." >&2
+    exit 1
+fi
+LOCKED=1
+cleanup_resources
 
 echo "== build"
 case "$(docker info -f '{{.Architecture}}')" in aarch64|arm64) ARCH=aarch64 ;; *) ARCH=amd64 ;; esac
