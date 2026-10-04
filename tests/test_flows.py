@@ -106,6 +106,7 @@ class FlowTest(unittest.IsolatedAsyncioTestCase):
 
         job = await env.job(await env.send("DELETE", "/api/instances/garage", {"remove_data": False, "confirm": "garage"}))
         self.assertEqual(job["state"], "succeeded", job)
+        self.assertFalse(job["result"]["data_removed"])
         self.assertNotIn("local_hri_garage", env.stub.installed)
         self.assertIn("local_hri_garage", env.stub.kept_data)
         self.assertEqual(os.listdir(env.local_apps), [])
@@ -138,6 +139,8 @@ class FlowTest(unittest.IsolatedAsyncioTestCase):
 
         job = await env.job(await env.send("DELETE", "/api/instances/lab", {"remove_data": True, "confirm": "lab"}))
         self.assertEqual(job["state"], "succeeded", job)
+        self.assertTrue(job["result"]["data_removed"])
+        self.assertNotIn("local_hri_lab", env.stub.kept_data)
         self.assertIn(("POST", "/addons/local_hri_lab/uninstall", {"remove_config": True}), env.stub.calls)
         self.assertEqual(set(env.stub.codeload_paths), {"refs/heads/main"})  # always the full ref
 
@@ -631,6 +634,27 @@ class FlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(job["state"], "failed")
         self.assertIn("local_hri_garage is not installed: nothing to delete", job["error"])
         self.assertNotIn("repair", job["error"])
+
+    async def test_delete_data_checks_current_app_presence_before_removing_anything(self):
+        env = self.env
+        self.assertEqual((await self.create())["state"], "succeeded")
+        _, data = await env.get("/api/instances")
+        self.assertTrue(data["instances"][0]["installed"])
+        # The page still offers data removal, but the app disappears before the job runs.
+        await env.sv.uninstall(await env.manager.managed("garage"), remove_config=False)
+        before = env.registry.get("garage")
+        tree = self.read_tree(self.folder("garage"))
+        copy = self.read_tree(self.copy_dir("garage"))
+        env.stub.calls.clear()
+        job = await env.job(await env.send("DELETE", "/api/instances/garage", {"remove_data": True, "confirm": "garage"}))
+        self.assertEqual(job["state"], "failed", job)
+        self.assertIn("Nothing was removed", job["error"])
+        self.assertEqual(job["result"], {})
+        self.assertEqual(env.registry.get("garage"), before)
+        self.assertEqual(self.read_tree(self.folder("garage")), tree)
+        self.assertEqual(self.read_tree(self.copy_dir("garage")), copy)
+        self.assertIn("local_hri_garage", env.stub.kept_data)
+        self.assertEqual(env.changing_calls(), [])
 
     async def test_the_store_wait_is_bounded_by_the_clock(self):
         """Each store answer may take up to its own timeout: the wait is measured, not counted in sleeps."""

@@ -172,7 +172,11 @@ async function act(action, name) {
       r = await send('POST', `api/instances/${encodeURIComponent(name)}/update`, {version: c.version, bluetooth: c.bluetooth, host_network: c.hostNetwork});
     }
   } else if (action === 'delete') {
-    const c = await dialog({title: `Delete ${name}`, text: `Stops and uninstalls ${i.slug} and removes its definition. The Supervisor always removes the instance's options (its password, ingress_users). Without the box below only its /config folder (its Home Assistant, integration and configuration) is kept, and a new instance named ${name} would reuse that folder, without those options.`, ok: 'Delete', danger: true, data: true, name});
+    const installed = i.installed !== false;
+    const text = installed
+      ? `Stops and uninstalls ${i.slug} and removes its definition. The Supervisor always removes the instance's options (its password, ingress_users). Without the box below only its /config folder (its Home Assistant, integration and configuration) is kept, and a new instance named ${name} would reuse that folder, without those options.`
+      : `${i.slug} is already uninstalled. Delete removes its definition and the manager's record. Any retained /config folder stays and a new instance named ${name} would reuse it. The Supervisor cannot delete that folder for an uninstalled app; remove it manually if needed.`;
+    const c = await dialog({title: `Delete ${name}`, text, ok: 'Delete', danger: true, data: installed, name});
     if (!c) return;
     r = await send('DELETE', `api/instances/${encodeURIComponent(name)}`, {remove_data: c.removeData, confirm: c.confirm});
   } else if (action === 'repair') {
