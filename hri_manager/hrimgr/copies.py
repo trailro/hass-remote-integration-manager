@@ -15,6 +15,7 @@ to GitHub as before.  Nobody but the manager writes its ``/data`` (registry.py).
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import secrets
@@ -95,7 +96,8 @@ def _walk(base: str) -> list[str]:
 
 def read_definition(instance_folder: str, channel: str) -> dict[str, bytes]:
     """What a copy of ``instance_folder`` would hold, read from the folder (only for a definition the manager has no
-    bytes of: one written by 0.1.0), through folder descriptors: no link followed, no FIFO opened."""
+    bytes of). The caller must verify the captured config's recorded digest before saving it. Through folder
+    descriptors: no link followed, no FIFO opened."""
     files = {"config.yaml": children.read_file(instance_folder, "config.yaml")}
     if channel != "release":
         return files
@@ -112,6 +114,23 @@ def read_definition(instance_folder: str, channel: str) -> dict[str, bytes]:
         if is_copied(f"translations/{entry}", channel):
             files[f"translations/{entry}"] = children.read_file(instance_folder, f"translations/{entry}")
     return files
+
+
+def check_config_digest(data: bytes, entry: dict, *, require_recorded: bool = False) -> None:
+    """Compare the bytes being kept/used with the manager's record, including an update in flight.
+
+    Capturing the mutable local folder needs a recorded digest; old registry entries without one must recover from
+    upstream instead. Existing copies in trusted /data predate digests too, so they remain usable without a record.
+    """
+    updating = entry.get("updating")
+    fields = updating.get("fields") if isinstance(updating, dict) else None
+    recorded = [entry.get("config_sha256"), fields.get("config_sha256") if isinstance(fields, dict) else None]
+    if all(digest is None for digest in recorded):
+        if require_recorded:
+            raise CopyError("no recorded config.yaml digest: Repair must download its source")
+        return
+    if hashlib.sha256(data).hexdigest() not in recorded:
+        raise CopyError("its config.yaml does not match the manager's recorded digest")
 
 
 def save(root: str, name: str, files: dict[str, bytes], marker: dict, bluetooth: bool = False, *,
@@ -306,6 +325,8 @@ def load(root: str, name: str, entry: dict, installed_version: str) -> Copy:
         config = yaml.safe_load(files["config.yaml"].decode("utf-8")) if "config.yaml" in files else None
     except (OSError, UnicodeDecodeError, yaml.YAMLError, RecursionError) as err:
         raise CopyError(f"it cannot be read: {str(err)[:300]}") from None
+    if "config.yaml" in files:
+        check_config_digest(files["config.yaml"], entry)
     check(config, name, installed_version, channel, entry.get("bluetooth") is True,
           host_network=entry.get("host_network") is True)
     return Copy(meta=meta, config=config, files=files)

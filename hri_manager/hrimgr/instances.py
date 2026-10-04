@@ -385,8 +385,8 @@ class Manager:
         return note
 
     def copy_missing(self) -> list[str]:
-        """A copy in /data of every managed instance's definition the manager has none of (instances created by 0.1.0,
-        or a copy that failed): the names copied."""
+        """Copy a missing definition only when its captured config matches the recorded digest. Older instances
+        without a digest recover from upstream through Repair. Return the names copied."""
         done = []
         for name, marker, _ in children.scan(self.root, self.registry):
             if marker is None or os.path.lexists(copies.folder(self.copies_root, name)):
@@ -394,6 +394,7 @@ class Manager:
             try:
                 entry = self.registry.get(name) or {}
                 files = copies.read_definition(children.child_path(self.root, name), marker.get("channel"))
+                copies.check_config_digest(files["config.yaml"], entry, require_recorded=True)
                 copies.save(self.copies_root, name, files, marker, **self._access_of(entry))
             except (copies.CopyError, children.UnsafePath, OSError, RegistryError) as err:
                 _LOGGER.warning("the copy of %s's definition was not saved: %s", name, err)

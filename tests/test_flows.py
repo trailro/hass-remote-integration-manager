@@ -939,6 +939,52 @@ class FlowTest(unittest.IsolatedAsyncioTestCase):
         status, _ = await env.send("POST", "/api/instances/garage/restart")
         self.assertEqual(status, 202)
 
+    async def test_missing_copy_does_not_capture_an_edited_definition(self):
+        env = self.env
+        await self.create()
+        for field, value in (("uart", True), ("backup_exclude", ["*"])):
+            with self.subTest(field=field):
+                expected = self.config("garage")
+                digest = env.registry.get("garage")["config_sha256"]
+                shutil.rmtree(self.copy_dir("garage"))
+                path = os.path.join(self.folder("garage"), "config.yaml")
+                with open(path, "w", encoding="utf-8") as fh:
+                    yaml.safe_dump({**expected, field: value}, fh)
+                self.assertEqual(env.manager.copy_missing(), [])
+                self.assertFalse(os.path.lexists(self.copy_dir("garage")))
+                self.assertEqual(env.registry.get("garage")["config_sha256"], digest)
+                env.stub.calls.clear()
+                env.stub.codeload_paths.clear()
+                job = await env.job(await env.send("POST", "/api/instances/garage/repair"))
+                self.assertEqual(job["state"], "succeeded", job)
+                self.assertEqual(self.config("garage"), expected)
+                self.assertEqual(env.stub.codeload_paths, ["refs/tags/v0.25.0"])
+                self.assertEqual(env.changing_calls("local_hri_garage"), [])
+                self.assertEqual(env.stub.installed["local_hri_garage"]["state"], "started")
+
+    async def test_missing_copy_requires_a_record_and_accepts_an_update_in_flight(self):
+        env = self.env
+        await self.create()
+        original = self.read_tree(self.copy_dir("garage"))
+        digest = env.registry.get("garage")["config_sha256"]
+        shutil.rmtree(self.copy_dir("garage"))
+        self.assertEqual(env.manager.copy_missing(), ["garage"])
+        self.assertEqual(self.read_tree(self.copy_dir("garage")), original)
+        shutil.rmtree(self.copy_dir("garage"))
+        env.registry.update("garage", config_sha256="f" * 64,
+                            updating={"fields": {"config_sha256": digest}})
+        self.assertEqual(env.manager.copy_missing(), ["garage"])
+        self.assertEqual(copies.load(env.manager.copies_root, "garage", env.registry.get("garage"), "0.25.0").files["config.yaml"],
+                         original["config.yaml"])
+        shutil.rmtree(self.copy_dir("garage"))
+        env.registry.update("garage", config_sha256=None, updating=None)
+        self.assertEqual(env.manager.copy_missing(), [])
+        self.assertFalse(os.path.lexists(self.copy_dir("garage")))
+        await self._detach("garage")
+        job = await env.job(await env.send("POST", "/api/instances/garage/repair"))
+        self.assertEqual(job["state"], "succeeded", job)
+        self.assertEqual(env.stub.codeload_paths, ["refs/tags/v0.25.0"])
+
     async def test_repair_of_a_git_instance_from_the_copy_keeps_its_commit(self):
         """The branch moved on since: the definition is written for the installed commit, with its source."""
         env = self.env
@@ -1135,6 +1181,7 @@ class FlowTest(unittest.IsolatedAsyncioTestCase):
                 fh.write(data)
 
         cases = {
+            "a valid UART change outside the recorded digest": lambda: edit("config.yaml", lambda d: d + b"uart: true\n"),
             "a panel title stamping would not write": lambda: edit("config.yaml", lambda d: d.replace(b"panel_title: HRI garage", b"panel_title: Anything")),
             "a key stamping drops": lambda: edit("config.yaml", lambda d: d + b"webui: http://[HOST]:[PORT:8087]\n"),
             "DOCS.md that is not UTF-8": lambda: edit("DOCS.md", lambda d: d + b"\xff\xfe"),
@@ -1153,13 +1200,13 @@ class FlowTest(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(job["state"], "succeeded", job)
                 self.assertTrue(any("copy of the definition is not used" in l["msg"] for l in job["lines"]), job["lines"])
                 self.assertEqual(env.stub.codeload_paths, ["refs/tags/v0.25.0"])
-        # a comment in the copy's config (valid YAML, same mapping) does not reach the definition: it is dumped anew
+        # even a comment changes the recorded bytes: recover from upstream and replace the copy
         shutil.rmtree(self.folder("garage"))
         await env.sv.reload_store()
         edit("config.yaml", lambda d: d + b"# written by someone else\n")
         env.stub.codeload_paths.clear()
         job = await env.job(await env.send("POST", "/api/instances/garage/repair"))
-        self.assertEqual((job["state"], env.stub.codeload_paths), ("succeeded", []), job)
+        self.assertEqual((job["state"], env.stub.codeload_paths), ("succeeded", ["refs/tags/v0.25.0"]), job)
         with open(os.path.join(self.folder("garage"), "config.yaml"), encoding="utf-8") as fh:
             text = fh.read()
         self.assertNotIn("someone else", text)

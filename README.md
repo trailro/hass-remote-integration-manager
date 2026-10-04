@@ -324,8 +324,9 @@ has moved it to `apps/local` (an upstream issue of the Supervisor, not of this a
   from its first update by 0.1.1 on; a repair before that starts a new one.
 
   Repair uses a copy only when it is the copy of that instance (the registry's instance id and channel) at the
-  installed version, and its config is one the manager writes (at its start the manager copies every definition it
-  has no copy of, such as those of instances created by 0.1.0). Otherwise, or without a copy, Repair downloads from
+  installed version, and its config is one the manager writes and matches its recorded digest, when available.
+  At its start the manager captures a missing copy only if the local config matches a recorded digest; old registry
+  entries without one recover from upstream. Otherwise, or without a copy, Repair downloads from
   GitHub: a release from its tag; a git instance, the commit the manager recorded for it.
 
   **Repair writes only the installed version, on the installed channel.** The channel is read from the installed
