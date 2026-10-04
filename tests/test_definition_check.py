@@ -305,6 +305,43 @@ class FlowCheckTest(FlowBase):
         self.assertIsNone(env.registry.get("garage"))  # the mark goes with Delete; the name can be created again
         self.assertEqual((await self.create())["state"], "succeeded")
 
+    async def test_delete_data_after_containment_preserves_the_unresolved_instance(self):
+        env = self.env
+        self.assertEqual((await self.create())["state"], "succeeded")
+        env.stub.install_override["local_hri_garage"] = {"docker_api": True}
+        job = await env.job(await env.send("POST", "/api/instances/garage/update", {"version": "0.25.1"}))
+        self.assertEqual(job["state"], "failed", job)
+        self.assertNotIn("local_hri_garage", env.stub.installed)
+        self.assertIn("local_hri_garage", env.stub.kept_data)
+        entry, config = env.registry.get("garage"), self.config()
+        copy_folder = os.path.join(env.data, "definitions", "garage")
+        copied_config = children.read_file(copy_folder, "config.yaml")
+        env.stub.calls.clear()
+
+        job = await env.job(await env.send("DELETE", "/api/instances/garage", {"remove_data": True, "confirm": "garage"}))
+        self.assertEqual(job["state"], "failed", job)
+        self.assertIn("cannot delete its retained /config folder", job["error"])
+        self.assertIn("Nothing was removed", job["error"])
+        self.assertEqual(job["result"], {})
+        self.assertEqual(env.registry.get("garage"), entry)
+        self.assertEqual(self.config(), config)
+        self.assertEqual(children.read_file(copy_folder, "config.yaml"), copied_config)
+        self.assertIn("local_hri_garage", env.stub.kept_data)
+        self.assertEqual(env.changing_calls(), [])
+        _, data = await env.get("/api/instances")
+        (row,) = data["instances"]
+        self.assertFalse(row["installed"])
+        self.assertEqual(row["actions"], ["delete"])
+
+        # Explicitly keeping data can finish deleting the definition and record.
+        job = await env.job(await env.send("DELETE", "/api/instances/garage", {"remove_data": False, "confirm": "garage"}))
+        self.assertEqual(job["state"], "succeeded", job)
+        self.assertFalse(job["result"]["data_removed"])
+        self.assertIsNone(env.registry.get("garage"))
+        self.assertFalse(os.path.exists(self.folder()))
+        self.assertFalse(os.path.exists(copy_folder))
+        self.assertIn("local_hri_garage", env.stub.kept_data)
+
     def break_marker_after_the_install_check(self):
         """A writer breaks the marker right after the manager read the installed app: the allow-list then refuses
         the stop and the uninstall, which need it."""

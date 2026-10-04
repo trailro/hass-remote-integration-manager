@@ -281,6 +281,12 @@ What goes and what stays:
 - a new instance with the same name **reuses that `/config` folder**, but starts without the old options: set its
   password and `ingress_users` again before anyone else can open it.
 
+If the app is already uninstalled (for example, after the manager contained a changed definition), Delete can remove
+its definition and registry entry, but any retained `/config` folder stays. The dialog explains this and hides the
+data-removal checkbox. An API request to delete data in that state fails before removing the definition, registry or
+copy: the Supervisor has no installed app to uninstall with data removal. Remove any retained folder manually if
+needed, or delete without requesting data removal to keep it.
+
 ## Backups
 
 Each instance is an app, so Home Assistant backups include it like any other app: its `/config` folder, minus what

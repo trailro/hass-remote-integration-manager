@@ -2092,6 +2092,12 @@ class Manager:
         try:
             apps = {a.get("slug"): a for a in await self.sv.list_apps()}
             app = apps.get(managed.slug)
+            if not app and remove_data:
+                # Uninstall is the only supported config cleanup. Containment may already have uninstalled the app
+                # while keeping /config; preserve its definition and record rather than claim that data was deleted.
+                raise JobFailed(f"{managed.slug} is not installed: the Supervisor cannot delete its retained /config "
+                                "folder. Nothing was removed. Remove any retained folder manually, or delete again "
+                                "without requesting data removal to keep it")
             if app:
                 if app.get("state") == "started":
                     job.log("stopping")
