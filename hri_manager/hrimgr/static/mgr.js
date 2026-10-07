@@ -156,7 +156,13 @@ function dialog({title, text, ok, danger, versions, selected, ref, refKind, data
 async function act(action, name) {
   const i = instances.find(x => x.name === name) || {name};
   let r;
-  if (action === 'update') {
+  const p = i.pending_update;
+  if (action === 'update' && p) {
+    // a detached update waiting to be finished: only that same update can be retried
+    const c = await dialog({title: `Update ${name}`, text: `Its update to ${p.version} (from ${p.from_version}) is waiting to be finished: the Supervisor has ${i.installed_version || '?'}. Update retries that same update, with the same source and choices; no other version can be chosen until it is finished. Repair on its row gives it up.`, ok: 'Retry update', ...(i.channel === 'git' ? {} : {versions: [{version: p.version}], selected: p.version})});
+    if (!c) return;
+    r = await send('POST', `api/instances/${encodeURIComponent(name)}/update`, {...(i.channel === 'git' ? {ref_kind: p.ref_kind, ref: p.ref} : {version: p.version}), bluetooth: p.bluetooth, host_network: p.host_network});
+  } else if (action === 'update') {
     if (i.channel === 'git') {
       const c = await dialog({title: `Rebuild ${name}`, text: 'Downloads the branch or tag of hass-remote-integration again and, when its commit changed, builds and runs that code on this machine. For testing only. The app restarts; its data stays. Bluetooth and Host network change only with a new commit; Host network needs a branch or tag that has it (HRI 0.26.0 or newer).', ok: 'Rebuild', ref: i.ref || '', refKind: i.ref_kind, bluetooth: recorded(i, 'bluetooth'), hostNetwork: recorded(i, 'host_network'), installed: i.installed ? i : undefined});
       if (!c) return;
@@ -180,7 +186,7 @@ async function act(action, name) {
     if (!c) return;
     r = await send('DELETE', `api/instances/${encodeURIComponent(name)}`, {remove_data: c.removeData, confirm: c.confirm});
   } else if (action === 'repair') {
-    const c = await dialog({title: `Repair ${name}`, text: 'Writes the definition folder again for the installed version, so the app can be updated and managed again.', ok: 'Repair'});
+    const c = await dialog({title: `Repair ${name}`, text: p ? `Gives up its update to ${p.version}, waiting to be finished: removes that definition and writes the one of the installed version (${i.installed_version || '?'}) again. Only when the Supervisor's log shows that update failed: if it still finished later, the installed app would no longer match its definition.` : 'Writes the definition folder again for the installed version, so the app can be updated and managed again.', ok: 'Repair'});
     if (!c) return;
     r = await send('POST', `api/instances/${encodeURIComponent(name)}/repair`, {});
   } else {

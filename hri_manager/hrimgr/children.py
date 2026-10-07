@@ -733,12 +733,15 @@ def _settle_updates(real_root: str, registry: Registry, done: list[str], install
         if not isinstance(entry.get("updating"), dict) or any(
                 e.startswith(f"{OLD_PREFIX}{name}-") for e in os.listdir(real_root)):
             continue
+        target = entry["updating"]
+        fields = target.get("fields") if isinstance(target.get("fields"), dict) else {}
+        if target.get("detached") is True and target.get("sent") is not True:
+            done.append(_drop_unsent(real_root, registry, name, fields))
+            continue
         try:
             marker = read_marker(os.path.join(real_root, names.folder_name(name)), name)
         except NotManaged:
             continue
-        target = entry["updating"]
-        fields = target.get("fields") if isinstance(target.get("fields"), dict) else {}
         version = installed.get(name)
         if target.get("detached") is True and version != fields.get("version"):
             # An old installed version is no refusal: the Supervisor may still finish a sent update after this
@@ -749,6 +752,28 @@ def _settle_updates(real_root: str, registry: Registry, done: list[str], install
         note = settle_update(registry, name, entry, marker, installed.get(name))
         if note:
             done.append(note)
+
+
+def _drop_unsent(real_root: str, registry: Registry, name: str, fields: dict) -> str:
+    """A detached update stopped before its update call was sent (its flag has no ``sent``): the Supervisor never had
+    it, so nothing can finish it.  Its definition goes (only the one that update wrote: the marker names its target)
+    and the flag is cleared; the registry's entry is still the previous one, so the instance is detached again, as it
+    was before that update.  What was done."""
+    present = os.path.lexists(os.path.join(real_root, names.folder_name(name)))
+    try:
+        managed = load_managed(real_root, name, registry) if present else None
+    except NotManaged:
+        managed = None
+    removed = managed is not None and all(
+        managed.marker.get(k) == fields.get(k) for k in ("instance_id", "version", "sha", "stamp_version"))
+    if removed:
+        remove(managed)
+    registry.update(name, updating=None)
+    left = ("its definition was removed" if removed else
+            f"{names.folder_name(name)} is not the definition it wrote and was left as it is" if present else
+            "no definition of it was left")
+    return (f"{name}: its detached update to {fields.get('version')} stopped before it was sent to the Supervisor: "
+            f"{left}, and its flag was cleared")
 
 
 def _tidy(real_root: str, entry: str, registry: Registry | None, installed: dict[str, str | None] | None,

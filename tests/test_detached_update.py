@@ -6,7 +6,7 @@ import shutil
 import unittest
 from unittest import mock
 
-from hrimgr import children, names
+from hrimgr import children, instances, names
 from hrimgr.supervisor import SupervisorError
 
 from .env import Env
@@ -134,9 +134,14 @@ class DetachedUpdateTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("earlier detached update may still finish", job["error"])
         self.assertEqual(env.registry.get("garage"), pending)
         await self.detach("garage")
-        job = await env.job(await env.send("POST", "/api/instances/garage/repair"))
-        self.assertEqual(job["state"], "failed", job)
-        self.assertIn("may still finish", job["error"])
+        # an automatic Repair never gives the pending update up: the row is not repaired by itself
+        env.manager.auto_repair_interval = instances.AUTO_REPAIR_INTERVAL
+        _, data = await env.get("/api/instances")
+        row = next(i for i in data["instances"] if i["name"] == "garage")
+        self.assertIsNone(row["job"])
+        self.assertEqual(row["actions"], ["update", "repair", "delete"])
+        self.assertEqual(row["pending_update"]["version"], "0.26.1")
+        env.manager.auto_repair_interval = None
         self.assertEqual(env.registry.get("garage"), pending)
         self.assertIs(env.registry.get("garage")["host_network"], True)
         job = await self.update(host_network=True)
@@ -325,3 +330,102 @@ class DetachedUpdateTest(unittest.IsolatedAsyncioTestCase):
         await env.manager.jobs.wait_all()
         self.assert_preserved("garage", "bluetooth", False)
         self.assertIsNone(env.registry.get("garage")["tampered"])
+
+    async def test_kill_before_send_is_settled_at_startup(self):
+        """A hard kill after the flag and definition were written, before the update call: nothing the Supervisor was
+        asked can finish it, so the next start removes the definition and clears the flag."""
+        env = self.env
+        for folder_left in (True, False):
+            name = "written" if folder_left else "building"
+            with self.subTest(folder_left=folder_left):
+                await self.create_detached(name, bluetooth=True)
+                original = env.registry.get(name)
+                entered, never = asyncio.Event(), asyncio.Event()
+
+                async def before_send(*args):
+                    entered.set()
+                    await never.wait()
+
+                # no undo: what a kill (power, OOM) leaves, unlike a cancellation
+                with mock.patch.object(env.manager, "_verify_store", side_effect=before_send), \
+                        mock.patch.object(env.manager, "_undo_detached", new=mock.AsyncMock()):
+                    _, body = await env.send("POST", f"/api/instances/{name}/update", {"bluetooth": False})
+                    await asyncio.wait_for(entered.wait(), 5)
+                    job = env.manager.jobs.get(body["job"]["id"])
+                    job.task.cancel()
+                    await asyncio.gather(job.task, return_exceptions=True)
+                self.assertIsNot(env.registry.get(name)["updating"].get("sent"), True)
+                if not folder_left:
+                    shutil.rmtree(self.folder(name))
+                notes = await env.manager.startup()
+                self.assertTrue(any("stopped before it was sent" in n for n in notes), notes)
+                self.assertFalse(os.path.lexists(self.folder(name)))
+                self.assertEqual(env.registry.get(name), {**original, "updating": None})
+                self.assertEqual(env.stub.installed[names.supervisor_slug(name)]["version"], "0.26.0")
+                await env.sv.reload_store()
+                env.stub.calls.clear()
+                job = await self.update(name, version="0.26.1", bluetooth=False)  # another update is not refused
+                self.assertEqual(job["state"], "succeeded", job)
+                self.assert_preserved(name, "bluetooth", False)
+
+    async def test_sent_flag_is_persisted_before_the_update_call(self):
+        env, update, seen = self.env, self.env.sv.update, []
+        await self.create_detached()
+
+        async def record(managed):
+            seen.append(env.registry.get("garage")["updating"].get("sent"))
+            await update(managed)
+
+        with mock.patch.object(env.sv, "update", side_effect=record):
+            job = await self.update(bluetooth=True)
+        self.assertEqual(job["state"], "succeeded", job)
+        self.assertEqual(seen, [True])
+
+    async def test_sent_update_that_failed_in_the_supervisor_is_given_up_by_repair(self):
+        env = self.env
+        for detach in (False, True):
+            name = "detached" if detach else "defined"
+            slug = names.supervisor_slug(name)
+            with self.subTest(detach=detach):
+                await self.create_detached(name, bluetooth=True)
+                original = env.registry.get(name)
+                with mock.patch.object(env.sv, "update", side_effect=SupervisorError("update response lost")):
+                    job = await self.update(name, bluetooth=False)
+                self.assertIn("is not known yet", job["error"])
+                self.assertIs(env.registry.get(name)["updating"]["sent"], True)
+                await env.manager.startup()  # the Supervisor still has 0.26.0: kept, it may still finish
+                self.assertIsInstance(env.registry.get(name)["updating"], dict)
+                if detach:
+                    await self.detach(name)
+                else:
+                    _, data = await env.get("/api/instances")
+                    row = next(i for i in data["instances"] if i["name"] == name)
+                    self.assertEqual(row["pending_update"], {
+                        "version": "0.26.1", "ref_kind": "tag", "ref": "v0.26.1", "from_version": "0.26.0",
+                        "sent": True, "bluetooth": False, "host_network": False})
+                    self.assertIn("waiting to be finished", row["problem"])
+                    self.assertIn("repair", row["actions"])
+                env.stub.calls.clear()
+                await self.repair(name)
+                entry = env.registry.get(name)
+                self.assertIsNone(entry.get("updating"))
+                self.assertEqual((entry["version"], entry["bluetooth"]), ("0.26.0", True))
+                self.assertEqual(entry["sha"], original["sha"])
+                self.assertEqual(children.read_marker(self.folder(name), name)["version"], "0.26.0")
+                self.assertFalse(any(p.endswith("/update") for _, p in env.changing_calls(slug)))
+                job = await self.update(name, version="0.26.1", bluetooth=False)
+                self.assertEqual(job["state"], "succeeded", job)
+                self.assert_preserved(name, "bluetooth", False)
+
+    async def test_repair_does_not_give_up_an_update_whose_target_is_installed(self):
+        env = self.env
+        await self.create_detached(bluetooth=True)
+        with mock.patch.object(env.sv, "update", side_effect=SupervisorError("update response lost")):
+            await self.update(bluetooth=False)
+        pending = env.registry.get("garage")
+        env.stub.installed["local_hri_garage"]["version"] = "0.26.1"  # it finished after the answer was lost
+        job = await env.job(await env.send("POST", "/api/instances/garage/repair"))
+        self.assertEqual(job["state"], "failed", job)
+        self.assertIn("Check again records it", job["error"])
+        self.assertEqual(env.registry.get("garage"), pending)
+        self.assertTrue(os.path.isdir(self.folder("garage")))
