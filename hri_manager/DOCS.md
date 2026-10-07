@@ -68,7 +68,11 @@ downloads the source of its installed commit), or from GitHub when it has no usa
 installed version: when its exact source cannot be had, nothing is written and the instance is marked **needs
 attention**, with **Update**/**Rebuild** (a newer version, written and installed at once; a Rebuild onto a branch
 or tag whose current commit is the installed one writes that commit's definition and installs nothing) and **Delete**
-offered.
+offered. If such an update's answer is lost, its row says it is **waiting to be finished**: the manager records it
+when the Supervisor reports the new version. Until then Check again and any other update are refused; **Update**
+retries the same one, **Repair** (while the old version is still installed, once the Supervisor's log shows the
+update failed) gives it up and writes the installed version's definition again, and **Delete** removes the
+instance. An update the manager stopped before sending is undone at its next start.
 Keep the manager in the same backups: its `/data` holds the registry and the copies that Repair works from.
 
 ## Options

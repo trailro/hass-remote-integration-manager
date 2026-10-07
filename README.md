@@ -342,13 +342,28 @@ has moved it to `apps/local` (an upstream issue of the Supervisor, not of this a
   (the release was withdrawn, the commit cannot be downloaded, the registry disagrees with the app), nothing is
   written: the instance is marked **needs attention**, with the reason, and automatic repair leaves it alone. You
   choose: **Update** (a release: a newer release) or **Rebuild** (git: the current commit of its branch or tag),
-  which writes that definition and installs it in one step (and removes it again if the update fails); **Delete**; or
+  which writes that definition and installs it in one step (and removes it again if the Supervisor refuses the
+  update); **Delete**; or
   **Repair** again once the cause is gone. A Rebuild onto a branch or tag whose current commit **is** the installed one
   (a restore brought back another commit than the recorded one) writes that commit's definition, installs nothing,
   and records that branch or tag and commit, after the same checks as Repair (the commit is on HRI's branch or tag,
   and is the installed version). GitHub being unreachable is not such a case: automatic repair tries again. The page
   offers Update or Rebuild of a detached instance only when it needs attention (Repair otherwise); the manager's API
   takes it for any detached instance of its registry, and writes and installs a newer version the same way.
+
+  **A detached update waiting to be finished.** When such an update was sent but its answer was lost (or the manager
+  stopped while the Supervisor worked on it), the Supervisor may still finish it, even after the manager restarts.
+  The manager keeps the new definition and records the requested version, its source and the Bluetooth and Host
+  network choices; the row says the update is waiting to be finished, and the API's row has its target in
+  `pending_update`. As soon as the Supervisor reports that version, the next start (or **Check again**, or Repair
+  once its folder is gone) records it. Until then **Check again** and an Update to any other version or with other
+  choices are refused, and automatic repair leaves the instance alone. The ways out: **Update** retries exactly that
+  update (the dialog offers only its version); **Repair**, while the Supervisor still has the version the update
+  began with, gives the update up: the new definition goes and the definition of the installed version is written
+  again (use it once the Supervisor's own log shows the update failed: if it still finished later, the installed app
+  would no longer match its definition); **Delete**. An update the manager was stopped before it sent (a power cut,
+  the manager killed) cannot finish: its next start removes the definition it wrote and the instance is detached
+  again, as before.
 
 **If the manager's `/data` is lost** (the manager uninstalled with its data, or a restore without the manager's
 backup), its registry and its copies are gone. By design the manager then takes no instance for its own (anyone who
