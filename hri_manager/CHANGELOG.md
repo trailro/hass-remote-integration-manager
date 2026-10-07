@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.2.1
+
+Fixes from a review. Still **experimental**.
+
+- **A detached update waiting to be finished.** When the Supervisor's answer to an Update of an instance without its
+  definition is lost, the manager keeps the new definition and the requested version, source and Bluetooth / Host
+  network choices until the Supervisor reports that version (recorded at the next start, Check again or Repair). The
+  row says the update is waiting to be finished (`pending_update` in the API). Meanwhile Check again and any other
+  update are refused, automatic repair leaves the instance alone, and Update retries exactly the same update.
+  **Repair gives a failed one up** while the Supervisor still has the version the update began with. An update the
+  manager was stopped before it sent (power cut, killed) is undone at the next start.
+- **Recovery copies are checked against the definition the manager recorded** (the sha256 of its `config.yaml`): a
+  definition edited in the folder is never taken as the manager's copy, nor followed when the installed app's
+  Bluetooth or Host network differs from the record. Instances without a recorded digest (created by 0.1.0) get one
+  at their next Repair or Update; they are listed once per start.
+- **Delete with "remove data" is refused for an app that is already uninstalled** (for example after containment):
+  the manager cannot confirm that the Supervisor removed `/config`. Delete without it, then remove the folder if
+  wanted.
+- **Release images:** the floating tags (`latest`, `0.2`) and the app's version are promoted one release at a time,
+  so two releases close together never move them back to the older one.
+
 ## 0.2.0
 
 Still **experimental**.
