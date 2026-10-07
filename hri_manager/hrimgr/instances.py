@@ -2006,6 +2006,11 @@ class Manager:
 
         def rewrite() -> dict[str, bytes]:
             raw = children.read_file(folder, "config.yaml")
+            try:
+                copies.check_config_digest(raw, managed.entry, require_recorded=True)
+            except copies.CopyError:
+                raise JobFailed("the definition in the folder is not the one the manager wrote: Repair writes it") \
+                    from None
             config = copies.check(yaml.safe_load(raw.decode("utf-8")), managed.name, version, channel, **recorded)
             # the keys stamping adds for an access; ingress_port stays (stamping writes 0 again for Host network)
             template = {k: v for k, v in config.items() if k not in ("host_dbus", "host_network")}
