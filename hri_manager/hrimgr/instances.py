@@ -2611,6 +2611,7 @@ class Manager:
                                      ref: tuple[str, str] | None, requested: dict | None, installed: str | None) -> dict:
         """Retry the exact authorized target of an uncertain detached update, without superseding its provenance.
         Even a clean retry refusal cannot establish that the earlier Supervisor task will never finish."""
+        await self._refuse_marked_now(managed.name)  # settling the flag may have marked it since the job began
         pending = managed.entry["updating"]
         target = pending["fields"]
         if installed != pending.get("from_version", managed.entry.get("version")):

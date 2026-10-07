@@ -452,3 +452,21 @@ class DetachedUpdateTest(unittest.IsolatedAsyncioTestCase):
         await env.manager.startup()
         await env.manager.jobs.wait_all()
         self.assert_preserved("garage", "bluetooth", False)
+
+    async def test_retry_reads_the_mark_again_after_settling(self):
+        env = self.env
+        await self.create_detached(bluetooth=True)
+        with mock.patch.object(env.sv, "update", side_effect=SupervisorError("update response lost")):
+            await self.update(bluetooth=False)
+        settle = children.settle_instance
+
+        def contained_meanwhile(root, registry, name, version):
+            env.manager._unrecorded_marks[name] = {"reason": "contained meanwhile", "at": children.now_iso()}
+            return settle(root, registry, name, version)
+
+        with mock.patch.object(children, "settle_instance", side_effect=contained_meanwhile), \
+                mock.patch.object(env.sv, "update", new=mock.AsyncMock()) as update:
+            job = await self.update()
+        self.assertEqual(job["state"], "failed", job)
+        self.assertIn("is marked", job["error"])
+        update.assert_not_called()
