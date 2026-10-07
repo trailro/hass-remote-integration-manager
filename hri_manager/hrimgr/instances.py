@@ -387,14 +387,19 @@ class Manager:
     def copy_missing(self) -> list[str]:
         """Copy a missing definition only when its captured config matches the recorded digest. Older instances
         without a digest recover from upstream through Repair. Return the names copied."""
-        done = []
+        done, unrecorded = [], []
         for name, marker, _ in children.scan(self.root, self.registry):
             if marker is None or os.path.lexists(copies.folder(self.copies_root, name)):
                 continue
             try:
                 entry = self.registry.get(name) or {}
                 files = copies.read_definition(children.child_path(self.root, name), marker.get("channel"))
-                copies.check_config_digest(files["config.yaml"], entry, require_recorded=True)
+                copies.check_config_digest(files["config.yaml"], entry)
+                try:
+                    copies.check_config_digest(files["config.yaml"], entry, require_recorded=True)
+                except copies.CopyError:  # an older manager recorded no digest: one line for all of them, below
+                    unrecorded.append(name)
+                    continue
                 copies.save(self.copies_root, name, files, marker, **self._access_of(entry))
             except (copies.CopyError, children.UnsafePath, OSError, RegistryError) as err:
                 _LOGGER.warning("the copy of %s's definition was not saved: %s", name, err)
@@ -404,6 +409,9 @@ class Manager:
                                 str(err)[:300], exc_info=True)
                 continue
             done.append(name)
+        if unrecorded:
+            _LOGGER.info("no copy of the definition of %s was saved: the manager has no recorded digest of its "
+                         "config.yaml; Repair or Update records one", ", ".join(unrecorded))
         return done
 
     async def startup(self) -> list[str]:

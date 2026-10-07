@@ -978,7 +978,12 @@ class FlowTest(unittest.IsolatedAsyncioTestCase):
                          original["config.yaml"])
         shutil.rmtree(self.copy_dir("garage"))
         env.registry.update("garage", config_sha256=None, updating=None)
-        self.assertEqual(env.manager.copy_missing(), [])
+        with self.assertNoLogs("hrimgr.instances", "WARNING"):
+            with self.assertLogs("hrimgr.instances", "INFO") as logs:
+                self.assertEqual(env.manager.copy_missing(), [])
+        self.assertEqual(len(logs.output), 1, logs.output)
+        self.assertIn("garage", logs.output[0])
+        self.assertIn("Repair or Update records one", logs.output[0])
         self.assertFalse(os.path.lexists(self.copy_dir("garage")))
         await self._detach("garage")
         job = await env.job(await env.send("POST", "/api/instances/garage/repair"))
