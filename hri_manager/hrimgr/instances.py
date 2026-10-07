@@ -2623,20 +2623,26 @@ class Manager:
                 or any(v is not None and v != access[a] for a, v in (requested or {}).items())):
             raise JobFailed("its earlier detached update may still finish: only the same version, source and access "
                             "choices can be retried until it is checked")
+        # read once: the digests below are of these bytes, the ones the copy keeps
+        try:
+            files = await asyncio.to_thread(copies.read_definition, children.child_path(self.root, managed.name),
+                                            target.get("channel"))
+        except (OSError, children.UnsafePath) as err:
+            raise JobFailed(f"its pending detached update's definition cannot be read: {err}") from None
         if (any(managed.marker.get(k) != target.get(k) for k in ("version", "sha", "ref_kind", "ref", "stamp_version"))
                 or self._access_of(managed.marker) != access
-                or await asyncio.to_thread(self._config_sha256, managed.name) != target.get("config_sha256")):
+                or hashlib.sha256(files["config.yaml"]).hexdigest() != target.get("config_sha256")):
             raise JobFailed("its pending detached update's definition changed: not retried; restore its definition "
                             "before retrying, or Repair once its target is installed")
         await self._refuse_decoys()
         effective = children.Managed(root=managed.root, name=managed.name, marker=managed.marker,
                                      registry=managed.registry, entry={**managed.entry, **target})
         expected, manifest = await asyncio.to_thread(self._definition_on_disk, effective)
-        if self._manifest_sha256(manifest) != pending.get("manifest_sha256"):
+        if (self._manifest_sha256(manifest) != pending.get("manifest_sha256")
+                or any(manifest.get(rel, "").split(" ")[0] != "sha256:" + hashlib.sha256(data).hexdigest()
+                       for rel, data in files.items())):
             raise JobFailed("its pending detached update's source files changed: not retried from the local tree; "
                             "restore its definition from the recorded source before retrying")
-        files = await asyncio.to_thread(copies.read_definition, children.child_path(self.root, managed.name),
-                                        target.get("channel"))
         sent = verified = False
         try:
             await self._wait_store(job, managed.slug, target["version"], manifest)

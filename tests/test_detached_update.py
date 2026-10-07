@@ -6,7 +6,7 @@ import shutil
 import unittest
 from unittest import mock
 
-from hrimgr import children, instances, names
+from hrimgr import children, copies, instances, names
 from hrimgr.registry import RegistryError
 from hrimgr.supervisor import SupervisorError
 
@@ -452,6 +452,25 @@ class DetachedUpdateTest(unittest.IsolatedAsyncioTestCase):
         await env.manager.startup()
         await env.manager.jobs.wait_all()
         self.assert_preserved("garage", "bluetooth", False)
+
+    async def test_retry_saves_only_the_bytes_it_checked(self):
+        env = self.env
+        await self.create_detached(bluetooth=True)
+        with mock.patch.object(env.sv, "update", side_effect=SupervisorError("update response lost")):
+            await self.update(bluetooth=False)
+        read = copies.read_definition
+
+        def changed_before_read(folder, channel):
+            with open(os.path.join(folder, "DOCS.md"), "ab") as fh:
+                fh.write(b"\nplanted\n")
+            return read(folder, channel)
+
+        with mock.patch.object(copies, "read_definition", side_effect=changed_before_read), \
+                mock.patch.object(env.sv, "update", new=mock.AsyncMock()) as update:
+            job = await self.update()
+        self.assertEqual(job["state"], "failed", job)
+        self.assertIn("source files changed", job["error"])
+        update.assert_not_called()
 
     async def test_retry_reads_the_mark_again_after_settling(self):
         env = self.env
