@@ -2657,7 +2657,10 @@ class Manager:
                 await self._after_failed_update(job, managed, None, target["version"], target, err, verified, files, access)
             raise JobFailed(f"{err}. Its earlier detached update may still finish; its target and requested update's "
                             "record stay for another retry") from None
-        await asyncio.to_thread(self.registry.put, managed.name, {"name": managed.name, **target, "updating": None})
+        try:
+            await asyncio.to_thread(self.registry.put, managed.name, {"name": managed.name, **target, "updating": None})
+        except RegistryError as err:
+            job.log(f"warning: {err}; its update flag lets the next start record it")
         await self._save_copy(job, managed, access, files)
         self._clear_auto(managed.name)
         if missing or unsearched:

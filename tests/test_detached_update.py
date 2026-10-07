@@ -7,6 +7,7 @@ import unittest
 from unittest import mock
 
 from hrimgr import children, instances, names
+from hrimgr.registry import RegistryError
 from hrimgr.supervisor import SupervisorError
 
 from .env import Env
@@ -429,3 +430,25 @@ class DetachedUpdateTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Check again records it", job["error"])
         self.assertEqual(env.registry.get("garage"), pending)
         self.assertTrue(os.path.isdir(self.folder("garage")))
+
+    async def test_retry_whose_record_fails_is_left_to_the_next_start(self):
+        env = self.env
+        await self.create_detached(bluetooth=True)
+        with mock.patch.object(env.sv, "update", side_effect=SupervisorError("update response lost")):
+            await self.update(bluetooth=False)
+        put = env.registry.put
+        env.stub.calls.clear()
+
+        def full(name, entry):
+            if entry.get("version") == "0.26.1":
+                raise RegistryError("the manager's registry cannot be written: No space left on device")
+            return put(name, entry)
+
+        with mock.patch.object(env.registry, "put", side_effect=full):
+            job = await self.update()
+        self.assertEqual(job["state"], "succeeded", job)
+        self.assertTrue(any("lets the next start record it" in line["msg"] for line in job["lines"]), job["lines"])
+        self.assertEqual(env.registry.get("garage")["version"], "0.26.0")
+        await env.manager.startup()
+        await env.manager.jobs.wait_all()
+        self.assert_preserved("garage", "bluetooth", False)
