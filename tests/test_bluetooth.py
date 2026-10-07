@@ -13,6 +13,7 @@ from unittest import mock
 import yaml
 
 from hrimgr import children, copies, stamp
+from hrimgr.instances import Manager
 from hrimgr.registry import RegistryError
 
 from .env import Env
@@ -304,6 +305,45 @@ class BluetoothFlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(job["error"], "hri_garage could not follow the installed app's Bluetooth: No space left on device")
         self.assertIn("garage: its definition and its record of Bluetooth may disagree now: No space left on device",
                       logs.output[0])
+
+    async def refused_follow(self):
+        """Finish setup of a lagging record follows the app's Bluetooth by stamping the folder's config.yaml again:
+        refused when that file is not the one the manager recorded, and nothing of it recorded."""
+        env = self.env
+        digest = env.registry.get("garage")["config_sha256"]
+        job = await env.job(await env.send("POST", "/api/instances/garage/finish"))
+        self.assertEqual(job["state"], "failed", job)
+        self.assertIn("the definition in the folder is not the one the manager wrote: Repair writes it", job["error"])
+        self.assertIs(env.registry.get("garage")["bluetooth"], False)
+        self.assertEqual(env.registry.get("garage")["config_sha256"], digest)
+        self.assertNotIn("host_dbus", self.config())
+        with open(os.path.join(env.data, "definitions", "garage", "config.yaml"), encoding="utf-8") as fh:
+            self.assertNotIn("host_dbus", yaml.safe_load(fh))
+
+    async def test_a_follow_never_takes_an_edit_made_after_the_request_check(self):
+        env = self.env
+        await self.lagging_record()
+        self.manager_made_it()
+        env.registry.update("garage", setup_complete=False)
+        original = Manager._follow_access
+
+        async def edited_first(manager, job, managed, installed):
+            path = os.path.join(env.local_apps, "hri_garage", "config.yaml")
+            with open(path, encoding="utf-8") as fh:
+                config = yaml.safe_load(fh)
+            with open(path, "w", encoding="utf-8") as fh:
+                yaml.safe_dump({**config, "backup_exclude": ["*"]}, fh)
+            return await original(manager, job, managed, installed)
+
+        with mock.patch.object(Manager, "_follow_access", edited_first):
+            await self.refused_follow()
+
+    async def test_a_follow_needs_a_recorded_digest(self):
+        env = self.env
+        await self.lagging_record()
+        self.manager_made_it()
+        env.registry.update("garage", setup_complete=False, config_sha256=None)
+        await self.refused_follow()
 
     async def test_repair_follows_a_change_the_manager_made(self):
         """An update the manager made turned Bluetooth on and was recorded late (its flag names it): that is the
