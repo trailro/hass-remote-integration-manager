@@ -17,7 +17,9 @@ app, so the sidebar has no **HRI Manager** entry until you do (**Open web UI** w
   the page offers what is left: **Finish setup**, **Install** or **Repair**. **Delete** stops and uninstalls it
   and needs its name typed. Its options (password, `ingress_users`) are always removed by the Supervisor; only its
   `/config` folder is kept, unless you tick the box. A new instance with the same name reuses that `/config` folder,
-  without the old options: set them again.
+  without the old options: set them again. When the app is already uninstalled (for example after the manager
+  contained a changed definition), Delete with data removal is refused, because the manager cannot confirm the
+  Supervisor removed its `/config` folder: delete without it, then remove the retained folder manually if needed.
 - **Git branch or tag (testing)** builds HRI from a branch or tag of its own repository on this machine: that
   branch's code and Dockerfile run here. For trying a fix before its release, with a branch you trust; not for
   production. Commits, pull requests and forks are refused.
