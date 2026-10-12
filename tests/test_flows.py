@@ -1094,7 +1094,9 @@ class FlowTest(unittest.IsolatedAsyncioTestCase):
         m = self.marker("lab")
         self.assertEqual((m["sha"], m["version"], m["ref_kind"], m["ref"]), (head, version, "branch", "main"))
         self.assertEqual({k: m["history"][-1][k] for k in ("ref", "sha", "event")},
-                         {"ref": "v0.25.1", "sha": recorded, "event": f"rebuilt at the installed commit (manual) at {m['repaired_at']}"})
+                         {"ref": "v0.25.1", "sha": recorded,
+                          "event": f"rebuilt at the installed commit (manual) at {m['repaired_at']}; the manager's record "
+                                   f"said 0.0.0-{recorded[:12]}, the installed app had {version}"})
         with open(os.path.join(self.folder("lab"), "Dockerfile"), encoding="utf-8") as fh:
             self.assertIn(f"ARG HRI_BUILD={head}", fh.read())
         entry = env.registry.get("lab")

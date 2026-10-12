@@ -2412,8 +2412,15 @@ class Manager:
         if entry.get("updated_by"):
             marker["updated_by"] = entry["updated_by"]
         history = self._history(entry.get("history"))
+        # the registry's version is not the installed one (an older /data restored): said, not folded into the repair
+        before = str(entry.get("version") or "")[:40]
+        behind = "" if not before or before == version else (
+            f"; the manager's record was behind the installed app ({before} -> {version})"
+            if (names.parse_version(before) or ()) < (names.parse_version(version) or ()) else
+            f"; the manager's record said {before}, the installed app had {version}")
         history.append({**{k: entry.get(k) for k in ("channel", "version", "ref_kind", "ref", "sha", "updated_at")},
-                        "event": f"{event} ({'automatic' if user == AUTO_USER else 'manual'}) at {marker['repaired_at']}",
+                        "event": f"{event} ({'automatic' if user == AUTO_USER else 'manual'}) at {marker['repaired_at']}"
+                                 f"{behind}",
                         "by": user})
         marker["history"] = self._history(history)
         setup_complete = entry.get("setup_complete", True)
