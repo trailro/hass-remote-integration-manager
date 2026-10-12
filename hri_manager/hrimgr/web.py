@@ -279,6 +279,10 @@ async def api_action(request: web.Request) -> web.Response:
         return _job(await manager.setup(name, action, request[USER_KEY]))
     if action == "forget":
         return _job(await manager.forget(name, body, request[USER_KEY]))
+    if action == "adopt":
+        return _job(await manager.adopt(name, body, request[USER_KEY]))
+    if action == "remove_folder":
+        return _job(await manager.remove_folder(name, body, request[USER_KEY]))
     return _error(404, "no such action")
 
 
@@ -311,7 +315,7 @@ def create_app(settings: Settings, manager: Manager, users: CoreUsers) -> web.Ap
     app.router.add_get("/api/status", api_status)
     app.router.add_get("/api/instances", api_instances)
     app.router.add_post("/api/instances", api_create)
-    app.router.add_post(r"/api/instances/{name:%s}/{action:start|stop|restart|update|repair|install|finish|forget}" % name, api_action)
+    app.router.add_post(r"/api/instances/{name:%s}/{action:start|stop|restart|update|repair|install|finish|forget|adopt|remove_folder}" % name, api_action)
     app.router.add_delete(r"/api/instances/{name:%s}" % name, api_delete)
     app.router.add_get("/api/releases", api_releases)
     app.router.add_get("/api/jobs", api_jobs)
