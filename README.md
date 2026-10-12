@@ -251,7 +251,9 @@ manager's checks: `hri_<name>/`, or a decoy elsewhere in the folder that declare
 place a moment before the install), and whenever the folder holds another version than the installed one; Rebuild
 applies a definition of the same version at once. The manager's page flags a definition it did not write ("the store
 offers a definition the manager did not write", or "config.yaml is not the one the manager wrote"), with Repair to
-write the manager's definition again, and lists every decoy. Updates go through the manager's **Update**, which moves
+write the manager's definition again, and lists every decoy. A folder that holds the manager's own definition of
+another version than its record (after restoring only part of a backup) is said in neutral words instead: "does not
+match the manager's record", with the same Repair. Updates go through the manager's **Update**, which moves
 the definition and checks what the Supervisor installs.
 
 A release instance records the commit its release tag named. When the manager downloads the same tag again (a
@@ -295,11 +297,15 @@ HRI 0.25.2 or newer keep HRI's own backups in their Home Assistant backup (earli
 instance's `backup_pre` and `backup_post`, HRI's, flag the backup to HRI inside the instance's own container while the
 Supervisor copies the folder.
 
-The instance's **definition** (`hri_<name>/` in the local apps folder) is another matter. On current Supervisors a full
-backup **leaves the local apps folder out**: the backup still names the folder `addons/local`, while the Supervisor
-has moved it to `apps/local` (an upstream issue of the Supervisor, not of this app). So:
+The instance's **definition** (`hri_<name>/` in the local apps folder) is another matter. Since **Supervisor
+2026.10.0** a full backup includes the local apps folder again (its backup folder `addons/local`; upstream:
+[home-assistant/supervisor pull 7262](https://github.com/home-assistant/supervisor/pull/7262)), so a **full
+restore** brings the instances back as they were: their folders first, then the apps, with nothing to repair. On
+**older Supervisors** a full backup **leaves the local apps folder out**: the backup still names the folder
+`addons/local`, while the Supervisor has moved it to `apps/local` (an upstream issue of the Supervisor, not of this
+app). So:
 
-- **After a full restore**, instances come back **detached**: installed and running, but without a definition, so they
+- **After a full restore on an older Supervisor**, instances come back **detached**: installed and running, but without a definition, so they
   cannot be updated. The manager **writes their definitions again by itself**, whether or not anyone opens its page:
   it checks when it starts and then every 5 minutes (and whenever its page lists the instances). The Supervisor
   restores the apps one after another, usually the manager first, so each instance is repaired at the first check
@@ -312,7 +318,32 @@ has moved it to `apps/local` (an upstream issue of the Supervisor, not of this a
   touched.
 
   ![The instance garage after a restore: its row says its definition was written again automatically, with the time](docs/images/auto-repair.png)
-- **After a partial restore of an instance without the local apps folder**: the same.
+- **After a partial restore of an instance without the local apps folder**: the same, on any Supervisor.
+- **After a partial restore of only the local apps folder** (Supervisor 2026.10.0 or newer):
+  - an instance **deleted since** comes back as a folder with the manager's marker that its registry does not hold.
+    It is listed under **Other HRI apps** as probably a restored folder. When it holds exactly what the manager
+    writes for the version and channel its marker records (its `config.yaml` byte for byte as the manager stamps it,
+    and for a release nothing the manager does not write; for a git instance the recorded commit is downloaded and
+    the whole tree compared with what the manager builds from it), the row offers **Adopt** (the name typed): the
+    manager records it as its instance again from its marker (the same id, slug and channel), keeps a copy of its
+    definition in `/data`, and, if the app is installed, checks that the installed app is what the folder defines
+    and records it. Nothing in the folder or the app changes; an adopted instance that is not installed gets
+    **Install**. A folder that does not verify cannot be adopted: when its app is not installed the row offers
+    **Remove folder** (the name typed), which deletes that folder and nothing else; when it is installed the row
+    says to uninstall it in **Settings > Apps** first (keep its data if you want it), then remove the folder and
+    create the instance again;
+  - an instance **updated since** comes back with the manager's own definition of its older version, while the
+    newer one stays installed: the Supervisor would offer the older one as an update (and install it with
+    auto-update on). Automatic repair (the same checks, on the same schedule) writes the definition of the installed
+    version again from the manager's copy, nothing downloaded, and notes it on the instance's history and row. Only
+    for a release instance whose folder holds exactly the manager's definition of an older release, whose registry
+    entry is at the installed version, and whose copy of that version verifies; any other folder that does not match
+    the manager's record is only flagged, with **Repair**.
+- **After a partial restore of only the manager** (its `/data` from before):
+  - an instance **created after** that backup is listed as a restored folder, with **Adopt**, as above;
+  - an instance **updated after** that backup: its row says the folder does not match the manager's record. **Repair**
+    writes the definition of the installed version again (downloaded when the copy in `/data` is of the older
+    version), and the history notes that the manager's record was behind (`0.27.0 -> 0.28.0`, say).
 - The manager's own **registry** of the instances it created (`/data/instances.json`: each instance's channel, branch
   or tag, commit and id) and a **copy of each definition** (`/data/definitions/<name>/`) are in the manager's
   `/data`, which **is** in the manager's own backup. Restore the manager with the instances and Repair works from
@@ -366,9 +397,10 @@ has moved it to `apps/local` (an upstream issue of the Supervisor, not of this a
   again, as before.
 
 **If the manager's `/data` is lost** (the manager uninstalled with its data, or a restore without the manager's
-backup), its registry and its copies are gone. By design the manager then takes no instance for its own (anyone who
-can write the local apps folder can write a marker): every instance is listed under **Other HRI apps** as not
-managed, with no action, and keeps running as it is. To manage one again:
+backup), its registry and its copies are gone. By design the manager then takes no instance for its own by itself
+(anyone who can write the local apps folder can write a marker): every instance is listed under **Other HRI apps**
+and keeps running as it is. One whose folder holds exactly what the manager writes can be **adopted** (above). To
+manage any other one again:
 
 1. in **Settings > Apps**, uninstall the instance **without** deleting its data;
 2. if its `hri_<name>/` folder is still in the local apps folder (the `addons` share over Samba, or `/addons` over
@@ -439,7 +471,10 @@ registry, the administrator check, the secrets kept out of answers and logs.
   registry of the instances it created (`/data/instances.json`), which must hold the same random instance id. Both
   are read again right before the call (never through a symlink). Anyone who can write the local apps folder (Samba,
   SSH, another app) can write a marker, but not the manager's `/data`: a folder whose marker the registry does not
-  hold is listed as not managed and gets no action, and a `local_hri_*` app without a marker is left alone.
+  hold is listed as not managed, and a `local_hri_*` app without a marker is left alone. Such a folder is taken back
+  only by an administrator's **Adopt**, and only when it holds exactly what the manager itself writes for what its
+  marker records (a git tree is compared with the recorded commit, downloaded from HRI); one that does not verify can
+  only be removed (**Remove folder**, while its app is not installed).
 - **What it installs is checked against what it wrote (best effort).** A writer of the local apps folder can change a
   definition after the manager wrote it and before the Supervisor reads it (the store reads the whole folder again at
   a reload), and the manager's own install or update would then install, say, `hassio_role: admin`. Around the

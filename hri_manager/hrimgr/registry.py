@@ -4,10 +4,13 @@ The marker in an instance's folder says the folder is the manager's, but anyone 
 (a Samba or SSH user, another app that maps it) can write a marker.  Nobody but the manager writes its ``/data``.  So
 every instance gets a random ``instance_id`` when it is created, written both in its marker and here, and an action
 that changes an app needs the two to agree (``children.Managed.verify``): a folder with a marker and no entry here is
-shown as not managed and gets no action.
+shown as not managed; it gets an entry again only by an administrator's Adopt, and only when it holds exactly what
+the manager writes for what its marker records (instances.Manager.adopt).
 
-``/data`` is in the manager's own backups, unlike (on current Supervisors) the local apps folder, so after a full
-restore the registry still knows each instance's channel, branch or tag and commit, and Repair works from it.
+``/data`` is in the manager's own backups.  Since Supervisor 2026.10.0 a full backup holds the local apps folder too,
+so a full restore brings both back as they were; on older Supervisors it leaves that folder out, and after a full
+restore the registry still knows each instance's channel, branch or tag and commit, and Repair works from it.  A
+partial restore can bring back one without the other (Adopt, and automatic repair of a rolled-back folder).
 
 An entry: name, slug, channel, version, ref_kind, ref, sha, instance_id, created_at, updated_at, setup_complete (the
 create got as far as starting the app), stamp_version (stamp.STAMP_VERSION of the definition written), interrupted

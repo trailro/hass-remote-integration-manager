@@ -1,5 +1,6 @@
-"""Automatic repair after a restore: a full backup leaves the local apps folder out (the Supervisor logs "Can't find
-backup folder addons/local"), so after a restore the instances are installed and detached.  At the manager's start,
+"""Automatic repair after a restore: on Supervisors older than 2026.10.0 a full backup leaves the local apps folder out
+(the Supervisor logs "Can't find backup folder addons/local"), so after a restore the instances are installed and
+detached (tests/test_restore.py: the partial restores of newer ones).  At the manager's start,
 and on a list at most every few minutes, each instance of the registry in that state gets its definition written
 again; nothing outside the registry is touched."""
 
