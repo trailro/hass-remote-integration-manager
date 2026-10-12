@@ -506,6 +506,22 @@ def remove(managed: Managed) -> None:
     _remove_tree(doomed)
 
 
+def remove_unregistered(root: str, name: str, registry: Registry) -> None:
+    """Remove ``hri_<name>/`` that has a valid marker of this manager and no entry in its registry (a folder restored
+    without the manager's record of it, which the admin chose to remove): NotManaged for any other.  The caller checks
+    that its app is not installed."""
+    final = child_path(root, name)
+    read_marker(final, name)
+    try:
+        if registry.get(name) is not None:
+            raise NotManaged(f"{name} is in the manager's registry: Delete removes it")
+    except RegistryError as err:
+        raise NotManaged(str(err)) from None
+    doomed = os.path.join(os.path.dirname(final), f"{DEL_PREFIX}{name}-{secrets.token_hex(4)}")
+    os.rename(final, doomed)
+    _remove_tree(doomed)
+
+
 def _identity(st: os.stat_result) -> str:
     return f"ino:{st.st_ino} ctime:{st.st_ctime_ns}"
 

@@ -8,10 +8,14 @@ cancelled): the rollback then runs shielded from the cancellation, for at most `
 cancellation goes on.  An install the Supervisor finishes after that is listed as "install interrupted"; an instance
 whose create stopped before its options and start (``setup_complete`` in the registry) gets "Finish setup".
 
-Automatic repair: a restore without the local apps folder (a full backup leaves it out on current Supervisors) leaves
-the instances installed and detached.  When the manager starts, and on a list at most every ``AUTO_REPAIR_INTERVAL``
-seconds, every instance of the registry that is installed, detached and has no folder gets its definition written again
-by a repair job (``AUTO_USER``), logged and shown on its row.  Nothing outside the registry is ever repaired."""
+Automatic repair: a restore without the local apps folder (a full backup leaves it out on Supervisors older than
+2026.10.0, which include it) leaves the instances installed and detached; a restore of only that folder can put the
+manager's own definition of an older version back under a newer installed app.  When the manager starts, and on a list
+at most every ``AUTO_REPAIR_INTERVAL`` seconds, every instance of the registry that is installed, detached and has no
+folder, and every release instance whose folder provably holds that older definition (_rolled_back), gets its
+definition written again by a repair job (``AUTO_USER``), logged and shown on its row.  Nothing outside the registry
+is ever repaired; a folder with the manager's marker that the registry does not hold is adopted only by the admin
+(Adopt)."""
 
 from __future__ import annotations
 
@@ -22,6 +26,8 @@ import json
 import logging
 import os
 import secrets
+import stat
+import tempfile
 import time
 from typing import Any
 
@@ -64,6 +70,9 @@ class InvalidRequest(ValueError):
     pass
 
 
+# what checking that a folder holds what this manager writes may raise (Manager._own_stamp)
+OWN_STAMP_ERRORS = (copies.CopyError, children.UnsafePath, names.InvalidName, stamp.TemplateError, OSError,
+                    UnicodeDecodeError, yaml.YAMLError, RecursionError)
 # what writing a definition folder may raise, the builder's own refusals (JobFailed: more than one app; ValueError:
 # stamp's) among them: every write path undoes its registry change on any of these
 WRITE_ERRORS = (stamp.TemplateError, children.UnsafePath, children.NotManaged, children.DefinitionChanged, RegistryError,
@@ -184,15 +193,16 @@ class Manager:
         folders = await asyncio.to_thread(children.scan, self.root, self.registry)
         configs = await asyncio.to_thread(lambda: {n: self._config_sha256(n) for n, m, _ in folders if m is not None})
         found = await self._decoys()
+        registry_read = True
         try:
             registered = await asyncio.to_thread(self.registry.all)
         except RegistryError as err:
             _LOGGER.error("%s", err)
-            registered = {}
+            registered, registry_read = {}, False
         for name, mark in self._unrecorded_marks.items():
             if name in registered and not isinstance(registered[name].get("tampered"), dict):
                 registered[name] = {**registered[name], "tampered": mark}
-        out, others, seen, repairable = [], [], set(), []
+        out, others, seen, repairable, rolled_back = [], [], set(), [], []
         for decoy in found:
             # the slug the Supervisor gives it: local_ (its local repository) and the one it declares
             others.append({"slug": f"local_{decoy.slug}" if decoy.slug else "", "name": decoy.path, "kind": "decoy",
@@ -204,12 +214,28 @@ class Manager:
                 mark = (registered.get(name) or {}).get("tampered")
                 if isinstance(mark, dict):  # the manager's own instance, whose marker a writer broke
                     problem = f"{str(mark.get('reason'))[:300]}: {self._mark_text(slug, mark)} ({problem})"
-                others.append({"slug": slug, "name": names.folder_name(name), "kind": "folder", "problem": problem,
-                               "installed": slug in installed, "state": installed.get(slug, {}).get("state")})
+                row = {"slug": slug, "name": names.folder_name(name), "kind": "folder", "problem": problem,
+                       "installed": slug in installed, "state": installed.get(slug, {}).get("state")}
+                if registry_read and name not in registered and not self.jobs.running_for(name):
+                    # a marker of this manager the registry does not hold: a folder restored without the manager's
+                    # record of it (Adopt), or one it cannot take (Remove folder, when not installed)
+                    row.update(await asyncio.to_thread(self._restored, name, installed.get(slug)) or {})
+                others.append(row)
                 continue
             entry = self._entry(name, marker, installed.get(slug), latest, registered.get(name))
-            foreign = (self._foreign_version(registered.get(name), (installed.get(slug) or {}).get("version_latest"))
-                       or self._foreign_config(registered.get(name), configs.get(name)))
+            known, offered = registered.get(name), (installed.get(slug) or {}).get("version_latest")
+            foreign = self._foreign_version(known, offered) or self._foreign_config(known, configs.get(name))
+            if foreign:
+                # the manager's own definition of another version (a partial restore) is said apart from one it would
+                # never write
+                own = await asyncio.to_thread(self._holds_own_stamp, name, marker)
+                foreign = (self._foreign_version(known, offered, own=own)
+                           or self._foreign_config(known, configs.get(name), own=own))
+                # written again automatically only from the manager's copy, and only while no decoy is there (a
+                # Repair reloads the store, which could take it)
+                if not entry.get("job") and not found and await asyncio.to_thread(self._rolled_back, name, marker, known,
+                                                                                  installed.get(slug)):
+                    rolled_back.append(name)
             if foreign and not entry.get("job"):
                 entry["problem"] = "; ".join(p for p in (entry.get("problem"), foreign) if p)
                 if not isinstance((registered.get(name) or {}).get("tampered"), dict):  # a marked row keeps its own
@@ -299,7 +325,7 @@ class Manager:
                                            + " and ".join(w for w, on in (("registry entry", name in registered),
                                                                           ("copy of its definition", name in kept)) if on)
                                            + " are left. Forget drops them")})
-        started = self._auto_repair(repairable)
+        started = self._auto_repair(repairable, rolled_back)
         for entry in out:
             if entry["name"] in started:
                 job = self.jobs.get(started[entry["name"]])
@@ -332,37 +358,46 @@ class Manager:
                     entry[access] = has
         return {"instances": out, "others": others, "latest_release": latest["version"] if latest else None}
 
-    def _auto_repair(self, names_: list[str]) -> dict[str, str]:
+    def _auto_repair(self, names_: list[str], rolled_back: list[str] | tuple = ()) -> dict[str, str]:
         """Start a repair job for each of ``names_`` (instances of the registry, installed, detached, without a
-        folder), at most once every ``auto_repair_interval`` seconds: {name: job id} of those started.  A check with
-        nothing to repair does not count: after a full restore the Supervisor starts the manager first and restores
-        the instances after it, one by one, and each is repaired at the next check."""
+        folder) and of ``rolled_back`` (_rolled_back: a folder holding the manager's own definition of an older version
+        than the installed one), at most once every ``auto_repair_interval`` seconds: {name: job id} of those started.
+        A check with nothing to repair does not count: after a full restore the Supervisor starts the manager first and
+        restores the instances after it, one by one, and each is repaired at the next check."""
         now = time.monotonic()
-        if self.auto_repair_interval is None or not names_ or (
+        if self.auto_repair_interval is None or not (names_ or rolled_back) or (
                 self._auto_checked is not None and now - self._auto_checked < self.auto_repair_interval):
             return {}
         self._auto_checked = now
         started = {}
-        for name in names_:
+        for name in [*names_, *rolled_back]:
             backoff = self.auto_backoff.get(name)
             if backoff and now < backoff["next"]:
                 continue
+            older = name in rolled_back
             try:
-                job = self.jobs.start(name, "repair", AUTO_USER, lambda job, name=name: self._auto_repair_job(job, name))
+                job = self.jobs.start(name, "repair", AUTO_USER,
+                                      lambda job, name=name, older=older: self._auto_repair_job(job, name, older))
             except Busy:
                 continue
             _LOGGER.log(logging.DEBUG if backoff else logging.WARNING,
-                        "instance %s is installed but detached, its definition gone (a restore without the local apps "
-                        "folder?): writing it again automatically (job %s%s)", name, job.id,
-                        f", attempt {backoff['failures'] + 1}" if backoff else "")
-            self.auto_repairs[name] = {"job": job.id, "at": children.now_iso()}
+                        "instance %s: %s: writing it again automatically (job %s%s)", name,
+                        "its folder holds the manager's definition of an older version than the installed one (a "
+                        "restore of only the local apps folder?)" if older else
+                        "installed but detached, its definition gone (a restore without the local apps folder?)",
+                        job.id, f", attempt {backoff['failures'] + 1}" if backoff else "")
+            self.auto_repairs[name] = {"job": job.id, "at": children.now_iso(),
+                                       "reason": "rolled_back" if older else "detached"}
             started[name] = job.id
         return started
 
-    async def _auto_repair_job(self, job: Job, name: str) -> dict:
-        job.log("started automatically: the instance is installed, detached and its definition folder is gone")
+    async def _auto_repair_job(self, job: Job, name: str, rolled_back: bool = False) -> dict:
+        job.log("started automatically: " + (
+            "its folder holds the manager's own definition of an older version than the installed one; it is written "
+            "again for the installed version from the manager's copy" if rolled_back else
+            "the instance is installed, detached and its definition folder is gone"))
         try:
-            result = await self._repair(job, name, AUTO_USER)
+            result = await (self._repair_rolled_back(job, name) if rolled_back else self._repair(job, name, AUTO_USER))
         except NeedsAttention as err:
             # left to the user from now on (the list does not repair it again): no back-off, no next try
             self.auto_backoff.pop(name, None)
@@ -391,6 +426,7 @@ class Manager:
             return None
         note = {"at": known["at"], "job": job.id, "state": job.state, "error": job.error} if job else \
             {"at": backoff["at"], "job": None, "state": "failed", "error": backoff["error"]}
+        note["reason"] = (known or {}).get("reason", "detached")
         if backoff and note["state"] != "running":
             # the last failure, kept after its job is forgotten, and when the next try is
             note.update(failures=backoff["failures"], error=backoff["error"],
@@ -803,28 +839,42 @@ class Manager:
         return self.jobs.start(name, "delete", user, lambda job: self._delete(job, managed, remove_data))
 
     @staticmethod
-    def _foreign_version(known: dict | None, offered: object) -> str | None:
+    def _not_recorded(known: dict, own: str) -> str:
+        """The folder holds the manager's own definition of ``own``, not the one its record names: who changed it
+        cannot be told."""
+        return (f"{names.folder_name(str(known.get('name')))}/ does not match the manager's record: it holds the "
+                f"manager's definition of {own[:40]}, the record says {known.get('version')}. This happens after "
+                "restoring only part of a backup (only the local apps folder, or only the manager) or after a change "
+                "made outside the manager. Do not update or rebuild it from the Supervisor's app page; Repair writes "
+                "the right definition again, Delete removes the instance")
+
+    @staticmethod
+    def _foreign_version(known: dict | None, offered: object, own: str | None = None) -> str | None:
         """Why the store's definition of a managed instance is not one the manager wrote: it offers a version the
         registry never recorded (nor an update of the manager's own names, in flight).  The Supervisor's own Update
         button, or its auto-update, would install that folder as it is, without the manager's checks.  None when it
-        is the manager's."""
+        is the manager's.  ``own``: the version of the definition in the folder when it is one this manager writes
+        (_holds_own_stamp), said in neutral words; None: not one it writes, said as such."""
         if not known or not isinstance(offered, str):
             return None
         flag = known.get("updating")
         fields = flag.get("fields") if isinstance(flag, dict) and isinstance(flag.get("fields"), dict) else {}
         if offered in (known.get("version"), fields.get("version")):
             return None
+        if own is not None:
+            return Manager._not_recorded(known, own)
         return (f"the store offers a definition the manager did not write ({offered[:40]}; the manager's is "
-                f"{known.get('version')}): do not update or rebuild it from the Supervisor's app page. Someone changed "
-                f"{names.folder_name(str(known.get('name')))}/ in the local apps folder; Repair writes the manager's "
-                "definition again, Delete removes the instance")
+                f"{known.get('version')}): do not update or rebuild it from the Supervisor's app page. It is not a "
+                f"definition this manager writes: someone changed {names.folder_name(str(known.get('name')))}/ in the "
+                "local apps folder; Repair writes the manager's definition again, Delete removes the instance")
 
     @staticmethod
-    def _foreign_config(known: dict | None, found: str | None) -> str | None:
+    def _foreign_config(known: dict | None, found: str | None, own: str | None = None) -> str | None:
         """Why the folder's config.yaml is not the one the manager wrote, at any version: its sha256 (``found``; None:
         it cannot be read) is neither the registry's (``config_sha256``) nor that of an update in flight.  The
         Supervisor's own Rebuild applies a definition of the installed version as it is, without the manager's checks.
-        None when it is the manager's, or when the registry has no sha256 to compare (last written by 0.1.2)."""
+        None when it is the manager's, or when the registry has no sha256 to compare (last written by 0.1.2).
+        ``own``: as _foreign_version's."""
         if not known:
             return None
         flag = known.get("updating")
@@ -832,10 +882,45 @@ class Manager:
         recorded = [h for h in (known.get("config_sha256"), fields.get("config_sha256")) if isinstance(h, str)]
         if not recorded or found in recorded:
             return None
+        if own is not None:
+            return Manager._not_recorded(known, own)
         folder = names.folder_name(str(known.get("name")))
-        return (f"{folder}/config.yaml is not the one the manager wrote for {known.get('version')} (someone changed it "
-                "in the local apps folder): do not update or rebuild it from the Supervisor's app page, which would "
-                "apply it. Repair writes the manager's definition again, Delete removes the instance")
+        return (f"{folder}/config.yaml is not the one the manager wrote for {known.get('version')}, nor a definition "
+                "this manager writes (someone changed it in the local apps folder): do not update or rebuild it from "
+                "the Supervisor's app page, which would apply it. Repair writes the manager's definition again, Delete "
+                "removes the instance")
+
+    def _holds_own_stamp(self, name: str, marker: dict) -> str | None:
+        """The version of the definition in ``hri_<name>/`` when it is what this manager writes for its marker
+        (_own_stamp), else None."""
+        try:
+            self._own_stamp(name, marker)
+        except OWN_STAMP_ERRORS:
+            return None
+        return str(marker.get("version"))
+
+    def _rolled_back(self, name: str, marker: dict, known: dict | None, app: dict | None) -> bool:
+        """Whether a restore of only the local apps folder provably put an older definition of the manager's own back:
+        a release instance, installed at the version the registry records, with no update, mark or other problem of
+        its own; its folder's marker agrees with the registry (``marker``: children.scan's) and holds exactly what the
+        manager writes for an OLDER release (_own_stamp); and the manager's copy of the installed version is there and
+        verifies (copies.load).  Automatic repair writes it again from that copy; no other foreign folder is ever
+        acted on by itself."""
+        if not known or not app or known.get("channel") != "release" or marker.get("channel") != "release":
+            return False
+        if (isinstance(known.get("tampered"), dict) or name in self._unrecorded_marks or known.get("updating")
+                or known.get("needs_attention") or known.get("tag_moved") or known.get("interrupted")):
+            return False
+        installed = app.get("version")
+        older, newer = names.parse_version(marker.get("version")), names.parse_version(installed)
+        if known.get("version") != installed or not older or not newer or older >= newer:
+            return False
+        try:
+            self._own_stamp(name, marker)
+            copies.load(self.copies_root, name, known, installed)
+        except OWN_STAMP_ERRORS:
+            return False
+        return True
 
     def _config_sha256(self, name: str) -> str | None:
         """The sha256 of ``hri_<name>/config.yaml`` as it is now (never through a link), None when it cannot be read."""
@@ -870,9 +955,10 @@ class Manager:
         except (SupervisorError, NotAllowed) as err:
             raise InvalidRequest(str(err)) from None
         found_config = await asyncio.to_thread(self._config_sha256, managed.name)
-        foreign = self._foreign_version(managed.entry, offered) or self._foreign_config(managed.entry, found_config)
-        if foreign:
-            raise InvalidRequest(f"{managed.name}: {foreign}")
+        if self._foreign_version(managed.entry, offered) or self._foreign_config(managed.entry, found_config):
+            own = await asyncio.to_thread(self._holds_own_stamp, managed.name, managed.marker)
+            raise InvalidRequest(f"{managed.name}: " + (self._foreign_version(managed.entry, offered, own=own)
+                                                        or self._foreign_config(managed.entry, found_config, own=own)))
 
     async def repair(self, name: str, user: str) -> Job:
         name = self.check_name(name)
@@ -902,18 +988,35 @@ class Manager:
             return self.jobs.start(name, "repair", user, lambda job: self._repair_foreign(job, managed, user))
         return self.jobs.start(name, "repair", user, lambda job: self._repair(job, name, user))
 
-    async def _repair_foreign(self, job: Job, managed: children.Managed, user: str) -> dict:
+    async def _repair_foreign(self, job: Job, managed: children.Managed, user: str,
+                              what: str = "a definition that does not match the manager's record") -> dict:
         """The store offers a definition the manager did not write: the folder goes (out of the store's sight), and
         Repair writes the manager's definition of the installed version again, and checks the installed app."""
         await self._refuse_marked_now(managed.name, check=True)
         await self._refuse_decoys()  # before the folder is removed and the store reloaded
-        job.log(f"{names.folder_name(managed.name)} holds a definition the manager did not write: removing it")
+        job.log(f"{names.folder_name(managed.name)} holds {what}: removing it")
         try:
             await asyncio.to_thread(children.remove, managed)
             await self.sv.reload_store()
         except (SupervisorError, NotAllowed, children.NotManaged, OSError) as err:
             raise JobFailed(str(err)) from None
         return await self._repair(job, managed.name, user)
+
+    async def _repair_rolled_back(self, job: Job, name: str) -> dict:
+        """Automatic repair of a folder a restore of only the local apps folder rolled back (_rolled_back, checked
+        again here): as the admin's Repair of it, the folder goes and the definition of the installed version is
+        written again from the manager's copy, nothing downloaded."""
+        try:
+            managed = await asyncio.to_thread(children.load_managed, self.root, name, self.registry)
+            app = next((a for a in await self.sv.list_apps() if a.get("slug") == managed.slug), None)
+        except (children.NotManaged, SupervisorError, NotAllowed) as err:
+            raise JobFailed(f"{err}: not repaired automatically") from None
+        if not await asyncio.to_thread(self._rolled_back, name, managed.marker, managed.entry, app):
+            raise JobFailed(f"{names.folder_name(name)}/ no longer holds the manager's definition of an older version "
+                            "than the installed one: not repaired automatically")
+        return await self._repair_foreign(job, managed, AUTO_USER, what=(
+            f"the manager's definition of {managed.marker.get('version')}, older than the installed "
+            f"{(app or {}).get('version')}"))
 
     async def _give_up_detached_update(self, job: Job, managed: children.Managed, user: str) -> dict:
         """Repair of an instance whose detached update is pending while the Supervisor still has the version that
@@ -995,6 +1098,145 @@ class Manager:
         self._clear_auto(name)
         job.log(f"forgot {name}: " + ("its registry entry and " if known else "") + "any copy of its definition")
         return {"forgotten": name}
+
+    def _restored(self, name: str, app: dict | None) -> dict | None:
+        """For ``hri_<name>/`` with a valid marker of this manager and no entry in its registry (most likely restored
+        from a backup without the manager's record of it): its row's problem and actions.  Adopt when the folder holds
+        exactly what the manager writes for what its marker records (_own_stamp; the installed app, if any, at that
+        version); otherwise Remove folder when its app is not installed, and nothing when it is.  None without a valid
+        marker."""
+        folder, slug = names.folder_name(name), names.supervisor_slug(name)
+        try:
+            marker = children.read_marker(children.child_path(self.root, name), name)
+        except (children.NotManaged, children.UnsafePath):
+            return None
+        head = (f"{folder}/ has the manager's marker, but the manager's registry has no instance {name}: probably a "
+                "folder restored from a backup without the manager's record of it (a restore of only the local apps "
+                "folder, or of the manager from before this instance was created)")
+        version = str(marker.get("version"))[:40]
+        try:
+            self._own_stamp(name, marker)
+            if app is not None and app.get("version") != marker.get("version"):
+                raise copies.CopyError(f"the installed {slug} is {str(app.get('version'))[:40]}, its definition {version}")
+        except OWN_STAMP_ERRORS as err:
+            if app is None:
+                return {"instance": name, "actions": ["remove_folder"], "problem": (
+                    f"{head}. It cannot be adopted: {str(err)[:300]}. Remove folder deletes {folder}/ and nothing else; "
+                    f"Create can then make {name} again")}
+            return {"instance": name, "actions": [], "problem": (
+                f"{head}. It cannot be adopted ({str(err)[:300]}), and {slug} is installed, so the manager does not "
+                f"take it over: uninstall {slug} in Settings > Apps (keep its data if you want it), then Remove folder "
+                f"here (or delete {folder}/ yourself) and Create {name} again")}
+        what = (f"the manager's definition of {marker.get('channel')} {version}"
+                + (f" (commit {str(marker.get('sha'))[:12]}, downloaded to compare the whole tree)"
+                   if marker.get("channel") == "git" else ""))
+        return {"instance": name, "actions": ["adopt"], "problem": (
+            f"{head}. It holds {what}: Adopt makes it this manager's instance again from its marker (the same id, slug "
+            "and channel), keeps a copy of its definition in /data"
+            + (f" and records the installed {slug} {version}" if app is not None else "; Install installs it then")
+            + ". Nothing in the folder or the app is changed")}
+
+    async def _unregistered_marker(self, name: str) -> dict:
+        """The marker of ``hri_<name>/`` when the registry has no instance ``name``; InvalidRequest otherwise."""
+        def read() -> dict:
+            if self.registry.get(name) is not None:
+                raise InvalidRequest(f"{name} is in the manager's registry: nothing to adopt or remove this way")
+            try:
+                return children.read_marker(children.child_path(self.root, name), name)
+            except (children.NotManaged, children.UnsafePath) as err:
+                raise InvalidRequest(f"{names.folder_name(name)} has no marker of this manager: {err}") from None
+
+        try:
+            return await asyncio.to_thread(read)
+        except RegistryError as err:
+            raise InvalidRequest(str(err)) from None
+
+    async def adopt(self, name: str, body: dict, user: str) -> Job:
+        """Make a folder restored without the manager's record of it (_restored) this manager's instance again.
+        Needs the name typed."""
+        name = self.check_name(name)
+        if body.get("confirm") != name:
+            raise InvalidRequest(f"Adopting a folder needs its name typed: {name}.")
+        await self._unregistered_marker(name)
+        return self.jobs.start(name, "adopt", user, lambda job: self._adopt(job, name, user))
+
+    async def _adopt(self, job: Job, name: str, user: str) -> dict:
+        slug, folder = names.supervisor_slug(name), names.folder_name(name)
+        try:
+            marker = await self._unregistered_marker(name)
+        except InvalidRequest as err:
+            raise JobFailed(str(err)) from None
+        channel, version = marker.get("channel"), str(marker.get("version"))
+        job.log(f"checking {folder}/ against what the manager writes for {channel} {version}")
+        try:
+            raw, config, files = await asyncio.to_thread(self._own_stamp, name, marker)
+        except OWN_STAMP_ERRORS as err:
+            raise JobFailed(f"{folder}/ is not a definition this manager writes ({str(err)[:300]}): not adopted") from None
+        if channel == "git":
+            await self._check_git_tree(job, name, marker)
+        try:
+            app = next((a for a in await self.sv.list_apps() if a.get("slug") == slug), None)
+            view = await self.sv.app_definition(slug) if app is not None else None
+        except (SupervisorError, NotAllowed) as err:
+            raise JobFailed(str(err)) from None
+        if app is not None:
+            problems = stamp.view_differences(view, stamp.expected_view(config, slug), stamp.INSTALLED_VIEW)
+            if problems:
+                raise JobFailed(f"the installed {slug} is not what {folder}/ defines ({'; '.join(problems)[:300]}): not "
+                                f"adopted. Uninstall it in Settings > Apps (keep its data if you want it), then Remove "
+                                f"folder and Create {name} again")
+            job.log(f"the installed {slug} ({version}) is what its definition says")
+        now = children.now_iso()
+        history = self._history(marker.get("history"))
+        history.append({**{k: marker.get(k) for k in ("channel", "version", "ref_kind", "ref", "sha", "updated_at")},
+                        "event": f"adopted at {now}: restored without the manager's record of it"
+                                 + (", installed" if app is not None else ", not installed"),
+                        "by": user})
+        entry = self._registry_entry({**marker, "history": history}, setup_complete=app is not None,
+                                     config_sha256=hashlib.sha256(raw).hexdigest())
+
+        def record() -> children.Managed:
+            if self.registry.get(name) is not None:
+                raise RegistryError(f"{name} appeared in the manager's registry meanwhile")
+            self.registry.put(name, entry)
+            try:
+                return children.load_managed(self.root, name, self.registry)
+            except BaseException:
+                self._forget(name, marker["instance_id"])
+                raise
+
+        try:
+            managed = await asyncio.to_thread(record)
+        except (RegistryError, children.NotManaged) as err:
+            raise JobFailed(f"not adopted: {err}") from None
+        self._clear_auto(name)
+        job.log(f"{name} is this manager's instance again ({channel} {version}, its id kept)")
+        await self._save_copy(job, managed, self._access_of(marker), files)
+        return {"adopted": slug, "version": version, "installed": app is not None}
+
+    async def remove_folder(self, name: str, body: dict, user: str) -> Job:
+        """Remove a folder with this manager's marker that its registry does not hold and whose app is not installed
+        (one that cannot be adopted): that folder only.  Needs the name typed."""
+        name = self.check_name(name)
+        if body.get("confirm") != name:
+            raise InvalidRequest(f"Removing a folder needs its name typed: {name}.")
+        await self._unregistered_marker(name)
+        return self.jobs.start(name, "remove_folder", user, lambda job: self._remove_folder(job, name))
+
+    async def _remove_folder(self, job: Job, name: str) -> dict:
+        slug, folder = names.supervisor_slug(name), names.folder_name(name)
+        try:
+            if any(a.get("slug") == slug for a in await self.sv.list_apps()):
+                raise JobFailed(f"{slug} is installed: {folder}/ is not removed. Uninstall it in Settings > Apps first")
+        except (SupervisorError, NotAllowed) as err:
+            raise JobFailed(str(err)) from None
+        job.log(f"removing {folder}/")
+        try:
+            await asyncio.to_thread(children.remove_unregistered, self.root, name, self.registry)
+            await self.sv.reload_store()
+        except (children.NotManaged, children.UnsafePath, OSError, SupervisorError, NotAllowed) as err:
+            raise JobFailed(str(err)) from None
+        return {"removed": folder}
 
     async def setup(self, name: str, action: str, user: str) -> Job:
         """``install`` (a definition without its app) or ``finish`` (installed, but its create stopped before the
@@ -2049,6 +2291,91 @@ class Manager:
             raise JobFailed(f"{names.folder_name(managed.name)} is not a definition this manager writes ({str(err)[:300]}): not "
                             "installed; Delete removes it") from None
         return stamp.expected_view(config, managed.slug), manifest
+
+    def _own_stamp(self, name: str, marker: dict) -> tuple[bytes, dict, dict[str, bytes]]:
+        """Whether ``hri_<name>/`` holds what this manager writes for the channel, version and accesses its marker
+        records: its config.yaml byte for byte as stamping writes it (copies.check, then stamp.dump of it with the
+        marker's source), no file the Supervisor would build or confine the app with, and for a release nothing but
+        the files a release's definition has (the ones a copy keeps, and the marker).  A git instance's source tree is
+        not read here: its commit is downloaded and compared (_check_git_tree).  CopyError (or what reading raises:
+        OSError, children.UnsafePath, UnicodeDecodeError, yaml.YAMLError, RecursionError) otherwise.  The config's
+        bytes, the config, and the files a copy of it keeps."""
+        channel, version = marker.get("channel"), marker.get("version")
+        if not isinstance(version, str):
+            raise copies.CopyError("its marker records no version")
+        if channel == "release" and not (names.parse_version(version) and names.supported_version(version)):
+            raise copies.CopyError(f"its marker's version {version[:40]!r} is not an HRI release this manager writes")
+        if channel == "git":
+            try:
+                names.validate_ref(marker.get("ref_kind"), marker.get("ref"))
+            except ValueError as err:
+                raise copies.CopyError(f"its marker has no usable branch or tag: {err}") from None
+            sha = marker.get("sha")
+            if not isinstance(sha, str) or not names.SHA_RE.fullmatch(sha) or names.git_version(sha) != version:
+                raise copies.CopyError("its marker records no commit of its version")
+        if isinstance(marker.get("contained"), dict):
+            raise copies.CopyError("its marker says the manager contained its app (installed from another definition)")
+        folder = children.child_path(self.root, name)
+        files = copies.read_definition(folder, channel)
+        raw = files["config.yaml"]
+        config = copies.check(yaml.safe_load(raw.decode("utf-8")), name, version, channel, **self._access_of(marker))
+        if raw != stamp.dump(config, marker["template_source"]):
+            raise copies.CopyError("its config.yaml is not byte for byte what the manager writes")
+        if channel == "git":
+            build_files = sorted(e for e in children.list_folder(folder, "") if stamp.BUILD_FILES_RE.fullmatch(e))
+            if build_files:
+                raise copies.CopyError(f"it holds {', '.join(tarsafe.show(r) for r in build_files)}, which the "
+                                       "Supervisor would use to build or confine the app")
+            return raw, config, files
+        extra = sorted(rel for rel, _, _, st in children.walk(folder, max_entries=1000)
+                       if rel not in files and rel != children.MARKER and not (rel == "translations" and stat.S_ISDIR(st.st_mode)))
+        if extra:
+            raise copies.CopyError(f"it holds {', '.join(tarsafe.show(r) for r in extra[:3])}, which the manager does "
+                                   "not write")
+        for rel, data in files.items():
+            if rel != "config.yaml":
+                copies.check_file(rel, data)
+        return raw, config, files
+
+    async def _check_git_tree(self, job: Job, name: str, marker: dict) -> None:
+        """JobFailed unless ``hri_<name>/`` holds exactly what the manager builds from the commit its marker records
+        (downloaded, checked to be on that branch or tag, and built as a create builds it): the same files with the
+        same bytes, links and folders, the marker aside."""
+        sha, version = marker["sha"], marker["version"]
+        ref = names.validate_ref(marker.get("ref_kind"), marker.get("ref"))
+        folder = names.folder_name(name)
+        job.log(f"downloading commit {sha[:12]} of HRI's {ref[0]} {ref[1]}, to compare {folder}/ with what the manager "
+                "builds from it")
+        try:
+            archive, _ = await self.gh.tarball_of_commit(sha, *ref)
+        except (GitHubError, NotHRICommit) as err:
+            raise JobFailed(f"{err}: not adopted") from None
+        except Exception as err:  # noqa: BLE001 - tarsafe.UnsafeArchive
+            raise JobFailed(f"the archive of commit {sha[:12]} was refused ({err}): not adopted") from None
+        job.keep(archive)
+
+        def kinds(tree: dict[str, str]) -> dict[str, str]:
+            return {rel: value.rsplit(" ", 2)[0] for rel, value in tree.items() if rel not in (".", children.MARKER)}
+
+        def compare() -> list[str]:
+            with tempfile.TemporaryDirectory(prefix="hri-adopt-") as tmp:
+                try:
+                    stamp.build_git(archive, tmp, name, version, sha, marker["template_source"],
+                                    **self._access_of(marker))
+                finally:
+                    archive.close()
+                want = kinds(children.digest_tree(tmp))
+            found = kinds(children.digest_tree(children.child_path(self.root, name)))
+            return sorted(k for k in set(want) | set(found) if want.get(k) != found.get(k))
+
+        try:
+            differ = await asyncio.to_thread(compare)
+        except (stamp.TemplateError, children.UnsafePath, OSError, ValueError) as err:
+            raise JobFailed(f"{folder}/ could not be compared with commit {sha[:12]} ({err}): not adopted") from None
+        if differ:
+            shown = ", ".join(tarsafe.show(r) for r in differ[:5]) + (f" and {len(differ) - 5} more" if len(differ) > 5 else "")
+            raise JobFailed(f"{folder}/ is not what the manager builds from commit {sha[:12]} ({shown}): not adopted")
+        job.log(f"{folder}/ is what the manager builds from commit {sha[:12]}")
 
     async def _refuse_host_network_installed(self, job: Job, managed: children.Managed) -> None:
         """_refuse_host_network for the definition of the installed version, which is stamped again in place: the

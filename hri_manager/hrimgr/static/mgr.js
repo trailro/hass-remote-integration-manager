@@ -81,7 +81,9 @@ function autoNote(i) {
   // needs attention: never retried automatically; its problem line gives the reason and the actions
   const a = i.auto_repair;
   if (!a || i.needs_attention) return '';
-  if (a.state === 'running') return '<span class="problem">installed but detached (a restore without the local apps folder?): its definition is being written again automatically</span>';
+  if (a.state === 'running') return a.reason === 'rolled_back'
+    ? '<span class="problem">its folder holds the manager\'s definition of an older version than the installed one (a restore of only the local apps folder?): the installed version\'s definition is being written again automatically</span>'
+    : '<span class="problem">installed but detached (a restore without the local apps folder?): its definition is being written again automatically</span>';
   if (a.state === 'succeeded') return `<span class="sub">definition written again automatically at ${esc(a.at)}</span>`;
   const next = a.next_try_in ? `, next try in about ${Math.max(1, Math.round(a.next_try_in / 60))} min` : '';
   const count = a.failures > 1 ? ` (${a.failures} times)` : '';
@@ -115,9 +117,13 @@ async function loadInstances() {
     const link = o.kind === 'published' || o.kind === 'local_build' ? panelHref({slug: o.slug, ingress_panel: true}) : null;
     return `<tr><td><b>${esc(o.name || o.slug)}</b><span class="sub">${esc(o.slug)}</span></td><td>${o.installed ? stateCell(o) : '—'}</td>`
       + `<td>${esc(o.version || '')}${o.update_available ? ' <span class="tag acc">update</span>' : ''}</td><td class="mut">${esc(note)}</td><td class="act">${link ? `<a class="btn" href="${esc(link.href)}" target="${link.target}" rel="noopener">Open</a>` : ''}`
-      + `${(o.actions || []).includes('forget') ? `<button data-forget="${esc(o.instance)}" class="danger">Forget</button>` : ''}</td></tr>`;
+      + `${(o.actions || []).includes('forget') ? `<button data-forget="${esc(o.instance)}" class="danger">Forget</button>` : ''}`
+      + `${(o.actions || []).includes('adopt') ? `<button data-adopt="${esc(o.instance)}">Adopt</button>` : ''}`
+      + `${(o.actions || []).includes('remove_folder') ? `<button data-remove="${esc(o.instance)}" class="danger">Remove folder</button>` : ''}</td></tr>`;
   }).join('');
   $('#others tbody').querySelectorAll('button[data-forget]').forEach(b => { b.onclick = () => forget(b.dataset.forget); });
+  $('#others tbody').querySelectorAll('button[data-adopt]').forEach(b => { b.onclick = () => restored('adopt', b.dataset.adopt); });
+  $('#others tbody').querySelectorAll('button[data-remove]').forEach(b => { b.onclick = () => restored('remove_folder', b.dataset.remove); });
   body.querySelectorAll('button[data-act]').forEach(b => { b.onclick = () => act(b.dataset.act, b.dataset.name); });
   body.querySelectorAll('button[data-job]').forEach(b => { b.onclick = () => watch(b.dataset.job); });
 }
@@ -201,6 +207,20 @@ async function forget(name) {
   const c = await dialog({title: `Forget ${name}`, text: `${name} is neither installed nor defined. Forget drops the manager's registry entry and its copy of the definition; nothing else is touched.`, ok: 'Forget', danger: true, name});
   if (!c) return;
   const r = await send('POST', `api/instances/${encodeURIComponent(name)}/forget`, {confirm: c.confirm});
+  if (!r.ok) { flash(r.error, 'err'); return; }
+  watch(r.job.id);
+  loadInstances();
+}
+
+// a folder with the manager's marker that its registry does not hold (restored from a backup without the manager's
+// record of it): Adopt takes it back, Remove folder deletes that folder only
+async function restored(action, name) {
+  const adopt = action === 'adopt';
+  const c = await dialog(adopt
+    ? {title: `Adopt ${name}`, text: `hri_${name}/ holds the manager's own definition, but the manager has no record of it (a partial restore). Adopt records it as this manager's instance again from its marker (the same id, slug and channel) and keeps a copy of its definition; nothing in the folder or the app is changed.`, ok: 'Adopt', name}
+    : {title: `Remove folder hri_${name}`, text: `Deletes hri_${name}/ from the local apps folder, and nothing else: its app is not installed, and the manager has no record of it. Create can then make ${name} again.`, ok: 'Remove folder', danger: true, name});
+  if (!c) return;
+  const r = await send('POST', `api/instances/${encodeURIComponent(name)}/${action}`, {confirm: c.confirm});
   if (!r.ok) { flash(r.error, 'err'); return; }
   watch(r.job.id);
   loadInstances();
