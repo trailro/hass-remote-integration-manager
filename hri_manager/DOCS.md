@@ -59,9 +59,18 @@ Each instance's options (password, `ingress_users`, ...) are set on that app's o
 single hass-remote-integration app. Its port 8087 is off; map one on its **Network** tab if you want it (not with
 Host network: its port is then on the host already).
 
-**Backups.** On current Supervisors a full backup leaves out the local apps folder, where each instance's definition
-lives (an upstream issue). After a full restore the instances come back detached; the manager writes their
-definitions again by itself, without anyone opening this page: it checks when it starts and then every 5 minutes,
+**Backups.** Since Supervisor 2026.10.0 a full backup includes the local apps folder, where each instance's
+definition lives, so a full restore brings the instances back as they were. A partial restore can leave the two
+apart. Only the local apps folder restored: a folder of an instance deleted since is listed under Other HRI apps
+with **Adopt** when it holds exactly what the manager writes (Adopt records it again from its marker and keeps a
+copy; a git instance's commit is downloaded and compared first), or **Remove folder** when it does not and its app
+is not installed; a folder of an instance updated since holds the manager's older definition, which automatic
+repair replaces with the installed version's from the manager's copy. Only the manager restored: an instance created
+after its backup gets **Adopt**; one updated after it is flagged as not matching the manager's record, and
+**Repair** writes the installed version's definition again.
+
+On older Supervisors a full backup leaves out the local apps folder (an upstream issue). After a full restore there
+the instances come back detached; the manager writes their definitions again by itself, without anyone opening this page: it checks when it starts and then every 5 minutes,
 so each instance is repaired within about 5 minutes of its own restore (or at once when the page lists it, or with
 **Repair**), from the copy it keeps in its own `/data` (a release needs nothing from GitHub; a git instance
 downloads the source of its installed commit), or from GitHub when it has no usable copy. Repair writes only the

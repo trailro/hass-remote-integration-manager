@@ -1,6 +1,7 @@
 """A copy of each instance's definition in the manager's own ``/data`` (``definitions/<name>/``), which Repair writes
-the definition from again when the local apps folder was lost: on current Supervisors a full backup leaves that folder
-out, and ``/data`` is in the manager's backup.
+the definition from again when the local apps folder was lost or holds another version: on Supervisors older than
+2026.10.0 a full backup leaves that folder out, a partial restore of only that folder can bring back an older
+definition, and ``/data`` is in the manager's backup.
 
 - a release instance: its whole definition as the manager wrote it (the stamped config.yaml, HRI's DOCS.md,
   CHANGELOG.md, translations, and README.md and icons when HRI ships them): a few kilobytes, and Repair needs nothing
