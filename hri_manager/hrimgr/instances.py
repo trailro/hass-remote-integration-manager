@@ -346,8 +346,8 @@ class Manager:
                                            + " and ".join(w for w, on in (("registry entry", name in registered),
                                                                           ("copy of its definition", name in kept)) if on)
                                            + " are left. Forget drops them")})
-        busy = await self._supervisor_busy() if (repairable or rolled_back or stale) and self.auto_repair_interval is not None \
-            else None
+        busy = await self._supervisor_busy() if stale or (
+            (repairable or rolled_back) and self.auto_repair_interval is not None) else None
         if busy:
             # a backup or restore in progress (freeze), a start or a stop: nothing done automatically now, the next
             # check looks again
@@ -433,9 +433,10 @@ class Manager:
 
     async def _reload_stale(self, stale: list[str]) -> None:
         """Once per instance and stale state: a store reload, when the store still offers a definition the folder no
-        longer holds (the folder holds the recorded one).  Only with automatic repair on."""
+        longer holds (the folder holds the recorded one), or still has the definition of a folder that is gone.  Only
+        a reload, harmless: also with automatic repair off."""
         self._stale_reloaded &= set(stale)
-        if self.auto_repair_interval is None or not set(stale) - self._stale_reloaded:
+        if not set(stale) - self._stale_reloaded:
             return
         self._stale_reloaded |= set(stale)
         try:
@@ -456,6 +457,8 @@ class Manager:
                 ok = await self._installed_access(names.supervisor_slug(name), recorded) == recorded
             except JobFailed:
                 ok = False
+        if ok and await self._supervisor_busy():
+            ok = False  # a sighting during a backup, restore, start or stop does not count
         if not ok:
             self._rolled_back_seen.pop(name, None)
             return False
@@ -559,7 +562,11 @@ class Manager:
         notes += [n if n.startswith("could not") else f"the copies in /data: {n}"
                   for n in await asyncio.to_thread(copies.tidy, self.copies_root)]
         unnoticed = await asyncio.to_thread(self._folder_gone, unnoticed)
-        if unnoticed:
+        busy = await self._supervisor_busy() if unnoticed else None
+        if busy:
+            notes.append(f"{', '.join(unnoticed)}: the folder is gone and the store has not noticed; not reloaded now "
+                         f"({busy}): the first check does it")
+        elif unnoticed:
             # the store still has their definitions from before the folders went: a reload makes them detached, so
             # the first check repairs them
             try:
@@ -991,8 +998,8 @@ class Manager:
         if own == recorded and not by_config:
             return (f"the Supervisor's store still offers {str(offered)[:40]}, an earlier reading of {folder}/, which "
                     f"holds the manager's definition of {own} as recorded: a store reload makes them match (the "
-                    "manager reloads it at its next check). Do not update or rebuild it from the Supervisor's app "
-                    "page meanwhile"), "reload"
+                    "manager reloads the store once by itself when it sees this; the App store's Check for updates "
+                    "reloads it too). Do not update or rebuild it from the Supervisor's app page meanwhile"), "reload"
         if own == recorded:
             return (f"{folder}/config.yaml is the manager's definition of {own}, the recorded version, but not the one "
                     "it recorded last. This happens after restoring only part of a backup or after a change made "
@@ -1002,7 +1009,8 @@ class Manager:
             return (f"{folder}/ holds the manager's definition of {own}, the installed version, but the manager's record "
                     f"says {recorded}. This happens after restoring a folder and its app from an older backup, or "
                     "after the Supervisor's own Update installed what the folder held. Record makes the manager's "
-                    "record follow them (nothing is downloaded or installed); Delete removes the instance"), "record"
+                    "record follow them (nothing is written or installed; a git instance's recorded commit is "
+                    "downloaded only to compare its tree); Delete removes the instance"), "record"
         return (f"{folder}/ does not match the manager's record: it holds the manager's definition of {own}, the record "
                 f"says {recorded}. This happens after restoring only part of a backup (only the local apps folder, or "
                 "only the manager) or after a change made outside the manager. Do not update or rebuild it from the "
@@ -1102,12 +1110,19 @@ class Manager:
                                        lambda job: self._give_up_detached_update(job, managed, user))
             try:
                 offered = (await self.sv.store_app(managed.slug) or {}).get("version_latest")
+                app = next((a for a in await self.sv.list_apps() if a.get("slug") == managed.slug), None)
             except (SupervisorError, NotAllowed) as err:
                 raise InvalidRequest(str(err)) from None
             found_config = await asyncio.to_thread(self._config_sha256, name)
-            if not (self._foreign_version(managed.entry, offered) or self._foreign_config(managed.entry, found_config)):
+            foreign = await self._foreign_state(name, managed.marker, managed.entry, offered, found_config,
+                                                (app or {}).get("version"))
+            if not foreign:
                 raise InvalidRequest(f"{names.folder_name(name)} exists and holds the manager's definition: nothing to "
                                      "repair")
+            if foreign[1] == "reload":
+                raise InvalidRequest(f"{names.folder_name(name)} holds the manager's definition as recorded; only the "
+                                     "Supervisor's store still offers an earlier reading of it: a store reload, not a "
+                                     "Repair, makes them match (the manager reloads it once by itself)")
             return self.jobs.start(name, "repair", user, lambda job: self._repair_foreign(job, managed, user))
         return self.jobs.start(name, "repair", user, lambda job: self._repair(job, name, user))
 
@@ -1126,23 +1141,67 @@ class Manager:
             raise JobFailed(f"{busy}: {folder}/ is not replaced now; try again once it runs normally")
         await self._refuse_decoys()  # before the folder is removed and the store reloaded
         try:
-            version = str((await self.sv.app_info(managed.slug)).get("version") or "")
+            info = await self.sv.app_info(managed.slug)
         except (SupervisorError, NotAllowed) as err:
             raise JobFailed(f"{err}: {folder}/ is not replaced") from None
-        recorded = self._access_of(managed.entry)
-        entry = {**managed.entry, **await self._installed_access(managed.slug, recorded)}
-        copy = await self._usable_copy(job, managed.name, entry, version) if version else None
-        if offline and (copy is None or managed.entry.get("channel") != "release"):
-            raise JobFailed(f"no usable copy of the definition of {version or 'the installed version'} in the "
-                            f"manager's /data: {folder}/ is left as it is (the automatic repair never downloads); "
-                            "Repair on its row does it")
+        prepared = await self._prepare_repair(job, managed, info, offline)
         job.log(f"{folder} holds {what}: removing it")
         try:
             await asyncio.to_thread(children.remove, managed)
             await self.sv.reload_store()
         except (SupervisorError, NotAllowed, children.NotManaged, OSError) as err:
             raise JobFailed(str(err)) from None
-        return await self._repair(job, managed.name, user, expected=version, copy=copy, offline=offline)
+        return await self._repair(job, managed.name, user, expected=prepared["version"], prepared=prepared,
+                                  offline=offline)
+
+    async def _prepare_repair(self, job: Job, managed: children.Managed, info: dict, offline: bool) -> dict:
+        """Before a Repair removes a folder: the installed version and channel, the accesses the definition follows,
+        and the source of that version (_repair_source: the manager's copy, or downloaded), built once in a temporary
+        folder outside the local apps folder.  JobFailed (NeedsAttention) with the folder left as it is when any of
+        that fails; the source, for the write that follows the removal."""
+        folder, slug = names.folder_name(managed.name), managed.slug
+        version = str(info.get("version") or "")
+        if not version:
+            raise JobFailed(f"the Supervisor reports no version of {slug}: {folder}/ is left as it is")
+        channel = self.installed_channel(info)
+        if channel is None or channel != managed.entry.get("channel"):
+            raise JobFailed(f"the installed {slug} ({version}) is not a {managed.entry.get('channel')} build this manager "
+                            f"writes: {folder}/ is left as it is")
+        entry = dict(managed.entry)
+        if channel == "git":
+            try:
+                ref = names.validate_ref(entry.get("ref_kind"), entry.get("ref"))
+            except ValueError as err:
+                raise JobFailed(f"no usable branch or tag recorded ({err}): {folder}/ is left as it is") from None
+        else:
+            ref = ("tag", f"v{version}")
+        recorded = self._access_of(entry)
+        installed = await self._installed_access(slug, recorded)
+        for access in ACCESS:
+            if installed[access] != recorded[access] and not self._access_confirmed(entry, access, installed[access],
+                                                                                      None, version):
+                raise JobFailed(f"{self._access_not_chosen(slug, access, installed[access])}; {folder}/ is left as it is")
+        entry = {**entry, **installed}
+        try:
+            copy, archive, sha, source = await self._repair_source(job, managed.name, entry, channel, version, ref,
+                                                                   None, offline)
+        except JobFailed as err:
+            raise type(err)(f"{err}; {folder}/ is left as it is") from None
+        if archive is not None:
+            build = self._builder(job, archive, channel, managed.name, version, sha, {}, source, copy=copy,
+                                  access=entry, keep_open=True)
+
+            def trial() -> None:
+                with tempfile.TemporaryDirectory(prefix="hri-repair-") as tmp:
+                    build(tmp)
+
+            try:
+                await asyncio.to_thread(trial)
+            except WRITE_ERRORS as err:
+                raise JobFailed(f"the definition of {version} could not be built ({err}): {folder}/ is left as it "
+                                "is") from None
+            job.log(f"the definition of {version} builds: {folder}/ is replaced now")
+        return {"version": version, "channel": channel, "copy": copy, "archive": archive, "sha": sha, "source": source}
 
     async def _repair_rolled_back(self, job: Job, name: str) -> dict:
         """Automatic repair of a folder a restore of only the local apps folder rolled back (_rolled_back, checked
@@ -1350,9 +1409,12 @@ class Manager:
             managed = await asyncio.to_thread(record)
         except (RegistryError, children.NotManaged) as err:
             raise JobFailed(f"not adopted: {err}") from None
+        # the copy belongs with the entry: when it cannot be kept, the entry goes again
+        if not await self._keep_copy(job, managed, files):
+            await self._undo_registry(job, self._forget, name, marker["instance_id"])
+            raise JobFailed("not adopted: the copy of its definition could not be kept in the manager's /data")
         self._clear_auto(name)
         job.log(f"{name} is this manager's instance again ({channel} {version}, its id kept)")
-        await self._save_copy(job, managed, self._access_of(marker), files)
         return {"adopted": slug, "version": version, "installed": app is not None}
 
     async def _check_installed_as_folder(self, job: Job, slug: str, folder: str, config: dict, done: str,
@@ -1375,7 +1437,8 @@ class Manager:
 
     async def record(self, name: str, body: dict, user: str) -> Job:
         """The folder holds the manager's own definition of the installed version and the registry records another
-        (_foreign_state "record"): the registry follows them, nothing downloaded, written or installed.  Needs the name
+        (_foreign_state "record"): the registry follows them, nothing written or installed (a git instance's commit
+        is downloaded only to compare its tree, _check_git_tree).  Needs the name
         typed."""
         managed = await self.managed(name)
         if body.get("confirm") != managed.name:
@@ -1426,17 +1489,25 @@ class Manager:
                                  f"app ({before} -> {installed})",
                         "by": user})
         fields = {k: marker.get(k) for k in ("version", "ref_kind", "ref", "sha", "stamp_version", "updated_at")}
+        fields.update(self._access_of(marker), config_sha256=hashlib.sha256(raw).hexdigest(),
+                      history=self._history(history), needs_attention=None)
+        previous = {k: entry.get(k) for k in fields}
         try:
-            await asyncio.to_thread(self.registry.update, name, **fields, **self._access_of(marker),
-                                    config_sha256=hashlib.sha256(raw).hexdigest(), history=self._history(history),
-                                    needs_attention=None)
-            managed = await asyncio.to_thread(children.load_managed, self.root, name, self.registry)
-        except (RegistryError, children.NotManaged) as err:
+            await asyncio.to_thread(self.registry.update, name, **fields)
+        except RegistryError as err:
             raise JobFailed(f"not recorded: {err}") from None
+        try:
+            managed = await asyncio.to_thread(children.load_managed, self.root, name, self.registry)
+        except children.NotManaged as err:
+            await self._undo_registry(job, lambda: self.registry.update(name, **previous))
+            raise JobFailed(f"not recorded: {err}") from None
+        # the copy belongs with the record: when it cannot be kept, the record goes back as it was
+        if not await self._keep_copy(job, managed, files):
+            await self._undo_registry(job, lambda: self.registry.update(name, **previous))
+            raise JobFailed("not recorded: the copy of its definition could not be kept in the manager's /data")
         self._clear_auto(name)
         self._rolled_back_seen.pop(name, None)
         job.log(f"the manager's record of {name} follows its folder and the installed app: {before} -> {installed}")
-        await self._save_copy(job, managed, self._access_of(marker), files)
         return {"recorded": slug, "version": installed, "previous": before}
 
     async def remove_folder(self, name: str, body: dict, user: str) -> Job:
@@ -1737,6 +1808,19 @@ class Manager:
             return
         job.log(f"a copy of the definition is kept in the manager's /data ({len(saved)} file(s))")
 
+    async def _keep_copy(self, job: Job, managed: children.Managed, files: dict[str, bytes]) -> bool:
+        """The copy of the definition ``files`` (verified bytes of the folder: Adopt, Record) kept in /data, as the
+        entry records it; whether it was (a failure is logged and the caller undoes its record)."""
+        try:
+            saved = await asyncio.to_thread(lambda: copies.save(self.copies_root, managed.name, files, managed.marker,
+                                                                **self._access_of(managed.entry)))
+        except Exception as err:  # noqa: BLE001 - reported; the caller puts its record back
+            job.log(f"the copy of the definition could not be kept ({type(err).__name__}: {str(err)[:300]})")
+            _LOGGER.warning("the copy of %s's definition was not saved: %s", managed.name, err)
+            return False
+        job.log(f"a copy of the definition is kept in the manager's /data ({len(saved)} file(s))")
+        return True
+
     async def _usable_copy(self, job: Job, name: str, entry: dict, version: str) -> copies.Copy | None:
         try:
             return await asyncio.to_thread(copies.load, self.copies_root, name, entry, version)
@@ -1746,7 +1830,7 @@ class Manager:
 
     def _builder(self, job: Job, archive, channel: str, name: str, version: str, sha: str | None, marker: dict, source: str,
                  copy: copies.Copy | None = None, built: dict | None = None, access: dict | None = None,
-                 on_built=None):
+                 on_built=None, keep_open: bool = False):
         """``copy``: Repair from the manager's copy, of a release (its files as they are: no archive) or of a git
         instance (its stamped config over the archive of its commit).  ``built``: gets the stamped config written, as
         "config" (what the Supervisor is then checked to report), and the bytes of the files a copy keeps, as "files".
@@ -1758,7 +1842,7 @@ class Manager:
             try:
                 return fill(tmp)
             finally:
-                if archive is not None:
+                if archive is not None and not keep_open:  # keep_open: a trial build, the real one follows
                     archive.close()  # read whole by now
 
         def fill(tmp: str) -> dict:
@@ -2868,9 +2952,11 @@ class Manager:
             raise
 
     async def _repair_installed(self, job: Job, name: str, user: str, expected: str | None = None,
-                                copy: copies.Copy | None = None, offline: bool = False) -> dict:
-        """``expected``, ``copy``: the installed version and the manager's copy of it, resolved before the folder was
-        removed (_repair_foreign); ``offline``: nothing is downloaded (the automatic repair of a rolled-back folder)."""
+                                copy: copies.Copy | None = None, offline: bool = False,
+                                prepared: dict | None = None) -> dict:
+        """``expected``, ``copy``, ``prepared``: the installed version, the manager's copy of it, and the source
+        resolved and built once before the folder was removed (_repair_foreign); ``offline``: nothing is downloaded
+        (the automatic repair of a rolled-back folder)."""
         slug = names.supervisor_slug(name)
         # a Repair writes a definition and reloads the store, as an install does: not while a decoy is there
         await self._refuse_decoys()
@@ -2932,6 +3018,17 @@ class Manager:
             job.log(f"{label}: the installed app {'has' if installed_access[access] else 'does not have'} {what}, the "
                     "manager's record said otherwise: the definition follows the app, and the record too")
         entry = {**entry, **installed_access}
+        if prepared is not None and (prepared["version"], prepared["channel"]) == (version, channel):
+            copy, archive, sha, source = prepared["copy"], prepared["archive"], prepared["sha"], prepared["source"]
+        else:
+            copy, archive, sha, source = await self._repair_source(job, name, entry, channel, version, ref, copy, offline)
+        return await self._write_repaired(job, name, entry, channel, version, ref, sha, source, archive, copy, user)
+
+    async def _repair_source(self, job: Job, name: str, entry: dict, channel: str, version: str, ref: tuple[str, str],
+                             copy: copies.Copy | None, offline: bool) -> tuple:
+        """What Repair writes the installed ``version`` from: (copy, archive, sha, source).  The manager's copy first;
+        otherwise the release's archive, or the archive of the recorded commit, downloaded.  ``offline``: JobFailed
+        rather than a download.  NeedsAttention when the exact source cannot be had."""
         # the manager's own copy of the definition first: a release needs nothing from GitHub, a git instance only the
         # source of its installed commit
         if copy is None or copy.version != version:
@@ -2979,7 +3076,7 @@ class Manager:
                 raise JobFailed(str(err)) from None
             except Exception as err:  # noqa: BLE001 - tarsafe.UnsafeArchive
                 raise NeedsAttention(f"the archive of commit {sha[:12]} was refused: {err}") from None
-        return await self._write_repaired(job, name, entry, channel, version, ref, sha, source, archive, copy, user)
+        return copy, archive, sha, source
 
     async def _write_repaired(self, job: Job, name: str, entry: dict, channel: str, version: str, ref: tuple[str, str],
                               sha: str | None, source: str, archive, copy: copies.Copy | None, user: str,

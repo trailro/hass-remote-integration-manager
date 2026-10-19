@@ -15,6 +15,7 @@ import unittest.mock
 import yaml
 
 from hrimgr import children, instances, jobs, registry
+from hrimgr.github import GitHubError
 
 from .env import Env
 from .helpers import tmpdir
@@ -386,20 +387,36 @@ class RestoreTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_a_stale_store_is_reloaded_not_repaired(self):
         """F5: the folder holds the recorded definition, the store still offers an earlier reading of it: no
-        self-contradicting text, no Repair; the periodic check reloads the store once."""
+        self-contradicting text, no Repair (refused through the API too); the manager reloads the store once, with
+        automatic repair off as well."""
         env = self.env
         await self.create("garage")
         env.stub.store["local_hri_garage"]["version"] = "0.24.9"  # read before the folder was put back
-        rows, _ = await self.lists()
+        env.stub.store_frozen = True  # a reload that does not help, so the state stays
+        env.stub.calls.clear()
+        for _ in range(3):
+            rows, _ = await self.lists()
+        self.assertEqual([c for c in env.stub.calls if c[1] == "/store/reload"], [("POST", "/store/reload", {})])
         problem = rows["garage"]["problem"]
         self.assertIn("the Supervisor's store still offers 0.24.9, an earlier reading of hri_garage/, which holds the "
                       "manager's definition of 0.25.0 as recorded", problem)
+        self.assertIn("the manager reloads the store once by itself", problem)
         self.assertNotIn("the record says", problem)
         self.assertEqual(rows["garage"]["actions"], ["stop", "delete"])
-        env.manager.auto_repair_interval = instances.AUTO_REPAIR_INTERVAL
-        env.stub.calls.clear()
+        status, answer = await env.send("POST", "/api/instances/garage/repair")
+        self.assertEqual(status, 400, answer)
+        self.assertIn("a store reload, not a Repair", answer["error"])
+        self.assertTrue(os.path.isdir(self.folder("garage")))
+        env.stub.store_frozen = False
+        await env.sv.reload_store()
         rows, _ = await self.lists()
-        self.assertEqual([c for c in env.stub.calls if c[1] == "/store/reload"], [("POST", "/store/reload", {})])
+        self.assertIsNone(rows["garage"]["problem"])
+
+    async def test_a_stale_store_is_reloaded_at_once_when_it_helps(self):
+        env = self.env
+        await self.create("garage")
+        env.stub.store["local_hri_garage"]["version"] = "0.24.9"
+        await self.lists()  # sees it, reloads
         rows, _ = await self.lists()
         self.assertIsNone(rows["garage"]["problem"])
 
@@ -409,8 +426,10 @@ class RestoreTest(unittest.IsolatedAsyncioTestCase):
         env = self.env
         await self.create("garage")
         shutil.rmtree(self.folder("garage"))
+        env.stub.store_frozen = True  # the list's own reload does not help: the row stays as it is
         _, others = await self.lists()
         self.assertIn("the Supervisor's store has not noticed yet", others["local_hri_garage"]["problem"])
+        env.stub.store_frozen = False
         notes = await env.manager.startup()
         self.assertIn("garage: the folder is gone and the store had not noticed: reloaded it", notes)
         env.manager.auto_repair_interval = instances.AUTO_REPAIR_INTERVAL
@@ -514,6 +533,8 @@ class RestoreTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("the Supervisor is not running normally (its state is 'freeze')", job["error"])
         self.assertEqual(self.config("garage")["version"], "0.25.0")
         env.stub.sv_state = "running"
+        self.assertNotIn("garage", env.manager._rolled_back_seen)  # the busy sightings did not count
+        await self.lists()  # the first that counts
         rows, _ = await self.lists()
         self.assertEqual(rows["garage"]["job"]["action"], "repair")
         await self.wait_jobs()
@@ -587,6 +608,68 @@ class RestoreTest(unittest.IsolatedAsyncioTestCase):
                 shutil.copytree(kept, env.data, symlinks=True)
                 shutil.rmtree(kept)
                 await self.restore("local")
+
+    async def test_a_manual_repair_leaves_the_folder_when_its_source_cannot_be_had(self):
+        """Review 2, item 1: no usable copy and GitHub down: the folder stays (nothing removed before the source is
+        had and built); an installed app reporting no version is refused before anything too."""
+        env = self.env
+        await self.roll_back()
+        shutil.rmtree(self.copy_dir("garage"))
+        with unittest.mock.patch.object(env.gh, "_get", side_effect=GitHubError("GitHub unreachable")):
+            job = await env.job(await env.send("POST", "/api/instances/garage/repair"))
+        self.assertEqual(job["state"], "failed", job)
+        self.assertIn("hri_garage/ is left as it is", job["error"])
+        self.assertEqual(self.config("garage")["version"], "0.25.0")
+        managed = children.load_managed(env.local_apps, "garage", env.registry)
+        with self.assertRaises(jobs.JobFailed) as ctx:
+            await env.manager._prepare_repair(jobs.Job("garage", "repair", "alice"), managed, {"version": ""}, False)
+        self.assertIn("reports no version", str(ctx.exception))
+        # with GitHub back: downloaded, built, and only then written
+        env.stub.codeload_paths.clear()
+        job = await env.job(await env.send("POST", "/api/instances/garage/repair"))
+        self.assertEqual(job["state"], "succeeded", job)
+        self.assertIn("the definition of 0.25.1 builds", " ".join(line["msg"] for line in job["lines"]))
+        self.assertEqual(self.config("garage")["version"], "0.25.1")
+
+    async def test_adopt_and_record_keep_nothing_without_their_copy(self):
+        """Review 2, item 3: the copy cannot be kept: Adopt leaves no registry entry, Record puts the record back."""
+        env = self.env
+        self.back_up("data")
+        await self.create("attic")
+        await self.restore("data")
+        with unittest.mock.patch.object(instances.copies, "save", side_effect=OSError("No space left on device")):
+            job = await env.job(await env.send("POST", "/api/instances/attic/adopt", {"confirm": "attic"}))
+        self.assertEqual(job["state"], "failed", job)
+        self.assertIsNone(env.registry.get("attic"))
+        await self.roll_back()
+        env.stub.installed["local_hri_garage"]["version"] = "0.25.0"
+        before = env.registry.get("garage")
+        with unittest.mock.patch.object(instances.copies, "save", side_effect=OSError("No space left on device")):
+            job = await env.job(await env.send("POST", "/api/instances/garage/record", {"confirm": "garage"}))
+        self.assertEqual(job["state"], "failed", job)
+        after = env.registry.get("garage")
+        for key in ("version", "sha", "config_sha256", "history", "bluetooth", "host_network"):
+            self.assertEqual(after.get(key), before.get(key), key)
+
+    async def test_the_start_does_not_reload_while_the_supervisor_is_busy(self):
+        env = self.env
+        await self.create("garage")
+        shutil.rmtree(self.folder("garage"))
+        env.stub.sv_state = "freeze"
+        env.stub.calls.clear()
+        notes = await env.manager.startup()
+        self.assertTrue(any("not reloaded now" in n for n in notes), notes)
+        self.assertNotIn(("POST", "/store/reload", {}), env.stub.calls)
+
+    async def test_a_sighting_while_the_supervisor_is_busy_does_not_count(self):
+        env = self.env
+        await self.roll_back()
+        env.stub.sv_state = "freeze"
+        await self.lists()
+        self.assertNotIn("garage", env.manager._rolled_back_seen)
+        env.stub.sv_state = "running"
+        await self.lists()
+        self.assertIn("garage", env.manager._rolled_back_seen)
 
     async def test_put_new_never_replaces_an_entry(self):
         env = self.env

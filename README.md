@@ -305,7 +305,8 @@ restore** brings the instances back as they were: their folders first, then the 
 it runs, rows can pass through odd states (an instance "defined, but not installed", a store that still offers the
 version it read before, a folder that looks older than its app): the manager does nothing automatically while the
 Supervisor is not running normally (its state is `freeze` during a backup or restore), waits for a rolled-back
-folder to be seen twice at least a minute apart, and reloads a stale store once by itself. On **older Supervisors**
+folder to be seen twice at least a minute apart (sightings while the Supervisor is not running normally do not
+count), and reloads a stale store once by itself. On **older Supervisors**
 a full backup **leaves the local apps folder out**: the backup still names the folder `addons/local`, while the
 Supervisor has moved it to `apps/local` (an upstream issue of the Supervisor, not of this app). So:
 
@@ -354,8 +355,9 @@ Supervisor has moved it to `apps/local` (an upstream issue of the Supervisor, no
   record), or after the Supervisor's own Update installed the older definition it offered: the folder holds the
   manager's definition of the installed version. Nothing is done automatically; the row offers **Record** (the name
   typed), which checks the folder and the installed app and makes the manager's record follow them (version, commit,
-  digest, a copy in `/data`, and a history entry "the record was ahead (0.28.0 -> 0.27.0)"). Nothing is downloaded,
-  written to the folder or installed.
+  digest, a copy in `/data` kept first, and a history entry "the record was ahead (0.28.0 -> 0.27.0)"). Nothing is
+  written to the folder or installed; nothing is downloaded for a release, and for a git instance its recorded commit
+  is downloaded only to compare its tree.
 - **After a partial restore of only the manager** (its `/data` from before):
   - an instance **created after** that backup is listed as a restored folder, with **Adopt**, as above;
   - an instance **updated after** that backup: the folder holds the manager's definition of the installed version,
@@ -363,8 +365,15 @@ Supervisor has moved it to `apps/local` (an upstream issue of the Supervisor, no
     through the API also works: it writes the definition of the installed version again (downloaded when the copy in
     `/data` is of the older version), and its history notes that the record was behind (`0.27.0 -> 0.28.0`, say).
 - **An instance whose folder is gone before the Supervisor's store noticed** (the store reads the local apps folder
-  at a reload) is listed as such, not as an app the manager did not create; the manager reloads the store when it
-  starts (and once at a check) so the instance shows as detached and is repaired.
+  at a reload) is listed as such, not as an app the manager did not create; the manager reloads the store once by
+  itself (at its start, or at the first check or list that sees it, never while the Supervisor is not running
+  normally) so the instance shows as detached and is repaired. A store that still offers an earlier reading of a
+  folder that holds the recorded definition is reloaded once the same way; Repair is refused for it (a reload is all
+  it needs), and the App store's Check for updates reloads it too.
+- **A Repair of a folder** (a definition that does not match the manager's record) first finds the installed version
+  and its source (the manager's copy, or a download) and builds the definition once in a temporary folder outside the
+  local apps folder; only then is the folder removed and written again. If the source cannot be had or does not
+  build, the folder is left as it is.
 - The manager's own **registry** of the instances it created (`/data/instances.json`: each instance's channel, branch
   or tag, commit and id) and a **copy of each definition** (`/data/definitions/<name>/`) are in the manager's
   `/data`, which **is** in the manager's own backup. Restore the manager with the instances and Repair works from

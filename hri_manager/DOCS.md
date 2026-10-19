@@ -69,7 +69,8 @@ Delete only), and **Remove folder** while its app is not installed; a folder of 
 manager's older definition, which automatic repair replaces with the installed version's from the manager's copy
 (release instances only, never downloading, once seen twice a minute apart). A folder and its app restored from
 before an update, or an instance updated after the manager's own backup: the folder holds the installed version and
-the row offers **Record**, which makes the manager's record follow (nothing downloaded or installed). Only the
+the row offers **Record**, which makes the manager's record follow (nothing written or installed; for a git
+instance its recorded commit is downloaded only to compare its tree). Only the
 manager restored, an instance created after its backup: **Adopt**.
 
 On older Supervisors a full backup leaves out the local apps folder (an upstream issue). After a full restore there
