@@ -92,6 +92,16 @@ class Registry:
             instances[name] = dict(entry)
             self._write(instances)
 
+    def put_new(self, name: str, entry: dict[str, Any]) -> None:
+        """``put`` only when the registry has no entry ``name``, checked and written under one lock: RegistryError
+        otherwise (Adopt, which must never replace an instance)."""
+        with self._lock:
+            instances = self._read()
+            if name in instances:
+                raise RegistryError(f"{name} is in the manager's registry already")
+            instances[name] = dict(entry)
+            self._write(instances)
+
     def update(self, name: str, **fields: Any) -> dict:
         with self._lock:
             instances = self._read()

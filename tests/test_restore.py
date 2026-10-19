@@ -10,10 +10,11 @@ import json
 import os
 import shutil
 import unittest
+import unittest.mock
 
 import yaml
 
-from hrimgr import children, instances
+from hrimgr import children, instances, jobs, registry
 
 from .env import Env
 from .helpers import tmpdir
@@ -87,7 +88,8 @@ class RestoreTest(unittest.IsolatedAsyncioTestCase):
         rows, others = await self.lists()
         self.assertNotIn("attic", rows)
         other = others["local_hri_attic"]
-        self.assertEqual((other["kind"], other["actions"], other["instance"]), ("folder", ["adopt"], "attic"))
+        self.assertEqual((other["kind"], other["actions"], other["instance"]), ("folder", ["adopt", "remove_folder"], "attic"))
+        self.assertTrue(other["adoptable"])
         self.assertIn("registry has no instance attic", other["problem"])
         self.assertIn("probably a folder restored from a backup", other["problem"])
         self.assertIn("Adopt makes it this manager's instance again", other["problem"])
@@ -230,6 +232,36 @@ class RestoreTest(unittest.IsolatedAsyncioTestCase):
         _, others = await self.lists()
         self.assertNotIn("local_hri_attic", others)
 
+    async def test_an_adoptable_folder_is_removed_only_when_that_is_confirmed(self):
+        """F8: Remove folder of a folder that could be adopted needs adoptable: true as well (the page sends it from the
+        row of such a folder, saying so)."""
+        env = self.env
+        await self.create("attic")
+        self.back_up("local")
+        job = await env.job(await env.send("DELETE", "/api/instances/attic", {"remove_data": False, "confirm": "attic"}))
+        self.assertEqual(job["state"], "succeeded", job)
+        await self.restore("local")
+        job = await env.job(await env.send("POST", "/api/instances/attic/remove_folder", {"confirm": "attic"}))
+        self.assertEqual(job["state"], "failed", job)
+        self.assertIn("holds what the manager writes: Adopt it", job["error"])
+        self.assertTrue(os.path.isdir(self.folder("attic")))
+        job = await env.job(await env.send("POST", "/api/instances/attic/remove_folder",
+                                           {"confirm": "attic", "adoptable": True}))
+        self.assertEqual(job["state"], "succeeded", job)
+        self.assertFalse(os.path.lexists(self.folder("attic")))
+
+    async def test_no_adoption_of_an_installed_app_while_a_decoy_names_it(self):
+        env = self.env
+        self.back_up("data")
+        await self.create("attic")
+        await self.restore("data")
+        os.makedirs(os.path.join(env.local_apps, "x"))
+        self._append(os.path.join(env.local_apps, "x", "config.yaml"), "slug: hri_attic\nversion: '9'\n")
+        job = await env.job(await env.send("POST", "/api/instances/attic/adopt", {"confirm": "attic"}))
+        self.assertEqual(job["state"], "failed", job)
+        self.assertIn("so it is not adopted", job["error"])
+        self.assertIsNone(env.registry.get("attic"))
+
     async def test_an_installed_app_whose_folder_does_not_verify_gets_no_action(self):
         env = self.env
         self.back_up("data")
@@ -246,12 +278,12 @@ class RestoreTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("local_hri_attic is installed", job["error"])
         self.assertTrue(os.path.isdir(self.folder("attic")))
 
-    # ------------------------------------------------------------------ wording (D2) and the registry's history
+    # ------------------------------------------------------------------ Record (D2, F3) and the registry's history
 
-    async def test_a_registry_behind_the_folder_is_said_neutrally_and_kept_in_the_history(self):
-        """D2: updated after the manager's backup, then a restore of only the manager: its folder is the manager's own
-        definition of a version its record does not have.  Said in neutral words; never repaired by itself; Repair
-        writes it, and its history says the record was behind."""
+    async def test_a_registry_behind_the_folder_and_the_app_is_recorded(self):
+        """D2: updated after the manager's backup, then a restore of only the manager: the folder holds the manager's own
+        definition of the installed version, the record an older one.  Said in neutral words, never acted on by
+        itself; Record (name typed) makes the record follow, nothing downloaded or installed."""
         env = self.env
         await self.create("garage")
         self.back_up("data")
@@ -259,27 +291,85 @@ class RestoreTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(job["state"], "succeeded", job)
         await self.restore("data")
         env.manager.auto_repair_interval = instances.AUTO_REPAIR_INTERVAL
-        rows, _ = await self.lists()
+        env.manager.rolled_back_settle = 0
+        for _ in range(2):
+            rows, _ = await self.lists()
         row = rows["garage"]
-        self.assertIsNone(row["job"])  # not repaired automatically: the record is not at the installed version
-        self.assertIn("hri_garage/ does not match the manager's record: it holds the manager's definition of 0.25.1, "
-                      "the record says 0.25.0", row["problem"])
-        self.assertIn("after restoring only part of a backup", row["problem"])
+        self.assertIsNone(row["job"])
+        self.assertIn("hri_garage/ holds the manager's definition of 0.25.1, the installed version, but the manager's "
+                      "record says 0.25.0", row["problem"])
         self.assertNotIn("omeone changed", row["problem"])
-        self.assertEqual(row["actions"], ["repair", "stop", "delete"])
+        self.assertEqual(row["actions"], ["record", "stop", "delete"])
         status, answer = await env.send("POST", "/api/instances/garage/restart")
         self.assertEqual(status, 400)
-        self.assertIn("does not match the manager's record", answer["error"])
-        job = await env.job(await env.send("POST", "/api/instances/garage/repair"))
+        self.assertIn("Record makes the manager's record follow them", answer["error"])
+        status, answer = await env.send("POST", "/api/instances/garage/record", {})
+        self.assertEqual(status, 400, answer)
+        env.stub.calls.clear()
+        env.stub.codeload_paths.clear()
+        job = await env.job(await env.send("POST", "/api/instances/garage/record", {"confirm": "garage"}))
         self.assertEqual(job["state"], "succeeded", job)
+        self.assertEqual((env.changing_calls(), env.stub.codeload_paths), ([], []))
         entry = env.registry.get("garage")
         self.assertEqual(entry["version"], "0.25.1")
-        last = entry["history"][-1]
-        self.assertEqual(last["version"], "0.25.0")
-        self.assertIn("repaired (manual) at", last["event"])
-        self.assertIn("the manager's record was behind the installed app (0.25.0 -> 0.25.1)", last["event"])
+        self.assertEqual(entry["config_sha256"], env.manager._config_sha256("garage"))
+        self.assertEqual(entry["history"][-1]["version"], "0.25.0")
+        self.assertIn("the record was behind the folder and the installed app (0.25.0 -> 0.25.1)",
+                      entry["history"][-1]["event"])
+        with open(os.path.join(self.copy_dir("garage"), "copy.json"), encoding="utf-8") as fh:
+            self.assertEqual(json.load(fh)["version"], "0.25.1")
         rows, _ = await self.lists()
         self.assertIsNone(rows["garage"]["problem"])
+        status, answer = await env.send("POST", "/api/instances/garage/record", {"confirm": "garage"})
+        self.assertEqual(status, 400, answer)  # nothing to record any more
+
+    async def test_repair_says_when_the_registry_was_behind(self):
+        """The same state, Repaired through the API instead: the history says the record was behind."""
+        env = self.env
+        await self.create("garage")
+        self.back_up("data")
+        job = await env.job(await env.send("POST", "/api/instances/garage/update", {"version": "0.25.1"}))
+        self.assertEqual(job["state"], "succeeded", job)
+        await self.restore("data")
+        job = await env.job(await env.send("POST", "/api/instances/garage/repair"))
+        self.assertEqual(job["state"], "succeeded", job)
+        last = env.registry.get("garage")["history"][-1]
+        self.assertEqual(last["version"], "0.25.0")
+        self.assertIn("the manager's record was behind the installed app (0.25.0 -> 0.25.1)", last["event"])
+
+    async def test_a_folder_and_app_restored_from_an_older_backup_are_recorded_not_repaired(self):
+        """F3: a restore of a folder and its app from before an update: the folder holds the manager's definition of
+        the installed (older) version, the record the newer.  Never repaired by itself; Record, no download."""
+        env = self.env
+        await self.roll_back()
+        env.stub.installed["local_hri_garage"]["version"] = "0.25.0"  # then the app's restore
+        env.manager.auto_repair_interval = instances.AUTO_REPAIR_INTERVAL
+        env.manager.rolled_back_settle = 0
+        for _ in range(2):
+            rows, _ = await self.lists()
+        self.assertIsNone(rows["garage"]["job"])
+        self.assertEqual(rows["garage"]["actions"], ["record", "stop", "delete"])
+        self.assertIn("after restoring a folder and its app from an older backup", rows["garage"]["problem"])
+        env.stub.codeload_paths.clear()
+        job = await env.job(await env.send("POST", "/api/instances/garage/record", {"confirm": "garage"}))
+        self.assertEqual(job["state"], "succeeded", job)
+        self.assertEqual(env.stub.codeload_paths, [])
+        entry = env.registry.get("garage")
+        self.assertEqual(entry["version"], "0.25.0")
+        self.assertIn("the record was ahead of the folder and the installed app (0.25.1 -> 0.25.0)",
+                      entry["history"][-1]["event"])
+        rows, _ = await self.lists()
+        self.assertIsNone(rows["garage"]["problem"])
+
+    async def test_record_refuses_an_installed_app_that_differs(self):
+        env = self.env
+        await self.roll_back()
+        env.stub.installed["local_hri_garage"]["version"] = "0.25.0"
+        env.stub.installed["local_hri_garage"]["definition"]["privileged"] = ["SYS_ADMIN"]
+        job = await env.job(await env.send("POST", "/api/instances/garage/record", {"confirm": "garage"}))
+        self.assertEqual(job["state"], "failed", job)
+        self.assertIn("is not what hri_garage/ defines (privileged", job["error"])
+        self.assertEqual(env.registry.get("garage")["version"], "0.25.1")
 
     async def test_a_definition_the_manager_would_never_write_keeps_the_strong_words(self):
         env = self.env
@@ -291,6 +381,42 @@ class RestoreTest(unittest.IsolatedAsyncioTestCase):
         rows, _ = await self.lists()
         self.assertIn("It is not a definition this manager writes: someone changed hri_garage/", rows["garage"]["problem"])
         self.assertNotIn("does not match the manager's record", rows["garage"]["problem"])
+
+    # ------------------------------------------------------------------ a stale store, a folder the store has not missed
+
+    async def test_a_stale_store_is_reloaded_not_repaired(self):
+        """F5: the folder holds the recorded definition, the store still offers an earlier reading of it: no
+        self-contradicting text, no Repair; the periodic check reloads the store once."""
+        env = self.env
+        await self.create("garage")
+        env.stub.store["local_hri_garage"]["version"] = "0.24.9"  # read before the folder was put back
+        rows, _ = await self.lists()
+        problem = rows["garage"]["problem"]
+        self.assertIn("the Supervisor's store still offers 0.24.9, an earlier reading of hri_garage/, which holds the "
+                      "manager's definition of 0.25.0 as recorded", problem)
+        self.assertNotIn("the record says", problem)
+        self.assertEqual(rows["garage"]["actions"], ["stop", "delete"])
+        env.manager.auto_repair_interval = instances.AUTO_REPAIR_INTERVAL
+        env.stub.calls.clear()
+        rows, _ = await self.lists()
+        self.assertEqual([c for c in env.stub.calls if c[1] == "/store/reload"], [("POST", "/store/reload", {})])
+        rows, _ = await self.lists()
+        self.assertIsNone(rows["garage"]["problem"])
+
+    async def test_a_folder_gone_before_the_store_noticed(self):
+        """F4: an instance's folder removed, the store not reloaded yet: said so (not "a local app the manager did not
+        create"); the start reloads the store, and the first check repairs it."""
+        env = self.env
+        await self.create("garage")
+        shutil.rmtree(self.folder("garage"))
+        _, others = await self.lists()
+        self.assertIn("the Supervisor's store has not noticed yet", others["local_hri_garage"]["problem"])
+        notes = await env.manager.startup()
+        self.assertIn("garage: the folder is gone and the store had not noticed: reloaded it", notes)
+        env.manager.auto_repair_interval = instances.AUTO_REPAIR_INTERVAL
+        await env.manager.auto_repair_check()
+        await self.wait_jobs()
+        self.assertTrue(os.path.isdir(self.folder("garage")))
 
     # ------------------------------------------------------------------ automatic repair of a rolled-back folder (E)
 
@@ -305,16 +431,27 @@ class RestoreTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.config("garage")["version"], "0.25.0")
         self.assertTrue(env.stub._app_view("local_hri_garage")["update_available"])  # the older one, as an update
 
+    async def settled(self):
+        """Two checks a settle apart see the rolled-back folder (the first only notes it)."""
+        env = self.env
+        env.manager.auto_repair_interval = instances.AUTO_REPAIR_INTERVAL
+        rows, _ = await self.lists()
+        self.assertIsNone(rows["garage"]["job"])
+        env.manager._rolled_back_seen["garage"] = (env.manager._rolled_back_seen["garage"][0]
+                                                   - instances.ROLLED_BACK_SETTLE - 1,
+                                                   *env.manager._rolled_back_seen["garage"][1:])
+        rows, _ = await self.lists()
+        return rows
+
     async def test_a_rolled_back_folder_is_written_again_from_the_copy(self):
         env = self.env
         await self.roll_back()
         rows, _ = await self.lists()  # no automatic repair yet: what the row says
         self.assertIn("it holds the manager's definition of 0.25.0, the record says 0.25.1", rows["garage"]["problem"])
         self.assertNotIn("omeone changed", rows["garage"]["problem"])
-        env.manager.auto_repair_interval = instances.AUTO_REPAIR_INTERVAL
         env.stub.calls.clear()
         env.stub.codeload_paths.clear()
-        rows, _ = await self.lists()
+        rows = await self.settled()
         self.assertEqual(rows["garage"]["job"]["action"], "repair")
         self.assertEqual(rows["garage"]["auto_repair"]["reason"], "rolled_back")
         await self.wait_jobs()
@@ -331,38 +468,132 @@ class RestoreTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(rows["garage"]["problem"])
         self.assertEqual(rows["garage"]["auto_repair"]["state"], "succeeded")
 
+    async def test_only_when_two_checks_a_minute_apart_see_it(self):
+        """F1a: a restore of a folder and its app passes through the rolled-back state: the first check only notes
+        it, a second one sooner than ROLLED_BACK_SETTLE does nothing, and a check that no longer sees it starts the
+        count again."""
+        env = self.env
+        await self.roll_back()
+        env.manager.auto_repair_interval = instances.AUTO_REPAIR_INTERVAL
+        for _ in range(3):
+            rows, _ = await self.lists()
+            self.assertIsNone(rows["garage"]["job"])
+        first = env.manager._rolled_back_seen["garage"][0]
+        env.stub.installed["local_hri_garage"]["version"] = "0.25.0"  # the app's restore: not rolled back any more
+        await self.lists()
+        self.assertNotIn("garage", env.manager._rolled_back_seen)
+        env.stub.installed["local_hri_garage"]["version"] = "0.25.1"
+        await self.lists()
+        self.assertGreater(env.manager._rolled_back_seen["garage"][0], first)
+        self.assertEqual([j for j in env.manager.jobs.recent() if j.action == "repair"], [])
+
     async def test_the_manager_s_start_repairs_a_rolled_back_folder(self):
         env = self.env
         await self.roll_back()
         env.manager.auto_repair_interval = instances.AUTO_REPAIR_INTERVAL
+        env.manager.rolled_back_settle = 0
+        await env.manager.auto_repair_check()  # notes it
         await env.manager.auto_repair_check()
         await self.wait_jobs()
         self.assertEqual(self.config("garage")["version"], "0.25.1")
+
+    async def test_nothing_while_the_supervisor_is_not_running_normally(self):
+        """F1b: while the Supervisor makes or restores a backup (freeze), nothing is repaired automatically, and the
+        admin's Repair does not replace the folder either."""
+        env = self.env
+        await self.roll_back()
+        env.stub.sv_state = "freeze"
+        env.manager.auto_repair_interval = instances.AUTO_REPAIR_INTERVAL
+        env.manager.rolled_back_settle = 0
+        for _ in range(3):
+            env.manager._auto_checked = None
+            rows, _ = await self.lists()
+            self.assertIsNone(rows["garage"]["job"])
+        job = await env.job(await env.send("POST", "/api/instances/garage/repair"))
+        self.assertEqual(job["state"], "failed", job)
+        self.assertIn("the Supervisor is not running normally (its state is 'freeze')", job["error"])
+        self.assertEqual(self.config("garage")["version"], "0.25.0")
+        env.stub.sv_state = "running"
+        rows, _ = await self.lists()
+        self.assertEqual(rows["garage"]["job"]["action"], "repair")
+        await self.wait_jobs()
+        self.assertEqual(self.config("garage")["version"], "0.25.1")
+
+    async def test_the_supervisor_changing_the_app_during_a_repair_is_not_contained(self):
+        """F1c: the Supervisor restores the app (another version) while Repair writes the folder: the version alone
+        differs afterwards, a race, not tampering. Needs attention; never stopped nor uninstalled."""
+        env = self.env
+        await self.roll_back()
+        wait_store = env.manager._wait_store
+
+        async def meanwhile(*args, **kw):
+            await wait_store(*args, **kw)
+            env.stub.installed["local_hri_garage"]["version"] = "0.25.0"
+
+        env.stub.calls.clear()
+        with unittest.mock.patch.object(env.manager, "_wait_store", side_effect=meanwhile):
+            job = await env.job(await env.send("POST", "/api/instances/garage/repair"))
+        self.assertEqual(job["state"], "failed", job)
+        self.assertIn("it changed the installed app meanwhile", job["error"])
+        self.assertIn("local_hri_garage", env.stub.installed)
+        self.assertEqual(env.changing_calls(), [])  # no stop, no uninstall
+        entry = env.registry.get("garage")
+        self.assertIsNone(entry.get("tampered"))
+        self.assertIn("changed the installed app meanwhile", entry["needs_attention"]["reason"])
+        rows, _ = await self.lists()
+        self.assertIn("needs attention: the Supervisor now reports local_hri_garage 0.25.0", rows["garage"]["problem"])
+
+    async def test_the_automatic_repair_never_downloads_nor_removes_without_a_copy(self):
+        """F2: the copy gone between the check and the job: the folder stays, nothing is downloaded."""
+        env = self.env
+        await self.roll_back()
+        managed = children.load_managed(env.local_apps, "garage", env.registry)
+        shutil.rmtree(self.copy_dir("garage"))
+        env.stub.codeload_paths.clear()
+        job = jobs.Job("garage", "repair", instances.AUTO_USER)
+        with self.assertRaises(jobs.JobFailed) as ctx:
+            await env.manager._repair_foreign(job, managed, instances.AUTO_USER, offline=True)
+        self.assertIn("the automatic repair never downloads", str(ctx.exception))
+        self.assertEqual(self.config("garage")["version"], "0.25.0")
+        self.assertEqual(env.stub.codeload_paths, [])
 
     async def test_no_automatic_repair_unless_provably_the_manager_s_own_older_definition(self):
         env = self.env
         await self.roll_back()
         env.manager.auto_repair_interval = instances.AUTO_REPAIR_INTERVAL
+        env.manager.rolled_back_settle = 0
+        app = env.stub.installed["local_hri_garage"]
         cases = {
             "no copy of the installed version": lambda: shutil.rmtree(self.copy_dir("garage")),
             "a definition the manager would not write": lambda: self._append(
                 os.path.join(self.folder("garage"), "config.yaml"), "privileged:\n  - SYS_ADMIN\n"),
             "a file the manager does not write": lambda: self._append(os.path.join(self.folder("garage"), "run.sh"), "x"),
+            # F2: the installed app's Bluetooth is not the record's
+            "another access than the record": lambda: app["definition"].update(host_dbus=True),
         }
         for label, spoil in cases.items():
             with self.subTest(case=label):
                 kept = os.path.join(self.saved, "case")
                 shutil.copytree(env.data, kept, symlinks=True)
                 spoil()
-                env.manager._auto_checked = None
-                rows, _ = await self.lists()
+                for _ in range(2):
+                    env.manager._auto_checked = None
+                    rows, _ = await self.lists()
                 self.assertIsNone(rows["garage"]["job"])
                 self.assertEqual(rows["garage"]["actions"], ["repair", "stop", "delete"])
                 self.assertEqual(self.config("garage")["version"], "0.25.0")
+                app["definition"]["host_dbus"] = False
                 shutil.rmtree(env.data)
                 shutil.copytree(kept, env.data, symlinks=True)
                 shutil.rmtree(kept)
                 await self.restore("local")
+
+    async def test_put_new_never_replaces_an_entry(self):
+        env = self.env
+        env.registry.put_new("attic", {"name": "attic"})
+        with self.assertRaises(registry.RegistryError):
+            env.registry.put_new("attic", {"name": "other"})
+        self.assertEqual(env.registry.get("attic"), {"name": "attic"})
 
     @staticmethod
     def _append(path, text):
