@@ -265,6 +265,13 @@ class Manager:
             if name and slug not in seen:
                 entry = self._entry(name, None, app, latest)
                 known = registered.get(name)
+                if known and entry.get("job"):
+                    # a job of its own runs (a Repair between removing the folder and writing it again, say): the row
+                    # shows that job, and nothing else is offered or started until it ends
+                    entry.update({k: known.get(k) for k in ("channel", "ref_kind", "ref", "sha")})
+                    entry.update(self._access_of(known))
+                    out.append(entry)
+                    continue
                 # detached: the Supervisor has no definition of it anywhere (a hand-made local app with this slug is
                 # not detached, and Repair would write a second definition of its slug); and the manager's registry
                 # holds it: a detached app the manager did not create is not its to repair (Repair would adopt it)
@@ -1007,8 +1014,9 @@ class Manager:
                     "the recorded one again, Delete removes the instance"), "repair"
         if isinstance(installed, str) and own == installed and not known.get("updating"):
             return (f"{folder}/ holds the manager's definition of {own}, the installed version, but the manager's record "
-                    f"says {recorded}. This happens after restoring a folder and its app from an older backup, or "
-                    "after the Supervisor's own Update installed what the folder held. Record makes the manager's "
+                    f"says {recorded}. This happens after restoring a folder and its app from an older backup, after "
+                    "restoring only the manager from before an update made since, or after the Supervisor's own Update "
+                    "installed what the folder held. Record makes the manager's "
                     "record follow them (nothing is written or installed; a git instance's recorded commit is "
                     "downloaded only to compare its tree); Delete removes the instance"), "record"
         return (f"{folder}/ does not match the manager's record: it holds the manager's definition of {own}, the record "

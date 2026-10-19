@@ -671,6 +671,37 @@ class RestoreTest(unittest.IsolatedAsyncioTestCase):
         await self.lists()
         self.assertIn("garage", env.manager._rolled_back_seen)
 
+    async def test_a_repair_between_removing_and_writing_shows_only_its_job(self):
+        """E2E: while a Repair runs, between removing the folder and writing it again, the app is detached: its row
+        shows the running job and offers nothing (no second Repair, no "definition folder is gone")."""
+        env = self.env
+        await self.roll_back()
+        detached, reached, release = env.manager._detached, asyncio.Event(), asyncio.Event()
+
+        async def paused(*args, **kw):
+            result = await detached(*args, **kw)
+            reached.set()
+            await release.wait()
+            return result
+
+        with unittest.mock.patch.object(env.manager, "_detached", side_effect=paused):
+            status, body = await env.send("POST", "/api/instances/garage/repair")
+            self.assertEqual(status, 202, body)
+            try:
+                await asyncio.wait_for(reached.wait(), 5)
+                self.assertFalse(os.path.lexists(self.folder("garage")))
+                rows, others = await self.lists()
+            finally:
+                release.set()  # a failed check must not leave the job waiting forever
+            job = await env.job((status, body))
+        self.assertNotIn("local_hri_garage", others)
+        row = rows["garage"]
+        self.assertEqual((row["job"]["action"], row["job"]["state"]), ("repair", "running"))
+        self.assertEqual(row["actions"], [])
+        self.assertIsNone(row["problem"])
+        self.assertEqual(job["state"], "succeeded", job)
+        self.assertEqual(self.config("garage")["version"], "0.25.1")
+
     async def test_put_new_never_replaces_an_entry(self):
         env = self.env
         env.registry.put_new("attic", {"name": "attic"})
