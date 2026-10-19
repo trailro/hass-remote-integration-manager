@@ -1,5 +1,38 @@
 # Changelog
 
+## 0.2.2
+
+Partial restores, now that Supervisor 2026.10.0 puts the local apps folder back into full backups. Still
+**experimental**.
+
+- **Adopt a restored folder.** A folder with the manager's marker that its registry does not hold (an instance
+  deleted after the backup, then only the local apps folder restored; or created after the backup, then only the
+  manager restored) is listed as probably restored, with **Adopt** when it holds what the manager writes for the
+  version and channel its marker records (its `config.yaml` byte for byte; a git instance's commit is downloaded and
+  its whole tree compared). Adopt (name typed) records it again from its marker, keeping its id, slug and channel,
+  keeps a copy of its definition, and checks and records the installed app if there is one (refused while a decoy
+  names it). **Remove folder** (name typed) deletes such a folder only, while its app is not installed; one that
+  could be adopted needs that confirmed too.
+- **Record.** A folder that holds the manager's definition of the installed version while the manager's record says
+  another (a folder and app restored from before an update, the Supervisor's own Update of an older definition, or
+  only the manager restored after an update) gets **Record**: the record follows the folder and the app, nothing
+  written or installed (a git instance's recorded commit is downloaded only to compare its tree). Adopt and Record
+  keep a copy of the definition with the record, or record nothing.
+- **A folder rolled back by a restore of only the local apps folder is repaired automatically** from the manager's
+  copy, for release instances only: the Supervisor offered the older version as an update. Never downloading, only
+  once two checks a minute apart see it, and only while the Supervisor runs normally.
+- **Safe during a restore.** Nothing automatic while the Supervisor is not running normally (backup or restore in
+  progress); a Repair whose app the Supervisor changes meanwhile marks it needs attention instead of containing it.
+- **Repair of a folder keeps it until the replacement is ready**: the installed version's source (the manager's copy
+  or a download) is found and built once in a temporary folder first; if that fails, the folder is left as it is.
+- **Neutral words where the manager cannot tell who changed a folder.** The manager's own definition of another
+  version than its record "does not match the manager's record"; a store that only still offers an earlier reading
+  of the folder is reloaded once by the manager (Repair is refused for it); an instance whose folder is gone before
+  the store noticed is said so, and the store reloaded.
+  "Someone changed it" stays for a definition the manager would never write.
+- **Repair keeps the history readable** when the registry was behind the installed app: the entry says so, with both
+  versions.
+
 ## 0.2.1
 
 Fixes from a review. Still **experimental**.
