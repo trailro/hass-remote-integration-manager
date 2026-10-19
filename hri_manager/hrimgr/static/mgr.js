@@ -192,7 +192,7 @@ async function act(action, name) {
     if (!c) return;
     r = await send('DELETE', `api/instances/${encodeURIComponent(name)}`, {remove_data: c.removeData, confirm: c.confirm});
   } else if (action === 'record') {
-    const c = await dialog({title: `Record ${name}`, text: `hri_${name}/ holds the manager's own definition of the installed version, ${i.installed_version || '?'}, but the manager's record says another (a folder and app restored from an older backup, or the Supervisor's own Update). Record makes the manager's record follow them, after checking the folder and the installed app; nothing is written or installed${i.channel === 'git' ? ' (its recorded commit is downloaded only to compare its tree)' : ', and nothing is downloaded'}.`, ok: 'Record', name});
+    const c = await dialog({title: `Record ${name}`, text: `hri_${name}/ holds the manager's own definition of the installed version, ${i.installed_version || '?'}, but the manager's record says another (a folder and app restored from an older backup, only the manager restored from before an update made since, or the Supervisor's own Update). Record makes the manager's record follow them, after checking the folder and the installed app; nothing is written or installed${i.channel === 'git' ? ' (its recorded commit is downloaded only to compare its tree)' : ', and nothing is downloaded'}.`, ok: 'Record', name});
     if (!c) return;
     r = await send('POST', `api/instances/${encodeURIComponent(name)}/record`, {confirm: c.confirm});
   } else if (action === 'repair') {
