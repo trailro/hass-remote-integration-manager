@@ -242,7 +242,8 @@ class SupervisorClient:
         return pick(await self.call("GET", "/supervisor/info"), ("version", "version_latest", "channel", "arch", "healthy", "supported"))
 
     async def host_info(self) -> dict:
-        return pick(await self.call("GET", "/info"), ("supervisor", "homeassistant", "hassos", "arch", "machine"))
+        # state: the Supervisor's own (running; freeze while it makes or restores a backup, startup, shutdown...)
+        return pick(await self.call("GET", "/info"), ("supervisor", "homeassistant", "hassos", "arch", "machine", "state"))
 
     async def app_info(self, slug: str) -> dict:
         return pick(await self.call("GET", f"/addons/{slug}/info"), INFO_FIELDS)

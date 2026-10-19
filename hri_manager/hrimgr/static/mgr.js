@@ -89,7 +89,7 @@ function autoNote(i) {
   const count = a.failures > 1 ? ` (${a.failures} times)` : '';
   return `<span class="problem">automatic repair failed${esc(count)}: ${esc(a.error)}${esc(next)}. Repair tries now.</span>`;
 }
-const LABELS = {start: 'Start', stop: 'Stop', restart: 'Restart', update: 'Update', delete: 'Delete', repair: 'Repair', install: 'Install', finish: 'Finish setup'};
+const LABELS = {start: 'Start', stop: 'Stop', restart: 'Restart', update: 'Update', delete: 'Delete', repair: 'Repair', install: 'Install', finish: 'Finish setup', record: 'Record'};
 function actionsCell(i) {
   const busy = i.job && i.job.state === 'running';
   const link = panelHref(i);
@@ -123,7 +123,7 @@ async function loadInstances() {
   }).join('');
   $('#others tbody').querySelectorAll('button[data-forget]').forEach(b => { b.onclick = () => forget(b.dataset.forget); });
   $('#others tbody').querySelectorAll('button[data-adopt]').forEach(b => { b.onclick = () => restored('adopt', b.dataset.adopt); });
-  $('#others tbody').querySelectorAll('button[data-remove]').forEach(b => { b.onclick = () => restored('remove_folder', b.dataset.remove); });
+  $('#others tbody').querySelectorAll('button[data-remove]').forEach(b => { b.onclick = () => restored('remove_folder', b.dataset.remove, others.some(o => o.instance === b.dataset.remove && o.adoptable)); });
   body.querySelectorAll('button[data-act]').forEach(b => { b.onclick = () => act(b.dataset.act, b.dataset.name); });
   body.querySelectorAll('button[data-job]').forEach(b => { b.onclick = () => watch(b.dataset.job); });
 }
@@ -191,6 +191,10 @@ async function act(action, name) {
     const c = await dialog({title: `Delete ${name}`, text, ok: 'Delete', danger: true, data: installed, name});
     if (!c) return;
     r = await send('DELETE', `api/instances/${encodeURIComponent(name)}`, {remove_data: c.removeData, confirm: c.confirm});
+  } else if (action === 'record') {
+    const c = await dialog({title: `Record ${name}`, text: `hri_${name}/ holds the manager's own definition of the installed version, ${i.installed_version || '?'}, but the manager's record says another (a folder and app restored from an older backup, or the Supervisor's own Update). Record makes the manager's record follow them, after checking the folder and the installed app; nothing is downloaded, written or installed.`, ok: 'Record', name});
+    if (!c) return;
+    r = await send('POST', `api/instances/${encodeURIComponent(name)}/record`, {confirm: c.confirm});
   } else if (action === 'repair') {
     const c = await dialog({title: `Repair ${name}`, text: p ? `Gives up its update to ${p.version}, waiting to be finished: removes that definition and writes the one of the installed version (${i.installed_version || '?'}) again. Only when the Supervisor's log shows that update failed: if it still finished later, the installed app would no longer match its definition.` : 'Writes the definition folder again for the installed version, so the app can be updated and managed again.', ok: 'Repair'});
     if (!c) return;
@@ -214,13 +218,13 @@ async function forget(name) {
 
 // a folder with the manager's marker that its registry does not hold (restored from a backup without the manager's
 // record of it): Adopt takes it back, Remove folder deletes that folder only
-async function restored(action, name) {
+async function restored(action, name, adoptable) {
   const adopt = action === 'adopt';
   const c = await dialog(adopt
     ? {title: `Adopt ${name}`, text: `hri_${name}/ holds the manager's own definition, but the manager has no record of it (a partial restore). Adopt records it as this manager's instance again from its marker (the same id, slug and channel) and keeps a copy of its definition; nothing in the folder or the app is changed.`, ok: 'Adopt', name}
-    : {title: `Remove folder hri_${name}`, text: `Deletes hri_${name}/ from the local apps folder, and nothing else: its app is not installed, and the manager has no record of it. Create can then make ${name} again.`, ok: 'Remove folder', danger: true, name});
+    : {title: `Remove folder hri_${name}`, text: `Deletes hri_${name}/ from the local apps folder, and nothing else: its app is not installed, and the manager has no record of it. Create can then make ${name} again.${adoptable ? ' It holds what the manager writes and could be adopted instead.' : ''}`, ok: 'Remove folder', danger: true, name});
   if (!c) return;
-  const r = await send('POST', `api/instances/${encodeURIComponent(name)}/${action}`, {confirm: c.confirm});
+  const r = await send('POST', `api/instances/${encodeURIComponent(name)}/${action}`, {confirm: c.confirm, ...(adopt ? {} : {adoptable: !!adoptable})});
   if (!r.ok) { flash(r.error, 'err'); return; }
   watch(r.job.id);
   loadInstances();

@@ -136,6 +136,7 @@ class Stub:
         # release tags (short names, v0.26.3) from 0.26.0 on served without it all the same
         self.no_dynamic_port_refs: set[str] = set()
         self.store_override: dict[str, dict] = {}
+        self.sv_state = "running"  # GET /info's state: "freeze" while the Supervisor makes or restores a backup
         self.install_override: dict[str, dict] = {}
 
     # ---------------------------------------------------------------- Supervisor
@@ -322,7 +323,8 @@ class Stub:
                    "supported": True})
 
     async def info(self, request):
-        return ok({"supervisor": "2026.09.3", "homeassistant": "2026.9.3", "hassos": "18.3", "arch": "amd64", "machine": "qemux86-64"})
+        return ok({"supervisor": "2026.09.3", "homeassistant": "2026.9.3", "hassos": "18.3", "arch": "amd64", "machine": "qemux86-64",
+                   "state": self.sv_state})
 
     async def core_websocket(self, request):
         self.ws_connections += 1
