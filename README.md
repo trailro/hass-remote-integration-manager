@@ -602,8 +602,10 @@ registry, the administrator check, the secrets kept out of answers and logs.
   archives, never with the token); no redirect followed.
 - **Administrators only, checked by the app.** Through Home Assistant's ingress only: the app publishes no port, and
   it serves a request only when the connection comes from the Supervisor (`172.30.32.2`, checked on the socket, not
-  in a header). Being logged in to Home Assistant is not enough: any user may open an app's ingress, and the panel
-  being hidden from non-administrators (`panel_admin`) is only cosmetic. So on every request, pages and API alike,
+  in a header). Being logged in to Home Assistant is not enough: before Supervisor 2026.10.2 any user may open an app's ingress,
+  and the panel being hidden from non-administrators (`panel_admin`) is only cosmetic; from 2026.10.2 the Supervisor
+  itself refuses a non-administrator's ingress session for an app with `panel_admin` (the manager keeps it on), and
+  the manager's own check stays as the gate on older Supervisors and as a second one. So on every request, pages and API alike,
   the manager takes the user id the Supervisor's ingress sets (`X-Remote-User-Id`) and asks Home Assistant whether
   that user is an administrator. The Supervisor drops a client's own copy of that header only in its exact spelling,
   and a copy in another spelling (`x-remote-user-id`) replaces the Supervisor's value on the way; so the id header must
