@@ -113,7 +113,8 @@ on their side. The manager's checks of what it installs are defence in depth, be
 accidents, simple tampering and many deliberate attempts, and guarantee nothing against that person. Do not give that
 access to anyone you do not trust. What holds against everyone else (users who are not administrators, the network)
 is the allow-list of Supervisor calls, and the administrator check: the manager's UI is reachable only through Home
-Assistant, and only by Home Assistant's administrators (the panel is hidden from other users, and the app checks it on
-its side too, on every request: it asks Home Assistant, and refuses when it cannot).
+Assistant, and only by Home Assistant's administrators (from Supervisor 2026.10.2 the Supervisor refuses other users'
+ingress sessions; before that the panel is only hidden from them. The app checks it on its side too, on every request:
+it asks Home Assistant, and refuses when it cannot).
 
 Full documentation: [README](https://github.com/trailro/hass-remote-integration-manager/blob/main/README.md).

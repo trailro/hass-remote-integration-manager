@@ -1,8 +1,9 @@
 """Home Assistant Core's websocket API, through the Supervisor's proxy, for one question: is this user an administrator?
 
 The Supervisor's ingress says WHO is asking (``X-Remote-User-Id``, set from the ingress session), never whether that
-user is an administrator, and any logged-in user may open an app's ingress (Core lets non-administrators create an
-ingress session; ``panel_admin`` only hides the panel).  So the manager asks Core: ``config/auth/list`` lists the
+user is an administrator, and before Supervisor 2026.10.2 any logged-in user may open an app's ingress (Core lets
+non-administrators create an ingress session; ``panel_admin`` only hid the panel, and from 2026.10.2 the Supervisor
+refuses them for a ``panel_admin`` app, which this check keeps covering on older Supervisors).  So the manager asks Core: ``config/auth/list`` lists the
 users with ``is_owner``, ``is_active`` and ``group_ids``, from which ``is_admin`` follows as in Core's
 ``auth/models.py`` (the answer has no ``is_admin`` field).  The proxy, ``ws://supervisor/core/websocket``,
 authenticates the app by its Supervisor token and needs ``homeassistant_api: true`` in config.yaml.

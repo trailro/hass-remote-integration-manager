@@ -1,8 +1,9 @@
 """The web UI and API, served only through Home Assistant's ingress, and only to Home Assistant's administrators.
 
 The app publishes no port, and a request is served only when its TRANSPORT peer (not a header) is the Supervisor,
-which proxies ingress from the hassio network.  Being logged in to Home Assistant is not enough: any user may open an
-app's ingress (``panel_admin`` only hides the panel), so every request, page and API alike, is checked here:
+which proxies ingress from the hassio network.  Being logged in to Home Assistant is not enough: before Supervisor
+2026.10.2 any user may open an app's ingress (``panel_admin`` only hid the panel; from 2026.10.2 the Supervisor refuses
+non-administrators itself), so every request, page and API alike, is checked here:
 
 - the Supervisor sets ``X-Remote-User-Id`` (and ``X-Remote-User-Name``) from the ingress session, spelled exactly so
   (its const.py; checked on the wire with its own _init_header and aiohttp).  It drops a client's copy only in that
