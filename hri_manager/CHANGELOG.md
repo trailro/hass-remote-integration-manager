@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.2.3
+
+Maintenance. Still **experimental**.
+
+- **Supervisor 2026.10.2 and newer close the manager's ingress to non-administrators themselves**
+  (`panel_admin`, left at its default). The docs say so now. The manager still checks every request with Home
+  Assistant, which remains the only gate on older Supervisors.
+- **aiohttp 3.14.5** (from 3.14.3), and updated GitHub Actions in CI and the Image workflow.
+- Checked with Supervisor 2026.10.5 and Home Assistant 2026.11 (beta). An administrator gets the manager, another
+  user gets 403, and instance actions work.
+
 ## 0.2.2
 
 Partial restores, now that Supervisor 2026.10.0 puts the local apps folder back into full backups. Still

@@ -13,7 +13,7 @@ sidebar panel, **Configuration** tab, data folder, logs and backups.
 HRI itself is unchanged and stays the source of truth: the manager takes each instance's definition from the HRI
 release you choose. On a plain Docker install you do not need this: run one HRI container per integration.
 
-**Status: 0.2.2, experimental.** Home Assistant OS only (the Supervisor's local apps folder is required).
+**Status: 0.2.3, experimental.** Home Assistant OS only (the Supervisor's local apps folder is required).
 
 ## What it looks like
 
@@ -604,7 +604,7 @@ registry, the administrator check, the secrets kept out of answers and logs.
   it serves a request only when the connection comes from the Supervisor (`172.30.32.2`, checked on the socket, not
   in a header). Being logged in to Home Assistant is not enough: before Supervisor 2026.10.2 any user may open an app's ingress,
   and the panel being hidden from non-administrators (`panel_admin`) is only cosmetic; from 2026.10.2 the Supervisor
-  itself refuses a non-administrator's ingress session for an app with `panel_admin` (the manager keeps it on), and
+  itself refuses a non-administrator's ingress session for an app with `panel_admin` (the manager's config.yaml leaves it at its default, on), and
   the manager's own check stays as the gate on older Supervisors and as a second one. So on every request, pages and API alike,
   the manager takes the user id the Supervisor's ingress sets (`X-Remote-User-Id`) and asks Home Assistant whether
   that user is an administrator. The Supervisor drops a client's own copy of that header only in its exact spelling,
